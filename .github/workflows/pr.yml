@@ -4,6 +4,12 @@ on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
 
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   title:
     uses: contest-keeper/.github/.github/workflows/pr-title.yml@main
+  common:
+    uses: contest-keeper/.github/.github/workflows/common-ci.yml@main
