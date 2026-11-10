@@ -1,0 +1,10 @@
+{
+  "extraKnownMarketplaces": {
+    "contest-keeper": {
+      "source": { "source": "github", "repo": "contest-keeper/.github" }
+    }
+  },
+  "enabledPlugins": {
+    "ck@contest-keeper": true
+  }
+}
