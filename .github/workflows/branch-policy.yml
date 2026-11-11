@@ -1,0 +1,34 @@
+name: Branch policy
+
+on:
+  pull_request_target:
+    branches: [main, develop]
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  branch-policy:
+    runs-on: ubuntu-latest
+    steps:
+      # Inspect trusted event metadata only; never check out or run PR code here.
+      - name: Validate promotion source
+        env:
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+          BASE_REPOSITORY: ${{ github.repository }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import sys
+
+          base = os.environ["BASE_BRANCH"]
+          head = os.environ["HEAD_BRANCH"]
+          same_repository = os.environ["BASE_REPOSITORY"] == os.environ["HEAD_REPOSITORY"]
+          if base == "main" and (head != "develop" or not same_repository):
+              print("::error::Only this repository's develop branch may be promoted to main.")
+              sys.exit(1)
+          print("Branch policy passed.")
+          PY
