@@ -14,7 +14,10 @@ Run before committing: cargo fmt --all; cargo clippy --all-targets -- -D warning
 
 ## Rules
 
-- Work on a branch (`feature/`, `fix/`, `chore/`, `docs/`, `epic/`), never on `main`.
+- Create work branches (`feature/`, `fix/`, `chore/`, `docs/`, `epic/`) from `develop`.
+  Open feature PRs into `develop`; only `develop` may be promoted to `main`.
+  Never commit directly to `main` or `develop`. Feature PRs use squash merges;
+  promotions into `main` use merge commits after all required checks pass.
 - Commit and PR titles: `type: lowercase imperative subject` (e.g. `feat: add ESP config reader`).
 - No `Co-Authored-By` trailers, "Generated with" lines or other tool attribution in commits or PRs.
 - Never store, log or send passwords, cookies, session ids or tokens. The user types credentials.
