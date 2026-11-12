@@ -10,12 +10,14 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+argon2 = "0.6.0"
 axum = "0.8.9"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
 ck-crypto = { git = "https://github.com/contest-keeper/ck-protocol", rev = "2503ab9fbb3be77089307adb5cbf9ff83469cd13", version = "0.1.0" }
 ck-protocol = { git = "https://github.com/contest-keeper/ck-protocol", rev = "2503ab9fbb3be77089307adb5cbf9ff83469cd13", version = "0.1.0" }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 postgres = { version = "0.19.14", features = ["with-chrono-0_4", "with-serde_json-1"] }
+rpassword = "7.5.5"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"

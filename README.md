@@ -24,9 +24,12 @@ cargo run -p ck-hub -- --registry ck-registry.json --log hub.log
 
 | Route | What it does |
 |---|---|
+| `POST /api/v1/login` | An organizer logs in with `{"username", "password"}`. The answer sets the `ck_session` cookie (`HttpOnly; Secure; SameSite=Strict`, 12 hours). `401` for a wrong name or password, with the same answer for both, and `429` after 5 wrong passwords for one name (locked for 5 minutes) or 60 in a minute for all names. |
+| `POST /api/v1/logout` | Ends the session on the server and clears the cookie. |
+| `GET /api/v1/me` | Who the session belongs to and their role. `401` without a valid session. |
 | `GET /` | The page organizers watch: every stick with its status, last heartbeat, computer name, uptime and recorder. It reads `/api/v1/sticks` every 5 seconds. It is one file with no outside resources, so it works with no internet. |
 | `POST /api/v1/heartbeat` | A stick sends a heartbeat. The body is signed with the stick's secret (HMAC-SHA256, hex) in `X-CK-Signature`, and the stick id is in `X-CK-Stick`. `400` for a malformed message, `401` for an unknown stick or a bad signature (the two look the same), `409` for a sequence number that is not newer within the same boot. |
-| `GET /api/v1/sticks` | Every stick the admin made, with its last heartbeat and whether it is online (a heartbeat in the last 60 seconds). |
+| `GET /api/v1/sticks` | Needs a session (any role). Every stick the admin made, with its last heartbeat and whether it is online (a heartbeat in the last 60 seconds). |
 
 
 ## Tests with PostgreSQL
@@ -41,3 +44,20 @@ CK_TEST_DATABASE_URL=postgres://postgres:ck-test-only@127.0.0.1:54329/ckhub carg
 
 Events in the database are append-only: the database itself refuses to change or delete them, so
 every test uses ids no earlier run used.
+
+## Organizer accounts
+
+The page and the stick list are only for organizers. Accounts need the database:
+
+```sh
+ck-hub create-user ana --database-url postgres://user:password@localhost/ckhub
+```
+
+The password (at least 12 characters) is asked for at a prompt without echo, twice. It is never taken
+from an argument or the environment, so it is not left in a shell history or a process list. `--role`
+is `admin` (default) or `viewer`. Only an Argon2id hash of the password is stored, and only a hash of
+each session token, so a copy of the database cannot be used to log in.
+
+The cookie is `Secure`, so run the Hub behind HTTPS (the browser also accepts it on `localhost`).
+Sticks do not use accounts: their heartbeats and events are signed with their own secret.
+A Hub started without a database has no accounts, so nobody can look at it.

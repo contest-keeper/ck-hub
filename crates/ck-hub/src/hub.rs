@@ -9,6 +9,7 @@ use ck_protocol::{Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, S
 use serde::Serialize;
 use serde_json::json;
 
+use crate::accounts::{Accounts, PasswordCost};
 use crate::registry::Registry;
 use crate::store::{Store, StoreError, StoredEvent};
 
@@ -73,12 +74,13 @@ pub struct LastHeartbeat {
 
 pub struct Hub {
     registry: Mutex<Registry>,
-    store: Box<dyn Store>,
+    pub(crate) store: Box<dyn Store>,
+    pub(crate) accounts: Accounts,
     /// One message at a time is read, judged and kept, so two heartbeats of one stick cannot both
     /// pass the sequence check.
     write: Mutex<()>,
     log: Option<Mutex<File>>,
-    clock: Box<dyn Fn() -> DateTime<Utc> + Send + Sync>,
+    pub(crate) clock: Box<dyn Fn() -> DateTime<Utc> + Send + Sync>,
 }
 
 impl Hub {
@@ -92,10 +94,18 @@ impl Hub {
         Self {
             registry: Mutex::new(registry),
             store,
+            accounts: Accounts::new(PasswordCost::default()),
             write: Mutex::new(()),
             log: log.map(Mutex::new),
             clock,
         }
+    }
+
+    /// Changes how much work hashing a password takes, for a machine that can afford more or less.
+    #[must_use]
+    pub fn with_password_cost(mut self, cost: PasswordCost) -> Self {
+        self.accounts = Accounts::new(cost);
+        self
     }
 
     /// Checks a heartbeat and, when it is fine, remembers it. Returns its sequence number.

@@ -34,12 +34,30 @@
   .mono { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
   .muted { color: var(--muted); }
   td.warn { color: var(--off); font-weight: 600; white-space: normal; min-width: 180px; }
+  #login { display: none; max-width: 340px; margin: 40px auto; padding: 20px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  #login h2 { margin: 0 0 12px; font-size: 18px; }
+  #login label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 13px; }
+  #login input { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: inherit; }
+  #login button, #who button { margin-top: 14px; padding: 8px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fg); font: inherit; cursor: pointer; }
+  #login-error { color: var(--off); min-height: 1.4em; margin-top: 8px; }
+  #who { display: none; float: right; color: var(--muted); font-size: 14px; }
+  #who button { margin: 0 0 0 10px; padding: 2px 10px; }
   #empty { display: none; padding: 20px 12px; color: var(--muted); }
 </style>
 </head>
 <body>
 <main>
+  <div id="who"><span id="who-name"></span><button id="logout" type="button">Log out</button></div>
   <h1>Keeper Hub</h1>
+  <form id="login" autocomplete="on">
+    <h2>Log in</h2>
+    <label for="user">Name</label>
+    <input id="user" name="username" autocomplete="username" required>
+    <label for="pass">Password</label>
+    <input id="pass" name="password" type="password" autocomplete="current-password" required>
+    <button type="submit">Log in</button>
+    <div id="login-error" role="alert"></div>
+  </form>
   <div id="summary">Loading…</div>
   <div id="problem">The Hub cannot be reached. The list below is the last one received.</div>
   <div class="wrap">
@@ -103,8 +121,7 @@ function render(sticks) {
     cell(row, last ? String(last.heartbeats) : "", "num");
     cell(row, last ? last.image_version : "", "muted");
     const warning = cell(row, stick.warnings.join(" · "), "warn");
-    if (stick.warnings.length) warning.title = stick.warnings.join("
-");
+    if (stick.warnings.length) warning.title = stick.warnings.join(String.fromCharCode(10));
     body.appendChild(row);
   }
   document.getElementById("empty").style.display = sticks.length ? "none" : "block";
@@ -112,17 +129,54 @@ function render(sticks) {
     sticks.length + (sticks.length === 1 ? " stick" : " sticks") + " · " + online + " online";
 }
 
+function showLogin(visible) {
+  document.getElementById("login").style.display = visible ? "block" : "none";
+  document.querySelector(".wrap").style.display = visible ? "none" : "block";
+  document.getElementById("summary").style.display = visible ? "none" : "block";
+  document.getElementById("who").style.display = visible ? "none" : "block";
+}
+
 async function refresh() {
   const problem = document.getElementById("problem");
   try {
     const response = await fetch("/api/v1/sticks", { cache: "no-store" });
+    if (response.status === 401) { showLogin(true); problem.style.display = "none"; return; }
     if (!response.ok) throw new Error("HTTP " + response.status);
+    showLogin(false);
     render(await response.json());
     problem.style.display = "none";
+    const me = await fetch("/api/v1/me", { cache: "no-store" });
+    if (me.ok) {
+      const account = await me.json();
+      document.getElementById("who-name").textContent = account.username + " (" + account.role + ")";
+    }
   } catch (error) {
     problem.style.display = "block";
   }
 }
+
+document.getElementById("login").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const message = document.getElementById("login-error");
+  message.textContent = "";
+  const response = await fetch("/api/v1/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      username: document.getElementById("user").value,
+      password: document.getElementById("pass").value,
+    }),
+  });
+  document.getElementById("pass").value = "";
+  if (response.ok) { await refresh(); return; }
+  try { message.textContent = (await response.json()).error; }
+  catch (error) { message.textContent = "Could not log in."; }
+});
+
+document.getElementById("logout").addEventListener("click", async () => {
+  await fetch("/api/v1/logout", { method: "POST" });
+  await refresh();
+});
 
 refresh();
 setInterval(refresh, REFRESH_MS);

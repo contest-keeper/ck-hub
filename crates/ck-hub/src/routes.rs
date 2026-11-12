@@ -6,13 +6,18 @@ use axum::Json;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, State};
+use axum::http::header::{COOKIE, SET_COOKIE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use ck_protocol::{HEARTBEAT_PATH, SIGNATURE_HEADER, STICK_HEADER};
 use serde_json::json;
 
+use serde::Deserialize;
+
+use crate::accounts::{AccessError, Account, LoginError, SESSION_LIFETIME_HOURS};
 use crate::hub::{Hub, Rejection, StickView};
+use crate::store::Role;
 
 /// The page organizers watch. It is one file with no outside resources, so it works on a network
 /// with no internet.
@@ -30,6 +35,9 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route(HEARTBEAT_PATH, post(heartbeat))
         .route(EVENTS_PATH, post(event))
         .route("/api/v1/sticks", get(sticks))
+        .route("/api/v1/login", post(login))
+        .route("/api/v1/logout", post(logout))
+        .route("/api/v1/me", get(me))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(hub)
 }
@@ -72,7 +80,10 @@ async fn page() -> Html<&'static str> {
     Html(PAGE)
 }
 
-async fn sticks(State(hub): State<Arc<Hub>>) -> Response {
+async fn sticks(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Response {
+    if let Err(reason) = require(&hub, &headers, Role::Viewer).await {
+        return denied(reason);
+    }
     match tokio::task::spawn_blocking(move || hub.sticks()).await {
         Ok(Ok(sticks)) => Json::<Vec<StickView>>(sticks).into_response(),
         Ok(Err(error)) => {
@@ -101,4 +112,107 @@ fn auth_headers(headers: &HeaderMap) -> (Option<String>, Option<String>) {
             .map(str::to_owned)
     };
     (get(STICK_HEADER), get(SIGNATURE_HEADER))
+}
+
+/// The name of the cookie that holds the session token.
+const SESSION_COOKIE: &str = "ck_session";
+
+#[derive(Deserialize)]
+struct LoginBody {
+    username: String,
+    password: String,
+}
+
+async fn login(State(hub): State<Arc<Hub>>, Json(body): Json<LoginBody>) -> Response {
+    // Hashing a password is slow on purpose, so it runs off the request threads.
+    let result =
+        tokio::task::spawn_blocking(move || hub.login(&body.username, &body.password)).await;
+    match result {
+        Ok(Ok((token, account))) => (
+            [(
+                SET_COOKIE,
+                session_cookie(&token, SESSION_LIFETIME_HOURS * 3600),
+            )],
+            Json(account_json(&account)),
+        )
+            .into_response(),
+        Ok(Err(LoginError::BadCredentials)) => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "wrong name or password" })),
+        )
+            .into_response(),
+        Ok(Err(LoginError::TooManyAttempts)) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": "too many wrong passwords, wait a few minutes" })),
+        )
+            .into_response(),
+        Ok(Err(LoginError::Unavailable)) | Err(_) => unavailable(),
+    }
+}
+
+async fn logout(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Response {
+    if let Some(token) = session_token(&headers) {
+        let _ = tokio::task::spawn_blocking(move || hub.logout(&token)).await;
+    }
+    // The browser is told to forget the cookie whether or not there was a session.
+    (
+        [(SET_COOKIE, session_cookie("", 0))],
+        Json(json!({ "ok": true })),
+    )
+        .into_response()
+}
+
+async fn me(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Response {
+    match require(&hub, &headers, Role::Viewer).await {
+        Ok(account) => Json(account_json(&account)).into_response(),
+        Err(reason) => denied(reason),
+    }
+}
+
+fn account_json(account: &Account) -> serde_json::Value {
+    json!({ "username": account.name, "role": account.role.as_str() })
+}
+
+/// The cookie that carries a session. `HttpOnly` keeps scripts from reading it, `SameSite=Strict`
+/// keeps other sites from using it, and `Secure` keeps it off plain HTTP, so run the Hub behind HTTPS.
+fn session_cookie(token: &str, max_age_seconds: i64) -> String {
+    format!(
+        "{SESSION_COOKIE}={token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={max_age_seconds}"
+    )
+}
+
+fn session_token(headers: &HeaderMap) -> Option<String> {
+    let cookies = headers.get(COOKIE)?.to_str().ok()?;
+    cookies
+        .split(';')
+        .filter_map(|cookie| cookie.trim().strip_prefix("ck_session="))
+        .find(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+/// Why a request was not allowed: the status to answer with and a short text.
+type Denied = (StatusCode, &'static str);
+
+fn denied(denied: Denied) -> Response {
+    (denied.0, Json(json!({ "error": denied.1 }))).into_response()
+}
+
+/// The organizer behind the request, or why not: 401 when there is no valid session, 403 when the
+/// role is not enough, 503 when the data cannot be read.
+async fn require(hub: &Arc<Hub>, headers: &HeaderMap, needed: Role) -> Result<Account, Denied> {
+    let Some(token) = session_token(headers) else {
+        return Err((StatusCode::UNAUTHORIZED, "log in first"));
+    };
+    let hub = Arc::clone(hub);
+    match tokio::task::spawn_blocking(move || hub.access(&token, needed)).await {
+        Ok(Ok(account)) => Ok(account),
+        Ok(Err(AccessError::Unauthorized)) => Err((StatusCode::UNAUTHORIZED, "log in first")),
+        Ok(Err(AccessError::Forbidden)) => {
+            Err((StatusCode::FORBIDDEN, "this needs a different role"))
+        }
+        Ok(Err(AccessError::Unavailable)) | Err(_) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the Hub cannot read its data right now",
+        )),
+    }
 }

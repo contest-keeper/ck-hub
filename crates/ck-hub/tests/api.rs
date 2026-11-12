@@ -5,7 +5,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{DateTime, Duration, Utc};
-use ck_hub::{Hub, MemoryStore, ONLINE_WINDOW_SECONDS, Registry, router};
+use ck_hub::{Hub, MemoryStore, ONLINE_WINDOW_SECONDS, PasswordCost, Registry, Role, router};
 use ck_protocol::{
     Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, RecorderStatus, RecordingMode,
     SIGNATURE_HEADER, STICK_HEADER, StickId, Token,
@@ -16,6 +16,7 @@ use tower::ServiceExt;
 
 const TOKEN_A: &str = "token-of-stick-a";
 const TOKEN_B: &str = "token-of-stick-b";
+const ORGANIZER_PASSWORD: &str = "correct horse battery";
 
 struct Setup {
     dir: TempDir,
@@ -62,12 +63,15 @@ fn setup() -> Setup {
         let now = Arc::clone(&now);
         Box::new(move || *now.lock().expect("clock"))
     };
-    let app = router(Arc::new(Hub::new(
-        registry,
-        Box::new(MemoryStore::default()),
-        Some(log),
-        clock,
-    )));
+    // Hashing is made cheap here: the tests log in many times.
+    let hub = Hub::new(registry, Box::new(MemoryStore::default()), Some(log), clock)
+        .with_password_cost(PasswordCost {
+            memory_kib: 8,
+            passes: 1,
+        });
+    hub.create_user("organizer", ORGANIZER_PASSWORD, Role::Viewer)
+        .expect("an organizer");
+    let app = router(Arc::new(hub));
     Setup { dir, app, now }
 }
 
@@ -130,11 +134,31 @@ async fn heartbeat(app: &Router, boot: &str, seq: u64) -> (StatusCode, String) {
     send(app, Some("stick-a"), Some(&signature), body).await
 }
 
+/// Logs in as the organizer and returns the cookie to send back.
+async fn organizer_cookie(app: &Router) -> String {
+    let request = Request::post("/api/v1/login")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({ "username": "organizer", "password": ORGANIZER_PASSWORD })
+                .to_string(),
+        ))
+        .expect("request");
+    let response = app.clone().oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let set = response.headers()["set-cookie"]
+        .to_str()
+        .expect("text")
+        .to_owned();
+    set.split(';').next().expect("cookie").to_owned()
+}
+
 async fn list(app: &Router) -> serde_json::Value {
+    let cookie = organizer_cookie(app).await;
     let response = app
         .clone()
         .oneshot(
             Request::get("/api/v1/sticks")
+                .header("cookie", cookie)
                 .body(Body::empty())
                 .expect("request"),
         )
@@ -571,4 +595,43 @@ async fn two_different_users_in_one_boot_are_a_warning_but_a_new_boot_starts_cle
     let stick = &list(&setup.app).await[0];
     assert_eq!(stick["current_user"], "cris");
     assert!(!stick["warnings"].to_string().contains("different users"));
+}
+
+/// A script that does not parse leaves the page blank, with nothing to say why, and a Rust test
+/// cannot run a browser. Node can at least read the script, so this checks it when Node is there.
+#[tokio::test]
+async fn the_page_script_is_valid_javascript() {
+    let setup = setup();
+    let response = setup
+        .app
+        .clone()
+        .oneshot(Request::get("/").body(Body::empty()).expect("request"))
+        .await
+        .expect("response");
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let page = String::from_utf8_lossy(&bytes);
+    let start = page.find("<script>").expect("a script") + "<script>".len();
+    let end = page.find("</script>").expect("the end of the script");
+
+    let file = setup.dir.path().join("page.js");
+    fs::write(&file, &page[start..end]).expect("write the script");
+    let Ok(output) = std::process::Command::new("node")
+        .arg("--check")
+        .arg(&file)
+        .output()
+    else {
+        eprintln!("skipped: Node is not installed, so the page script was not parsed");
+        return;
+    };
+    assert!(
+        output.status.success(),
+        "the page script does not parse:
+{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

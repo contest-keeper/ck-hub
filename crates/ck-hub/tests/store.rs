@@ -6,7 +6,7 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
-use ck_hub::{Hub, MemoryStore, PostgresStore, Registry, Rejection, Store};
+use ck_hub::{Hub, MemoryStore, PasswordCost, PostgresStore, Registry, Rejection, Role, Store};
 use ck_protocol::{
     Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, RecorderStatus, RecordingMode,
     StickId, Token,
@@ -251,12 +251,28 @@ async fn a_hub_on_postgres_answers_real_http_requests() {
         .await
         .expect("join")
         .expect("connect");
-    let app = ck_hub::router(std::sync::Arc::new(Hub::new(
+    let hub = Hub::new(
         Registry::open(dir.path().join("registry.json")).expect("registry"),
         Box::new(store),
         None,
         Box::new(Utc::now),
-    )));
+    )
+    .with_password_cost(PasswordCost {
+        memory_kib: 8,
+        passes: 1,
+    });
+    let organizer = format!("{stick}-organizer");
+    let hub = std::sync::Arc::new(hub);
+    // The database client blocks, so even a test must not call it from async code.
+    let for_user = std::sync::Arc::clone(&hub);
+    let organizer_name = organizer.clone();
+    tokio::task::spawn_blocking(move || {
+        for_user.create_user(&organizer_name, "correct horse battery", Role::Viewer)
+    })
+    .await
+    .expect("join")
+    .expect("an organizer");
+    let app = ck_hub::router(hub);
 
     let body = serde_json::to_vec(&heartbeat(&stick, "boot-1", 1)).expect("json");
     let request = Request::post("/api/v1/heartbeat")
@@ -270,9 +286,30 @@ async fn a_hub_on_postgres_answers_real_http_requests() {
     let response = app.clone().oneshot(request).await.expect("response");
     assert_eq!(response.status(), StatusCode::OK);
 
+    let login = Request::post("/api/v1/login")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({ "username": organizer, "password": "correct horse battery" })
+                .to_string(),
+        ))
+        .expect("request");
+    let login = app.clone().oneshot(login).await.expect("response");
+    assert_eq!(
+        login.status(),
+        StatusCode::OK,
+        "sessions work on PostgreSQL too"
+    );
+    let cookie = login.headers()["set-cookie"]
+        .to_str()
+        .expect("text")
+        .split(';')
+        .next()
+        .expect("cookie")
+        .to_owned();
     let response = app
         .oneshot(
             Request::get("/api/v1/sticks")
+                .header("cookie", cookie)
                 .body(Body::empty())
                 .expect("request"),
         )
