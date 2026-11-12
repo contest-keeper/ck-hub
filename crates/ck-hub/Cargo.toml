@@ -12,8 +12,8 @@ workspace = true
 [dependencies]
 axum = "0.8.9"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
-ck-crypto = { git = "https://github.com/contest-keeper/ck-protocol", rev = "abf69fab780bb3d12ab73b18e3c4c99593a9aa5f", version = "0.1.0" }
-ck-protocol = { git = "https://github.com/contest-keeper/ck-protocol", rev = "abf69fab780bb3d12ab73b18e3c4c99593a9aa5f", version = "0.1.0" }
+ck-crypto = { git = "https://github.com/contest-keeper/ck-protocol", rev = "2503ab9fbb3be77089307adb5cbf9ff83469cd13", version = "0.1.0" }
+ck-protocol = { git = "https://github.com/contest-keeper/ck-protocol", rev = "2503ab9fbb3be77089307adb5cbf9ff83469cd13", version = "0.1.0" }
 clap = { version = "4.6.7", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

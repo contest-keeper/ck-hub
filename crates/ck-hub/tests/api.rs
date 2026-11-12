@@ -7,8 +7,8 @@ use axum::http::{Request, StatusCode};
 use chrono::{DateTime, Duration, Utc};
 use ck_hub::{Hub, ONLINE_WINDOW_SECONDS, Registry, router};
 use ck_protocol::{
-    Heartbeat, RecorderState, RecorderStatus, RecordingMode, SIGNATURE_HEADER, STICK_HEADER,
-    StickId, Token,
+    Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, RecorderStatus, RecordingMode,
+    SIGNATURE_HEADER, STICK_HEADER, StickId, Token,
 };
 use http_body_util::BodyExt;
 use tempfile::TempDir;
@@ -396,4 +396,174 @@ async fn the_page_is_served_and_needs_nothing_from_outside() {
         !page.contains("innerHTML"),
         "stick names must not be put into the page as markup"
     );
+}
+
+fn event_bytes(boot: &str, seq: u64, prev_hash: &str, user: &str) -> Vec<u8> {
+    Event {
+        stick_id: StickId::parse("stick-a").expect("id"),
+        boot_id: boot.to_owned(),
+        seq,
+        prev_hash: prev_hash.to_owned(),
+        sent_at: "2026-11-12T10:00:00Z".parse().expect("time"),
+        kind: EventKind::Login,
+        payload: serde_json::json!({ "username": user }),
+    }
+    .canonical_bytes()
+}
+
+/// A properly chained event, signed by stick A, posted to the events route. Returns what the Hub
+/// answered and the hash the next event of the chain must name.
+async fn send_event(
+    app: &Router,
+    boot: &str,
+    seq: u64,
+    prev_hash: &str,
+    user: &str,
+) -> (StatusCode, String) {
+    let body = event_bytes(boot, seq, prev_hash, user);
+    let request = Request::post("/api/v1/events")
+        .header(STICK_HEADER, "stick-a")
+        .header(SIGNATURE_HEADER, sign(TOKEN_A, &body))
+        .body(Body::from(body))
+        .expect("request");
+    let response = app.clone().oneshot(request).await.expect("response");
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn next_hash(boot: &str, seq: u64, prev_hash: &str, user: &str) -> String {
+    ck_crypto::sha256_hex(&event_bytes(boot, seq, prev_hash, user))
+}
+
+#[tokio::test]
+async fn a_chained_login_event_shows_who_is_logged_in() {
+    let setup = setup();
+    let first = send_event(&setup.app, "b1", 1, FIRST_PREV_HASH, "ana").await;
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+    let h1 = next_hash("b1", 1, FIRST_PREV_HASH, "ana");
+    assert_eq!(
+        send_event(&setup.app, "b1", 2, &h1, "ana").await.0,
+        StatusCode::OK
+    );
+
+    let sticks = list(&setup.app).await;
+    assert_eq!(sticks[0]["events"], 2);
+    assert_eq!(sticks[0]["current_user"], "ana");
+    assert_eq!(
+        sticks[0]["warnings"],
+        serde_json::json!([]),
+        "a clean chain, one user"
+    );
+    assert!(sticks[1]["current_user"].is_null());
+}
+
+#[tokio::test]
+async fn an_event_the_hub_already_has_is_a_conflict_and_forged_ones_are_refused() {
+    let setup = setup();
+    assert_eq!(
+        send_event(&setup.app, "b1", 1, FIRST_PREV_HASH, "ana")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        send_event(&setup.app, "b1", 1, FIRST_PREV_HASH, "ana")
+            .await
+            .0,
+        StatusCode::CONFLICT,
+        "the stick counts a 409 as sent"
+    );
+
+    let body = event_bytes("b1", 2, "x", "ana");
+    let request = Request::post("/api/v1/events")
+        .header(STICK_HEADER, "stick-a")
+        .header(SIGNATURE_HEADER, sign("wrong", &body))
+        .body(Body::from(body.clone()))
+        .expect("request");
+    let response = setup.app.clone().oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // Signed by stick B but saying it is from stick A.
+    let request = Request::post("/api/v1/events")
+        .header(STICK_HEADER, "stick-b")
+        .header(SIGNATURE_HEADER, sign(TOKEN_B, &body))
+        .body(Body::from(body))
+        .expect("request");
+    let response = setup.app.clone().oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(list(&setup.app).await[0]["events"], 1);
+}
+
+#[tokio::test]
+async fn a_gap_a_changed_event_and_a_late_start_are_kept_as_warnings_not_refused() {
+    let setup = setup();
+    assert_eq!(
+        send_event(&setup.app, "b1", 1, FIRST_PREV_HASH, "ana")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    // Event 2 never arrives; event 3 does.
+    let h2 = next_hash("b1", 2, "whatever", "ana");
+    assert_eq!(
+        send_event(&setup.app, "b1", 3, &h2, "ana").await.0,
+        StatusCode::OK
+    );
+    // Event 4 does not follow event 3: it names another previous hash.
+    assert_eq!(
+        send_event(&setup.app, "b1", 4, "forged", "ana").await.0,
+        StatusCode::OK
+    );
+    // The Hub has seen nothing of boot b2 before event 5.
+    assert_eq!(
+        send_event(&setup.app, "b2", 5, "x", "ana").await.0,
+        StatusCode::OK
+    );
+
+    let warnings = list(&setup.app).await[0]["warnings"].to_string();
+    assert!(warnings.contains("missing"), "{warnings}");
+    assert!(warnings.contains("does not follow"), "{warnings}");
+    assert!(warnings.contains("no earlier events"), "{warnings}");
+}
+
+#[tokio::test]
+async fn two_different_users_in_one_boot_are_a_warning_but_a_new_boot_starts_clean() {
+    let setup = setup();
+    assert_eq!(
+        send_event(&setup.app, "b1", 1, FIRST_PREV_HASH, "ana")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let h1 = next_hash("b1", 1, FIRST_PREV_HASH, "ana");
+    assert_eq!(
+        send_event(&setup.app, "b1", 2, &h1, "bob").await.0,
+        StatusCode::OK
+    );
+
+    let stick = &list(&setup.app).await[0];
+    assert_eq!(stick["current_user"], "bob");
+    let warnings = stick["warnings"].to_string();
+    assert!(warnings.contains("2 different users"), "{warnings}");
+    assert!(
+        warnings.contains("ana") && warnings.contains("bob"),
+        "{warnings}"
+    );
+
+    // After a reboot only the new boot counts: one user, no warning about users.
+    assert_eq!(
+        send_event(&setup.app, "b2", 1, FIRST_PREV_HASH, "cris")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let stick = &list(&setup.app).await[0];
+    assert_eq!(stick["current_user"], "cris");
+    assert!(!stick["warnings"].to_string().contains("different users"));
 }

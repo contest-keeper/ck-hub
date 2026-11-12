@@ -24,7 +24,7 @@
   #summary { color: var(--muted); margin-bottom: 16px; }
   #problem { display: none; margin-bottom: 12px; padding: 8px 12px; border-radius: 6px; background: var(--off-bg); color: var(--off); }
   .wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
-  table { border-collapse: collapse; width: 100%; min-width: 760px; }
+  table { border-collapse: collapse; width: 100%; min-width: 980px; }
   th { text-align: left; font-size: 12px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); padding: 10px 12px; }
   td { padding: 9px 12px; border-top: 1px solid var(--line); white-space: nowrap; }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -33,6 +33,7 @@
   .pill.off { background: var(--off-bg); color: var(--off); }
   .mono { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
   .muted { color: var(--muted); }
+  td.warn { color: var(--off); font-weight: 600; white-space: normal; min-width: 180px; }
   #empty { display: none; padding: 20px 12px; color: var(--muted); }
 </style>
 </head>
@@ -45,8 +46,8 @@
     <table>
       <thead><tr>
         <th class="num">#</th><th>Team</th><th>Site</th><th>Contest</th><th>Status</th>
-        <th>Last seen</th><th>Computer</th><th class="num">Up</th><th>Recorder</th>
-        <th class="num">Heartbeats</th><th>Image</th>
+        <th>User</th><th>Last seen</th><th>Computer</th><th class="num">Up</th><th>Recorder</th>
+        <th class="num">Heartbeats</th><th>Image</th><th>Warnings</th>
       </tr></thead>
       <tbody id="rows"></tbody>
     </table>
@@ -94,12 +95,16 @@ function render(sticks) {
     pill.className = "pill " + (stick.online ? "on" : "off");
     pill.textContent = stick.online ? "online" : (last ? "offline" : "not seen yet");
     status.appendChild(pill);
+    cell(row, stick.current_user ?? "");
     cell(row, last ? ago(last.seconds_ago) : "", last ? "" : "muted");
     cell(row, last ? last.hostname : "", "mono");
     cell(row, last ? span(last.uptime_s) : "", "num");
     cell(row, last ? last.recorder : "");
     cell(row, last ? String(last.heartbeats) : "", "num");
     cell(row, last ? last.image_version : "", "muted");
+    const warning = cell(row, stick.warnings.join(" · "), "warn");
+    if (stick.warnings.length) warning.title = stick.warnings.join("
+");
     body.appendChild(row);
   }
   document.getElementById("empty").style.display = sticks.length ? "none" : "block";
