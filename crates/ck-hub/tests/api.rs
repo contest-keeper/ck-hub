@@ -5,7 +5,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{DateTime, Duration, Utc};
-use ck_hub::{Hub, MemoryStore, ONLINE_WINDOW_SECONDS, Registry, router};
+use ck_hub::{Hub, MemoryStore, ONLINE_WINDOW_SECONDS, PasswordCost, Registry, Role, router};
 use ck_protocol::{
     Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, RecorderStatus, RecordingMode,
     SIGNATURE_HEADER, STICK_HEADER, StickId, Token,
@@ -16,6 +16,7 @@ use tower::ServiceExt;
 
 const TOKEN_A: &str = "token-of-stick-a";
 const TOKEN_B: &str = "token-of-stick-b";
+const ORGANIZER_PASSWORD: &str = "correct horse battery";
 
 struct Setup {
     dir: TempDir,
@@ -62,12 +63,15 @@ fn setup() -> Setup {
         let now = Arc::clone(&now);
         Box::new(move || *now.lock().expect("clock"))
     };
-    let app = router(Arc::new(Hub::new(
-        registry,
-        Box::new(MemoryStore::default()),
-        Some(log),
-        clock,
-    )));
+    // Hashing is made cheap here: the tests log in many times.
+    let hub = Hub::new(registry, Box::new(MemoryStore::default()), Some(log), clock)
+        .with_password_cost(PasswordCost {
+            memory_kib: 8,
+            passes: 1,
+        });
+    hub.create_user("organizer", ORGANIZER_PASSWORD, Role::Viewer)
+        .expect("an organizer");
+    let app = router(Arc::new(hub));
     Setup { dir, app, now }
 }
 
@@ -130,11 +134,31 @@ async fn heartbeat(app: &Router, boot: &str, seq: u64) -> (StatusCode, String) {
     send(app, Some("stick-a"), Some(&signature), body).await
 }
 
+/// Logs in as the organizer and returns the cookie to send back.
+async fn organizer_cookie(app: &Router) -> String {
+    let request = Request::post("/api/v1/login")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({ "username": "organizer", "password": ORGANIZER_PASSWORD })
+                .to_string(),
+        ))
+        .expect("request");
+    let response = app.clone().oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let set = response.headers()["set-cookie"]
+        .to_str()
+        .expect("text")
+        .to_owned();
+    set.split(';').next().expect("cookie").to_owned()
+}
+
 async fn list(app: &Router) -> serde_json::Value {
+    let cookie = organizer_cookie(app).await;
     let response = app
         .clone()
         .oneshot(
             Request::get("/api/v1/sticks")
+                .header("cookie", cookie)
                 .body(Body::empty())
                 .expect("request"),
         )
