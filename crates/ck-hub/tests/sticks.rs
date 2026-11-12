@@ -27,13 +27,20 @@ fn setup_with_registry(registry_json: &str) -> Setup {
         fs::write(dir.path().join("registry.json"), registry_json).expect("registry");
         Registry::open(dir.path().join("registry.json")).expect("open")
     };
-    let hub = Hub::new(registry, Box::new(MemoryStore::default()), None, Box::new(Utc::now))
-        .with_password_cost(PasswordCost {
-            memory_kib: 8,
-            passes: 1,
-        });
-    hub.create_user("ana", PASSWORD, Role::Admin).expect("admin");
-    hub.create_user("vera", PASSWORD, Role::Viewer).expect("viewer");
+    let hub = Hub::new(
+        registry,
+        Box::new(MemoryStore::default()),
+        None,
+        Box::new(Utc::now),
+    )
+    .with_password_cost(PasswordCost {
+        memory_kib: 8,
+        passes: 1,
+    });
+    hub.create_user("ana", PASSWORD, Role::Admin)
+        .expect("admin");
+    hub.create_user("vera", PASSWORD, Role::Viewer)
+        .expect("viewer");
     Setup {
         dir,
         app: router(Arc::new(hub)),
@@ -47,14 +54,21 @@ fn setup() -> Setup {
 async fn call(app: &Router, request: Request<Body>) -> (StatusCode, String) {
     let response = app.clone().oneshot(request).await.expect("response");
     let status = response.status();
-    let bytes = response.into_body().collect().await.expect("body").to_bytes();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
 async fn cookie_for(app: &Router, name: &str) -> String {
     let request = Request::post("/api/v1/login")
         .header("content-type", "application/json")
-        .body(Body::from(json!({ "username": name, "password": PASSWORD }).to_string()))
+        .body(Body::from(
+            json!({ "username": name, "password": PASSWORD }).to_string(),
+        ))
         .expect("request");
     let response = app.clone().oneshot(request).await.expect("response");
     assert_eq!(response.status(), StatusCode::OK);
@@ -72,8 +86,15 @@ async fn register(app: &Router, cookie: Option<&str>, body: &Value) -> (StatusCo
     if let Some(cookie) = cookie {
         request = request.header("cookie", cookie);
     }
-    let (status, text) = call(app, request.body(Body::from(body.to_string())).expect("request")).await;
-    (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))
+    let (status, text) = call(
+        app,
+        request.body(Body::from(body.to_string())).expect("request"),
+    )
+    .await;
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or(Value::String(text)),
+    )
 }
 
 fn stick(id: &str, token: &str) -> Value {
@@ -112,10 +133,16 @@ async fn list(app: &Router) -> Vec<Value> {
 async fn only_an_admin_may_register_sticks() {
     let setup = setup();
     let body = stick("stick-1", TOKEN);
-    assert_eq!(register(&setup.app, None, &body).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        register(&setup.app, None, &body).await.0,
+        StatusCode::UNAUTHORIZED
+    );
     let viewer = cookie_for(&setup.app, "vera").await;
-    assert_eq!(register(&setup.app, Some(&viewer), &body).await.0, StatusCode::FORBIDDEN);
-    assert!(list(&setup.app).await.is_empty(), "nothing was registered");
+    assert_eq!(
+        register(&setup.app, Some(&viewer), &body).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(list(&setup.app).await.len(), 0, "nothing was registered");
 
     let admin = cookie_for(&setup.app, "ana").await;
     let (status, answer) = register(&setup.app, Some(&admin), &body).await;
@@ -129,7 +156,10 @@ async fn a_registered_stick_can_report_with_its_secret_and_shows_in_the_list() {
     let admin = cookie_for(&setup.app, "ana").await;
     register(&setup.app, Some(&admin), &stick("stick-1", TOKEN)).await;
 
-    assert_eq!(heartbeat_status(&setup.app, "stick-1", TOKEN).await, StatusCode::OK);
+    assert_eq!(
+        heartbeat_status(&setup.app, "stick-1", TOKEN).await,
+        StatusCode::OK
+    );
     assert_eq!(
         heartbeat_status(&setup.app, "stick-1", "some-other-secret-entirely").await,
         StatusCode::UNAUTHORIZED
@@ -150,15 +180,24 @@ async fn registering_twice_changes_nothing_and_a_different_secret_is_refused() {
 
     let (status, again) = register(&setup.app, Some(&admin), &stick("stick-1", TOKEN)).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!((again["added"].clone(), again["already_known"].clone()), (json!(0), json!(1)));
+    assert_eq!(
+        (again["added"].clone(), again["already_known"].clone()),
+        (json!(0), json!(1))
+    );
 
     let other = "a-different-secret-for-the-same-id";
     let (status, answer) = register(&setup.app, Some(&admin), &stick("stick-1", other)).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(answer["conflicts"], json!(["stick-1"]));
     // The secret that was registered first still works, and the one offered later does not.
-    assert_eq!(heartbeat_status(&setup.app, "stick-1", TOKEN).await, StatusCode::OK);
-    assert_eq!(heartbeat_status(&setup.app, "stick-1", other).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        heartbeat_status(&setup.app, "stick-1", TOKEN).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        heartbeat_status(&setup.app, "stick-1", other).await,
+        StatusCode::UNAUTHORIZED
+    );
 }
 
 #[tokio::test]
@@ -175,7 +214,10 @@ async fn a_whole_registry_file_is_accepted_even_a_big_one() {
         })
         .collect();
     let body = json!({ "sticks": entries });
-    assert!(body.to_string().len() > 64 * 1024, "bigger than any other route allows");
+    assert!(
+        body.to_string().len() > 64 * 1024,
+        "bigger than any other route allows"
+    );
     let (status, answer) = register(&setup.app, Some(&admin), &body).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!(answer["added"], 400);
@@ -191,15 +233,23 @@ async fn a_bad_request_registers_nothing_at_all() {
     let (status, answer) = register(&setup.app, Some(&admin), &batch).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(answer["error"].as_str().expect("text").contains("stick-2"));
-    assert!(list(&setup.app).await.is_empty());
+    assert_eq!(list(&setup.app).await.len(), 0);
 
     let mut with_control = stick("stick-3", TOKEN);
     with_control["team"] = json!("bad\nname");
-    assert_eq!(register(&setup.app, Some(&admin), &with_control).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        register(&setup.app, Some(&admin), &with_control).await.0,
+        StatusCode::BAD_REQUEST
+    );
 
     let with_space = stick("not a valid id", TOKEN);
-    assert!(register(&setup.app, Some(&admin), &with_space).await.0.is_client_error());
-    assert!(list(&setup.app).await.is_empty());
+    assert!(
+        register(&setup.app, Some(&admin), &with_space)
+            .await
+            .0
+            .is_client_error()
+    );
+    assert_eq!(list(&setup.app).await.len(), 0);
 }
 
 #[tokio::test]
@@ -209,11 +259,17 @@ async fn a_stick_in_the_registry_file_cannot_be_given_another_secret() {
     let admin = cookie_for(&setup.app, "ana").await;
     let (status, answer) = register(&setup.app, Some(&admin), &stick("file-1", TOKEN)).await;
     assert_eq!(status, StatusCode::CONFLICT, "{answer}");
-    assert_eq!(heartbeat_status(&setup.app, "file-1", "the-secret-from-the-file-1").await, StatusCode::OK);
+    assert_eq!(
+        heartbeat_status(&setup.app, "file-1", "the-secret-from-the-file-1").await,
+        StatusCode::OK
+    );
 
     // The same secret as the file has is fine, and the sticks of both sources are listed together.
     let same = stick("file-1", "the-secret-from-the-file-1");
-    assert_eq!(register(&setup.app, Some(&admin), &same).await.1["already_known"], 1);
+    assert_eq!(
+        register(&setup.app, Some(&admin), &same).await.1["already_known"],
+        1
+    );
     register(&setup.app, Some(&admin), &stick("db-1", TOKEN)).await;
     assert_eq!(list(&setup.app).await.len(), 2);
     let _keep = &setup.dir;
@@ -231,5 +287,9 @@ async fn the_answers_never_contain_a_secret() {
     let (_, text) = call(&setup.app, request).await;
     assert!(!text.contains(TOKEN));
     let sticks = list(&setup.app).await;
-    assert!(!serde_json::to_string(&sticks).expect("json").contains(TOKEN));
+    assert!(
+        !serde_json::to_string(&sticks)
+            .expect("json")
+            .contains(TOKEN)
+    );
 }
