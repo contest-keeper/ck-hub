@@ -307,6 +307,18 @@ impl Store for Shared {
     fn session(&self, h: &str) -> Result<Option<(String, DateTime<Utc>)>, ck_hub::StoreError> {
         self.0.session(h)
     }
+    fn add_stick(&self, s: ck_hub::Stick) -> Result<bool, ck_hub::StoreError> {
+        self.0.add_stick(s)
+    }
+    fn stick(
+        &self,
+        id: &ck_protocol::StickId,
+    ) -> Result<Option<ck_hub::Stick>, ck_hub::StoreError> {
+        self.0.stick(id)
+    }
+    fn sticks(&self) -> Result<Vec<ck_hub::Stick>, ck_hub::StoreError> {
+        self.0.sticks()
+    }
     fn delete_session(&self, h: &str) -> Result<(), ck_hub::StoreError> {
         self.0.delete_session(h)
     }

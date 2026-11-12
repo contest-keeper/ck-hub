@@ -6,6 +6,7 @@
 mod accounts;
 mod hub;
 mod postgres_store;
+mod register;
 mod registry;
 mod routes;
 mod store;
@@ -16,6 +17,7 @@ pub use accounts::{
 };
 pub use hub::{Hub, LastHeartbeat, ONLINE_WINDOW_SECONDS, Rejection, StickView};
 pub use postgres_store::PostgresStore;
+pub use register::{NewStick, RegisterError, Registered, register_sticks};
 pub use registry::{Entry, Registry, RegistryError};
 pub use routes::router;
-pub use store::{MemoryStore, Role, SeenHeartbeat, Store, StoreError, StoredEvent, User};
+pub use store::{MemoryStore, Role, SeenHeartbeat, Stick, Store, StoreError, StoredEvent, User};

@@ -17,6 +17,7 @@ use serde::Deserialize;
 
 use crate::accounts::{AccessError, Account, LoginError, SESSION_LIFETIME_HOURS};
 use crate::hub::{Hub, Rejection, StickView};
+use crate::register::{NewStick, RegisterError};
 use crate::store::Role;
 
 /// The page organizers watch. It is one file with no outside resources, so it works on a network
@@ -26,6 +27,9 @@ const PAGE: &str = include_str!("page.html");
 /// Where sticks send events. The stick's agent uses the same address.
 const EVENTS_PATH: &str = "/api/v1/events";
 
+/// A whole registry of a few hundred sticks. Only the admin-only registering route allows this much.
+const MAX_REGISTRY_BYTES: usize = 2 * 1024 * 1024;
+
 /// A heartbeat is a few hundred bytes. Anything much bigger is not one.
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
@@ -34,7 +38,12 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route("/", get(page))
         .route(HEARTBEAT_PATH, post(heartbeat))
         .route(EVENTS_PATH, post(event))
-        .route("/api/v1/sticks", get(sticks))
+        .route(
+            "/api/v1/sticks",
+            get(sticks)
+                .post(register)
+                .layer(DefaultBodyLimit::max(MAX_REGISTRY_BYTES)),
+        )
         .route("/api/v1/login", post(login))
         .route("/api/v1/logout", post(logout))
         .route("/api/v1/me", get(me))
@@ -214,5 +223,47 @@ async fn require(hub: &Arc<Hub>, headers: &HeaderMap, needed: Role) -> Result<Ac
             StatusCode::SERVICE_UNAVAILABLE,
             "the Hub cannot read its data right now",
         )),
+    }
+}
+
+/// One stick, or a whole registry file of the admin tool.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RegisterBody {
+    Many { sticks: Vec<NewStick> },
+    One(NewStick),
+}
+
+async fn register(
+    State(hub): State<Arc<Hub>>,
+    headers: HeaderMap,
+    Json(body): Json<RegisterBody>,
+) -> Response {
+    if let Err(reason) = require(&hub, &headers, Role::Admin).await {
+        return denied(reason);
+    }
+    let sticks = match body {
+        RegisterBody::Many { sticks } => sticks,
+        RegisterBody::One(stick) => vec![stick],
+    };
+    match tokio::task::spawn_blocking(move || hub.register_sticks(sticks)).await {
+        Ok(Ok(done)) => {
+            let answer = json!({
+                "added": done.added,
+                "already_known": done.already_known,
+                "conflicts": done.conflicts,
+            });
+            // A different secret for a known stick is refused, but the rest was still registered.
+            let status = if done.conflicts.is_empty() {
+                StatusCode::OK
+            } else {
+                StatusCode::CONFLICT
+            };
+            (status, Json(answer)).into_response()
+        }
+        Ok(Err(RegisterError::Invalid(why))) => {
+            (StatusCode::BAD_REQUEST, Json(json!({ "error": why }))).into_response()
+        }
+        Ok(Err(RegisterError::Unavailable)) | Err(_) => unavailable(),
     }
 }
