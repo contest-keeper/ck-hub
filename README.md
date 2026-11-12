@@ -20,6 +20,7 @@ cargo run -p ck-hub -- --registry ck-registry.json --log hub.log
 
 | Route | What it does |
 |---|---|
+| `GET /` | The page organizers watch: every stick with its status, last heartbeat, computer name, uptime and recorder. It reads `/api/v1/sticks` every 5 seconds. It is one file with no outside resources, so it works with no internet. |
 | `POST /api/v1/heartbeat` | A stick sends a heartbeat. The body is signed with the stick's secret (HMAC-SHA256, hex) in `X-CK-Signature`, and the stick id is in `X-CK-Stick`. `400` for a malformed message, `401` for an unknown stick or a bad signature (the two look the same), `409` for a sequence number that is not newer within the same boot. |
 | `GET /api/v1/sticks` | Every stick the admin made, with its last heartbeat and whether it is online (a heartbeat in the last 60 seconds). |
 
