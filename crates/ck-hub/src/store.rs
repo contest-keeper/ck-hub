@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
-use ck_protocol::{Event, Heartbeat, StickId};
+use ck_protocol::{Event, Heartbeat, StickId, Token};
 
 #[derive(Debug, thiserror::Error)]
 #[error("the store failed: {0}")]
@@ -47,6 +47,17 @@ impl Role {
     pub fn allows(self, needed: Role) -> bool {
         self == Self::Admin || needed == Self::Viewer
     }
+}
+
+/// A stick the admin made. The Hub keeps its secret to check what the stick signs.
+#[derive(Debug, Clone)]
+pub struct Stick {
+    pub stick_id: StickId,
+    pub token: Token,
+    pub team: String,
+    pub site: String,
+    pub contest: String,
+    pub machine_number: Option<u32>,
 }
 
 /// An organizer account. The password is only ever kept as an Argon2 hash.
@@ -135,6 +146,23 @@ pub trait Store: Send + Sync {
     /// # Errors
     /// When the data cannot be written.
     fn delete_session(&self, token_hash: &str) -> Result<(), StoreError>;
+
+    /// Adds a stick. Returns false, and changes nothing, when its id is already known: a stick's
+    /// secret is never replaced.
+    ///
+    /// # Errors
+    /// When the data cannot be written.
+    fn add_stick(&self, stick: Stick) -> Result<bool, StoreError>;
+
+    /// # Errors
+    /// When the data cannot be read.
+    fn stick(&self, id: &StickId) -> Result<Option<Stick>, StoreError>;
+
+    /// Every registered stick.
+    ///
+    /// # Errors
+    /// When the data cannot be read.
+    fn sticks(&self) -> Result<Vec<Stick>, StoreError>;
 }
 
 /// Keeps everything in memory. Used by the tests, and by a Hub started without a database; the
@@ -145,6 +173,7 @@ pub struct MemoryStore {
     events: Mutex<HashMap<StickId, Vec<StoredEvent>>>,
     users: Mutex<HashMap<String, User>>,
     sessions: Mutex<HashMap<String, (String, DateTime<Utc>)>>,
+    sticks: Mutex<HashMap<StickId, Stick>>,
 }
 
 impl Store for MemoryStore {
@@ -248,5 +277,28 @@ impl Store for MemoryStore {
             .expect("sessions lock")
             .remove(token_hash);
         Ok(())
+    }
+
+    fn add_stick(&self, stick: Stick) -> Result<bool, StoreError> {
+        let mut sticks = self.sticks.lock().expect("sticks lock");
+        if sticks.contains_key(&stick.stick_id) {
+            return Ok(false);
+        }
+        sticks.insert(stick.stick_id.clone(), stick);
+        Ok(true)
+    }
+
+    fn stick(&self, id: &StickId) -> Result<Option<Stick>, StoreError> {
+        Ok(self.sticks.lock().expect("sticks lock").get(id).cloned())
+    }
+
+    fn sticks(&self) -> Result<Vec<Stick>, StoreError> {
+        Ok(self
+            .sticks
+            .lock()
+            .expect("sticks lock")
+            .values()
+            .cloned()
+            .collect())
     }
 }

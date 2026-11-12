@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use ck_hub::{
-    CreateUserError, Hub, MIN_PASSWORD_LENGTH, MemoryStore, PasswordCost, PostgresStore, Registry,
-    Role, Store, create_user, router,
+    CreateUserError, Hub, MIN_PASSWORD_LENGTH, MemoryStore, NewStick, PasswordCost, PostgresStore,
+    RegisterError, Registry, Role, Store, create_user, register_sticks, router,
 };
 use clap::{Args, Parser, Subcommand};
 
@@ -31,6 +31,8 @@ struct Cli {
 enum Command {
     /// Make an organizer account. The password is asked for here and never taken from an argument
     CreateUser(CreateUserArgs),
+    /// Register the sticks of an admin tool registry file in the database. Safe to run twice
+    ImportRegistry(ImportRegistryArgs),
 }
 
 #[derive(Args)]
@@ -38,7 +40,8 @@ struct ServeArgs {
     /// Where to listen. Sticks in a QEMU test machine reach the host as 10.0.2.2
     #[arg(long, default_value = "127.0.0.1:8088")]
     listen: SocketAddr,
-    /// The registry file ck-forge writes. It holds every stick's secret, so keep it private
+    /// A registry file ck-forge writes, read directly. It holds every stick's secret, so keep it
+    /// private. Optional when sticks are registered in the database instead
     #[arg(long)]
     registry: Option<PathBuf>,
     #[command(flatten)]
@@ -67,12 +70,21 @@ struct CreateUserArgs {
     database: DatabaseArgs,
 }
 
+#[derive(Args)]
+struct ImportRegistryArgs {
+    /// The registry file ck-forge wrote
+    file: PathBuf,
+    #[command(flatten)]
+    database: DatabaseArgs,
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     tracing_subscriber::fmt().with_ansi(false).init();
     let cli = Cli::parse();
     let result = match cli.command {
         Some(Command::CreateUser(args)) => make_user(args).await,
+        Some(Command::ImportRegistry(args)) => import_registry(args).await,
         None => run(cli.serve).await,
     };
     match result {
@@ -141,11 +153,58 @@ async fn make_user(args: CreateUserArgs) -> Result<(), String> {
     }
 }
 
+/// The part of a registry file the Hub needs.
+#[derive(serde::Deserialize)]
+struct File {
+    sticks: Vec<NewStick>,
+}
+
+async fn import_registry(args: ImportRegistryArgs) -> Result<(), String> {
+    let url = args
+        .database
+        .database_url
+        .ok_or("importing needs a database: pass --database-url or set CK_DATABASE_URL")?;
+    let text = std::fs::read_to_string(&args.file)
+        .map_err(|e| format!("cannot read {}: {e}", args.file.display()))?;
+    let file: File = serde_json::from_str(&text)
+        .map_err(|e| format!("{} is not a registry file: {e}", args.file.display()))?;
+
+    let store = connect(url).await?;
+    let result = tokio::task::spawn_blocking(move || {
+        let result = register_sticks(&store, &|_| None, file.sticks);
+        drop(store);
+        result
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    match result {
+        Ok(done) => {
+            tracing::info!(
+                added = done.added,
+                already_known = done.already_known,
+                "the registry was imported"
+            );
+            if done.conflicts.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "these sticks are already registered with a different secret and were left as they are: {}",
+                    done.conflicts.join(", ")
+                ))
+            }
+        }
+        Err(RegisterError::Invalid(why)) => Err(why),
+        Err(RegisterError::Unavailable) => Err("the database could not be written".to_owned()),
+    }
+}
+
 async fn run(args: ServeArgs) -> Result<(), String> {
-    let registry_path = args
-        .registry
-        .ok_or("pass --registry with the file ck-forge writes")?;
-    let registry = Registry::open(&registry_path).map_err(|e| e.to_string())?;
+    // Sticks come from the database, from this file, or from both. A Hub that has neither knows no
+    // stick, and every heartbeat is refused.
+    let registry = match &args.registry {
+        Some(path) => Registry::open(path).map_err(|e| e.to_string())?,
+        None => Registry::empty(),
+    };
     let log = match &args.log {
         Some(path) => Some(
             OpenOptions::new()

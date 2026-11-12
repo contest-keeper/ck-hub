@@ -74,6 +74,19 @@ impl Registry {
         })
     }
 
+    /// No file and no sticks, for a Hub that gets all its sticks from the database.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            path: PathBuf::new(),
+            version: Version {
+                modified: None,
+                length: 0,
+            },
+            sticks: HashMap::new(),
+        }
+    }
+
     /// Reads the file again when it changed, so a stick added after the Hub started is known.
     /// A file that cannot be read keeps the sticks already known: a half-written file must not
     /// make every stick unknown.

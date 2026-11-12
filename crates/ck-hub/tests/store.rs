@@ -110,6 +110,35 @@ fn the_store_contract(store: &dyn Store) {
     assert_eq!(events[0].integrity, None);
     assert_eq!(events[1].event, event(&a, 2, "bob"));
     assert_eq!(events[1].integrity.as_deref(), Some("a note"));
+
+    // Sticks: added once, never replaced, and read back whole.
+    let new = |token: &str| ck_hub::Stick {
+        stick_id: a_id.clone(),
+        token: Token::new(token),
+        team: "Alpha".to_owned(),
+        site: "Lab 1".to_owned(),
+        contest: "Spring".to_owned(),
+        machine_number: Some(4),
+    };
+    assert!(store.stick(&a_id).expect("read").is_none());
+    assert!(store.add_stick(new("first-secret-value-1")).expect("write"));
+    assert!(
+        !store.add_stick(new("another-secret-value")).expect("write"),
+        "never replaced"
+    );
+    let kept = store.stick(&a_id).expect("read").expect("a stick");
+    assert_eq!(kept.token, Token::new("first-secret-value-1"));
+    assert_eq!(
+        (kept.team.as_str(), kept.machine_number),
+        ("Alpha", Some(4))
+    );
+    assert!(
+        store
+            .sticks()
+            .expect("read")
+            .iter()
+            .any(|s| s.stick_id == a_id)
+    );
 }
 
 #[test]

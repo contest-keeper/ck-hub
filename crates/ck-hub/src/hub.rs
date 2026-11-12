@@ -73,7 +73,7 @@ pub struct LastHeartbeat {
 }
 
 pub struct Hub {
-    registry: Mutex<Registry>,
+    pub(crate) registry: Mutex<Registry>,
     pub(crate) store: Box<dyn Store>,
     pub(crate) accounts: Accounts,
     /// One message at a time is read, judged and kept, so two heartbeats of one stick cannot both
@@ -173,10 +173,15 @@ impl Hub {
         };
         let id = StickId::parse(stick_header)
             .map_err(|_| Rejection::BadRequest("the stick header is not a stick id"))?;
-        let token = {
+        let from_file = {
             let mut registry = self.registry.lock().expect("registry lock");
             registry.refresh();
             registry.find(&id).map(|entry| entry.token.clone())
+        };
+        // A stick is known from the registry file or from the database, whichever has it.
+        let token = match from_file {
+            Some(token) => Some(token),
+            None => self.store.stick(&id)?.map(|stick| stick.token),
         };
         let Some(token) = token else {
             return Err(Rejection::Unauthorized);
@@ -263,10 +268,33 @@ impl Hub {
     /// When the data cannot be read.
     pub fn sticks(&self) -> Result<Vec<StickView>, StoreError> {
         let now = (self.clock)();
-        let mut registry = self.registry.lock().expect("registry lock");
-        registry.refresh();
+        let mut entries: Vec<crate::registry::Entry> = {
+            let mut registry = self.registry.lock().expect("registry lock");
+            registry.refresh();
+            registry.all().into_iter().cloned().collect()
+        };
+        for stick in self.store.sticks()? {
+            if !entries.iter().any(|e| e.stick_id == stick.stick_id) {
+                entries.push(crate::registry::Entry {
+                    stick_id: stick.stick_id,
+                    token: stick.token,
+                    team: stick.team,
+                    site: stick.site,
+                    contest: stick.contest,
+                    machine_number: stick.machine_number,
+                });
+            }
+        }
+        // The order an organizer reads them in: by contest, then machine number.
+        entries.sort_by(|a, b| {
+            (&a.contest, a.machine_number, a.stick_id.as_str()).cmp(&(
+                &b.contest,
+                b.machine_number,
+                b.stick_id.as_str(),
+            ))
+        });
         let mut views = Vec::new();
-        for entry in registry.all() {
+        for entry in &entries {
             let seen = self.store.last_heartbeat(&entry.stick_id)?;
             let stored = self.store.events(&entry.stick_id)?;
             let last = seen.map(|s| LastHeartbeat {
