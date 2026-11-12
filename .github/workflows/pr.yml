@@ -13,3 +13,5 @@ jobs:
     uses: contest-keeper/.github/.github/workflows/pr-title.yml@main
   common:
     uses: contest-keeper/.github/.github/workflows/common-ci.yml@main
+  rust:
+    uses: contest-keeper/.github/.github/workflows/rust-ci.yml@main
