@@ -10,7 +10,7 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use chrono::{DateTime, Duration, Utc};
 
 use crate::hub::Hub;
-use crate::store::{Role, StoreError, User};
+use crate::store::{Role, Store, StoreError, User};
 
 /// A browser that has not been used for this long has to log in again.
 pub const SESSION_LIFETIME_HOURS: i64 = 12;
@@ -150,35 +150,7 @@ impl Hub {
         password: &str,
         role: Role,
     ) -> Result<(), CreateUserError> {
-        let valid_name = !name.trim().is_empty()
-            && name.chars().count() <= MAX_NAME_LENGTH
-            && !name.chars().any(char::is_control);
-        if !valid_name {
-            return Err(CreateUserError::BadName);
-        }
-        if password.chars().count() < MIN_PASSWORD_LENGTH {
-            return Err(CreateUserError::PasswordTooShort);
-        }
-        let password_hash = hash(self.accounts.cost, password).map_err(|error| {
-            tracing::error!("cannot hash a password: {error}");
-            CreateUserError::Unavailable
-        })?;
-        let created = self
-            .store
-            .create_user(User {
-                name: name.to_owned(),
-                password_hash,
-                role,
-            })
-            .map_err(|error| {
-                unavailable(&error);
-                CreateUserError::Unavailable
-            })?;
-        if created {
-            Ok(())
-        } else {
-            Err(CreateUserError::NameTaken)
-        }
+        create_user(&*self.store, self.accounts.cost, name, password, role)
     }
 
     /// Checks a name and password. On success returns the session token for the browser's cookie.
@@ -273,5 +245,47 @@ impl Hub {
         if let Err(error) = self.store.delete_session(&token_hash(token)) {
             unavailable(&error);
         }
+    }
+}
+
+/// Adds an organizer account to `store`: checks the name and the password, and keeps only a hash of
+/// the password. `ck-hub create-user` uses this without starting a Hub.
+///
+/// # Errors
+/// See [`CreateUserError`].
+pub fn create_user(
+    store: &dyn Store,
+    cost: PasswordCost,
+    name: &str,
+    password: &str,
+    role: Role,
+) -> Result<(), CreateUserError> {
+    let valid_name = !name.trim().is_empty()
+        && name.chars().count() <= MAX_NAME_LENGTH
+        && !name.chars().any(char::is_control);
+    if !valid_name {
+        return Err(CreateUserError::BadName);
+    }
+    if password.chars().count() < MIN_PASSWORD_LENGTH {
+        return Err(CreateUserError::PasswordTooShort);
+    }
+    let password_hash = hash(cost, password).map_err(|error| {
+        tracing::error!("cannot hash a password: {error}");
+        CreateUserError::Unavailable
+    })?;
+    let created = store
+        .create_user(User {
+            name: name.to_owned(),
+            password_hash,
+            role,
+        })
+        .map_err(|error| {
+            unavailable(&error);
+            CreateUserError::Unavailable
+        })?;
+    if created {
+        Ok(())
+    } else {
+        Err(CreateUserError::NameTaken)
     }
 }

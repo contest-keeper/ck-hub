@@ -121,8 +121,7 @@ function render(sticks) {
     cell(row, last ? String(last.heartbeats) : "", "num");
     cell(row, last ? last.image_version : "", "muted");
     const warning = cell(row, stick.warnings.join(" · "), "warn");
-    if (stick.warnings.length) warning.title = stick.warnings.join("
-");
+    if (stick.warnings.length) warning.title = stick.warnings.join(String.fromCharCode(10));
     body.appendChild(row);
   }
   document.getElementById("empty").style.display = sticks.length ? "none" : "block";

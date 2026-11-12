@@ -596,3 +596,42 @@ async fn two_different_users_in_one_boot_are_a_warning_but_a_new_boot_starts_cle
     assert_eq!(stick["current_user"], "cris");
     assert!(!stick["warnings"].to_string().contains("different users"));
 }
+
+/// A script that does not parse leaves the page blank, with nothing to say why, and a Rust test
+/// cannot run a browser. Node can at least read the script, so this checks it when Node is there.
+#[tokio::test]
+async fn the_page_script_is_valid_javascript() {
+    let setup = setup();
+    let response = setup
+        .app
+        .clone()
+        .oneshot(Request::get("/").body(Body::empty()).expect("request"))
+        .await
+        .expect("response");
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let page = String::from_utf8_lossy(&bytes);
+    let start = page.find("<script>").expect("a script") + "<script>".len();
+    let end = page.find("</script>").expect("the end of the script");
+
+    let file = setup.dir.path().join("page.js");
+    fs::write(&file, &page[start..end]).expect("write the script");
+    let Ok(output) = std::process::Command::new("node")
+        .arg("--check")
+        .arg(&file)
+        .output()
+    else {
+        eprintln!("skipped: Node is not installed, so the page script was not parsed");
+        return;
+    };
+    assert!(
+        output.status.success(),
+        "the page script does not parse:
+{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

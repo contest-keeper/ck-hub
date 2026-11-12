@@ -12,7 +12,7 @@ mod store;
 
 pub use accounts::{
     AccessError, Account, CreateUserError, LoginError, MAX_FAILED_LOGINS, MIN_PASSWORD_LENGTH,
-    NAME_LOCKOUT_SECONDS, PasswordCost, SESSION_LIFETIME_HOURS,
+    NAME_LOCKOUT_SECONDS, PasswordCost, SESSION_LIFETIME_HOURS, create_user,
 };
 pub use hub::{Hub, LastHeartbeat, ONLINE_WINDOW_SECONDS, Rejection, StickView};
 pub use postgres_store::PostgresStore;
