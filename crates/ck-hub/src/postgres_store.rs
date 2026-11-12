@@ -6,14 +6,20 @@ use chrono::{DateTime, Utc};
 use ck_protocol::{Event, Heartbeat, StickId};
 use postgres::{Client, NoTls};
 
-use crate::store::{SeenHeartbeat, Store, StoreError, StoredEvent};
+use crate::store::{Role, SeenHeartbeat, Store, StoreError, StoredEvent, User};
 
 /// The schema, in the order it is applied. A migration that was applied is never run again and
 /// never edited: a change is a new file.
-const MIGRATIONS: [(&str, &str); 1] = [(
-    "0001_heartbeats_and_events",
-    include_str!("../migrations/0001_heartbeats_and_events.sql"),
-)];
+const MIGRATIONS: [(&str, &str); 2] = [
+    (
+        "0001_heartbeats_and_events",
+        include_str!("../migrations/0001_heartbeats_and_events.sql"),
+    ),
+    (
+        "0002_users_and_sessions",
+        include_str!("../migrations/0002_users_and_sessions.sql"),
+    ),
+];
 
 pub struct PostgresStore {
     /// `None` only while the store is being dropped.
@@ -193,5 +199,79 @@ impl Store for PostgresStore {
                 })
             })
             .collect()
+    }
+
+    fn create_user(&self, user: User) -> Result<bool, StoreError> {
+        let created = self
+            .client()
+            .as_mut()
+            .expect("the connection is open")
+            .execute(
+                "INSERT INTO users (name, password_hash, role) VALUES ($1, $2, $3)
+                 ON CONFLICT (name) DO NOTHING",
+                &[&user.name, &user.password_hash, &user.role.as_str()],
+            )
+            .map_err(failed)?;
+        Ok(created == 1)
+    }
+
+    fn user(&self, name: &str) -> Result<Option<User>, StoreError> {
+        let row = self
+            .client()
+            .as_mut()
+            .expect("the connection is open")
+            .query_opt(
+                "SELECT name, password_hash, role FROM users WHERE name = $1",
+                &[&name],
+            )
+            .map_err(failed)?;
+        row.map(|row| {
+            let role: String = row.get(2);
+            Ok(User {
+                name: row.get(0),
+                password_hash: row.get(1),
+                role: Role::parse(&role).ok_or_else(|| failed(format!("unknown role {role}")))?,
+            })
+        })
+        .transpose()
+    }
+
+    fn create_session(
+        &self,
+        token_hash: &str,
+        user: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        self.client()
+            .as_mut()
+            .expect("the connection is open")
+            .execute(
+                "INSERT INTO sessions (token_hash, user_name, expires_at) VALUES ($1, $2, $3)",
+                &[&token_hash, &user, &expires_at],
+            )
+            .map_err(failed)?;
+        Ok(())
+    }
+
+    fn session(&self, token_hash: &str) -> Result<Option<(String, DateTime<Utc>)>, StoreError> {
+        let row = self
+            .client()
+            .as_mut()
+            .expect("the connection is open")
+            .query_opt(
+                "SELECT user_name, expires_at FROM sessions WHERE token_hash = $1",
+                &[&token_hash],
+            )
+            .map_err(failed)?;
+        Ok(row.map(|row| (row.get(0), row.get(1))))
+    }
+
+    fn delete_session(&self, token_hash: &str) -> Result<(), StoreError> {
+        self.client()
+            .as_mut()
+            .expect("the connection is open")
+            .execute("DELETE FROM sessions WHERE token_hash = $1", &[&token_hash])
+            .map_err(failed)?;
+        Ok(())
     }
 }

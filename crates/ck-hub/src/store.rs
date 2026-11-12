@@ -15,6 +15,48 @@ use ck_protocol::{Event, Heartbeat, StickId};
 #[error("the store failed: {0}")]
 pub struct StoreError(pub String);
 
+/// What an organizer may do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// Manages contests, sticks and users, and sees everything a viewer sees.
+    Admin,
+    /// Only looks at the dashboard.
+    Viewer,
+}
+
+impl Role {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+            Self::Viewer => "viewer",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "admin" => Some(Self::Admin),
+            "viewer" => Some(Self::Viewer),
+            _ => None,
+        }
+    }
+
+    /// Whether someone with this role may do what `needed` asks for.
+    #[must_use]
+    pub fn allows(self, needed: Role) -> bool {
+        self == Self::Admin || needed == Self::Viewer
+    }
+}
+
+/// An organizer account. The password is only ever kept as an Argon2 hash.
+#[derive(Debug, Clone)]
+pub struct User {
+    pub name: String,
+    pub password_hash: String,
+    pub role: Role,
+}
+
 /// The latest heartbeat of a stick, when it arrived and how many there have been.
 #[derive(Debug, Clone)]
 pub struct SeenHeartbeat {
@@ -62,6 +104,37 @@ pub trait Store: Send + Sync {
     /// # Errors
     /// When the data cannot be read.
     fn events(&self, stick: &StickId) -> Result<Vec<StoredEvent>, StoreError>;
+
+    /// Adds an account. Returns false, and changes nothing, when the name is taken.
+    ///
+    /// # Errors
+    /// When the data cannot be written.
+    fn create_user(&self, user: User) -> Result<bool, StoreError>;
+
+    /// # Errors
+    /// When the data cannot be read.
+    fn user(&self, name: &str) -> Result<Option<User>, StoreError>;
+
+    /// Starts a session. `token_hash` is a hash of the token the browser holds, never the token.
+    ///
+    /// # Errors
+    /// When the data cannot be written.
+    fn create_session(
+        &self,
+        token_hash: &str,
+        user: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), StoreError>;
+
+    /// The user a session belongs to and when it ends, if there is such a session.
+    ///
+    /// # Errors
+    /// When the data cannot be read.
+    fn session(&self, token_hash: &str) -> Result<Option<(String, DateTime<Utc>)>, StoreError>;
+
+    /// # Errors
+    /// When the data cannot be written.
+    fn delete_session(&self, token_hash: &str) -> Result<(), StoreError>;
 }
 
 /// Keeps everything in memory. Used by the tests, and by a Hub started without a database; the
@@ -70,6 +143,8 @@ pub trait Store: Send + Sync {
 pub struct MemoryStore {
     heartbeats: Mutex<HashMap<StickId, SeenHeartbeat>>,
     events: Mutex<HashMap<StickId, Vec<StoredEvent>>>,
+    users: Mutex<HashMap<String, User>>,
+    sessions: Mutex<HashMap<String, (String, DateTime<Utc>)>>,
 }
 
 impl Store for MemoryStore {
@@ -130,5 +205,48 @@ impl Store for MemoryStore {
             .get(stick)
             .cloned()
             .unwrap_or_default())
+    }
+
+    fn create_user(&self, user: User) -> Result<bool, StoreError> {
+        let mut users = self.users.lock().expect("users lock");
+        if users.contains_key(&user.name) {
+            return Ok(false);
+        }
+        users.insert(user.name.clone(), user);
+        Ok(true)
+    }
+
+    fn user(&self, name: &str) -> Result<Option<User>, StoreError> {
+        Ok(self.users.lock().expect("users lock").get(name).cloned())
+    }
+
+    fn create_session(
+        &self,
+        token_hash: &str,
+        user: &str,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        self.sessions
+            .lock()
+            .expect("sessions lock")
+            .insert(token_hash.to_owned(), (user.to_owned(), expires_at));
+        Ok(())
+    }
+
+    fn session(&self, token_hash: &str) -> Result<Option<(String, DateTime<Utc>)>, StoreError> {
+        Ok(self
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .get(token_hash)
+            .cloned())
+    }
+
+    fn delete_session(&self, token_hash: &str) -> Result<(), StoreError> {
+        self.sessions
+            .lock()
+            .expect("sessions lock")
+            .remove(token_hash);
+        Ok(())
     }
 }

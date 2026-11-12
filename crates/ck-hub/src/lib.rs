@@ -13,4 +13,4 @@ pub use hub::{Hub, LastHeartbeat, ONLINE_WINDOW_SECONDS, Rejection, StickView};
 pub use postgres_store::PostgresStore;
 pub use registry::{Entry, Registry, RegistryError};
 pub use routes::router;
-pub use store::{MemoryStore, SeenHeartbeat, Store, StoreError, StoredEvent};
+pub use store::{MemoryStore, Role, SeenHeartbeat, Store, StoreError, StoredEvent, User};
