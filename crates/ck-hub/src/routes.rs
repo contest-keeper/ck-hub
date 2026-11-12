@@ -1,0 +1,50 @@
+//! The HTTP side: turns requests into calls on the [`Hub`] and the Hub's answers into responses.
+
+use std::sync::Arc;
+
+use axum::Json;
+use axum::Router;
+use axum::body::Bytes;
+use axum::extract::{DefaultBodyLimit, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use ck_protocol::{HEARTBEAT_PATH, SIGNATURE_HEADER, STICK_HEADER};
+use serde_json::json;
+
+use crate::hub::{Hub, Rejection, StickView};
+
+/// A heartbeat is a few hundred bytes. Anything much bigger is not one.
+const MAX_BODY_BYTES: usize = 64 * 1024;
+
+pub fn router(hub: Arc<Hub>) -> Router {
+    Router::new()
+        .route(HEARTBEAT_PATH, post(heartbeat))
+        .route("/api/v1/sticks", get(sticks))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .with_state(hub)
+}
+
+async fn heartbeat(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) -> Response {
+    let result = hub.accept_heartbeat(
+        header(&headers, STICK_HEADER),
+        header(&headers, SIGNATURE_HEADER),
+        &body,
+    );
+    match result {
+        Ok(seq) => Json(json!({ "accepted": seq })).into_response(),
+        Err(Rejection::BadRequest(why)) => (StatusCode::BAD_REQUEST, why).into_response(),
+        Err(Rejection::Unauthorized) => {
+            (StatusCode::UNAUTHORIZED, "unknown stick or bad signature").into_response()
+        }
+        Err(Rejection::Conflict(why)) => (StatusCode::CONFLICT, why).into_response(),
+    }
+}
+
+async fn sticks(State(hub): State<Arc<Hub>>) -> Json<Vec<StickView>> {
+    Json(hub.sticks())
+}
+
+fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
+}

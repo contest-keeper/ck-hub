@@ -1,0 +1,12 @@
+//! Keeper Hub: the server the sticks report to.
+//!
+//! For now it receives signed heartbeats and lists the sticks with their last heartbeat. The
+//! sticks and their secrets come from the registry file `ck-forge` writes.
+
+mod hub;
+mod registry;
+mod routes;
+
+pub use hub::{Hub, LastHeartbeat, ONLINE_WINDOW_SECONDS, Rejection, StickView};
+pub use registry::{Entry, Registry, RegistryError};
+pub use routes::router;
