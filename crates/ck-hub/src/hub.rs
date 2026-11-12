@@ -1,6 +1,5 @@
 //! What the Hub knows about the sticks, and the rules for accepting a heartbeat.
 
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::sync::Mutex;
@@ -11,6 +10,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::registry::Registry;
+use crate::store::{Store, StoreError, StoredEvent};
 
 /// A stick that has sent nothing for longer than this is shown as offline.
 pub const ONLINE_WINDOW_SECONDS: i64 = 60;
@@ -26,12 +26,15 @@ pub enum Rejection {
     Unauthorized,
     /// A message that is not newer than the last one of this boot.
     Conflict(String),
+    /// The Hub could not keep or read the data. The stick tries again later.
+    Unavailable,
 }
 
-struct Seen {
-    heartbeat: Heartbeat,
-    received_at: DateTime<Utc>,
-    count: u64,
+impl From<StoreError> for Rejection {
+    fn from(error: StoreError) -> Self {
+        tracing::error!("{error}");
+        Self::Unavailable
+    }
 }
 
 /// The state of every stick, as the page and the API show it.
@@ -68,17 +71,12 @@ pub struct LastHeartbeat {
     pub heartbeats: u64,
 }
 
-/// An event the Hub received, and what was wrong with its place in the chain, if anything.
-struct Stored {
-    received_at: DateTime<Utc>,
-    event: Event,
-    integrity: Option<&'static str>,
-}
-
 pub struct Hub {
     registry: Mutex<Registry>,
-    events: Mutex<HashMap<StickId, Vec<Stored>>>,
-    seen: Mutex<HashMap<StickId, Seen>>,
+    store: Box<dyn Store>,
+    /// One message at a time is read, judged and kept, so two heartbeats of one stick cannot both
+    /// pass the sequence check.
+    write: Mutex<()>,
     log: Option<Mutex<File>>,
     clock: Box<dyn Fn() -> DateTime<Utc> + Send + Sync>,
 }
@@ -87,13 +85,14 @@ impl Hub {
     #[must_use]
     pub fn new(
         registry: Registry,
+        store: Box<dyn Store>,
         log: Option<File>,
         clock: Box<dyn Fn() -> DateTime<Utc> + Send + Sync>,
     ) -> Self {
         Self {
             registry: Mutex::new(registry),
-            seen: Mutex::new(HashMap::new()),
-            events: Mutex::new(HashMap::new()),
+            store,
+            write: Mutex::new(()),
             log: log.map(Mutex::new),
             clock,
         }
@@ -115,6 +114,7 @@ impl Hub {
             Err(Rejection::BadRequest(why)) => (*why, None),
             Err(Rejection::Unauthorized) => ("unknown stick or bad signature", None),
             Err(Rejection::Conflict(_)) => ("sequence not newer", None),
+            Err(Rejection::Unavailable) => ("the store failed", None),
         };
         self.record(outcome, stick_header, seq);
         result
@@ -133,10 +133,10 @@ impl Hub {
             return Err(Rejection::BadRequest("the heartbeat is for another stick"));
         }
 
-        let mut seen = self.seen.lock().expect("state lock");
-        let previous = seen.get(&id);
+        let _one_at_a_time = self.write.lock().expect("write lock");
+        let previous = self.store.last_heartbeat(&id)?;
         // The sequence starts again at every boot, so only a message of the same boot is compared.
-        if let Some(previous) = previous
+        if let Some(previous) = &previous
             && previous.heartbeat.boot_id == heartbeat.boot_id
             && heartbeat.seq <= previous.heartbeat.seq
         {
@@ -146,15 +146,7 @@ impl Hub {
             )));
         }
         let seq = heartbeat.seq;
-        let count = previous.map_or(0, |p| p.count) + 1;
-        seen.insert(
-            id,
-            Seen {
-                heartbeat,
-                received_at: (self.clock)(),
-                count,
-            },
-        );
+        self.store.record_heartbeat(heartbeat, (self.clock)())?;
         Ok(seq)
     }
 
@@ -204,6 +196,7 @@ impl Hub {
             Err(Rejection::BadRequest(why)) => (*why, None),
             Err(Rejection::Unauthorized) => ("unknown stick or bad signature", None),
             Err(Rejection::Conflict(_)) => ("event already received", None),
+            Err(Rejection::Unavailable) => ("the store failed", None),
         };
         self.record(outcome, stick_header, seq);
         result
@@ -222,8 +215,8 @@ impl Hub {
             return Err(Rejection::BadRequest("the event is for another stick"));
         }
 
-        let mut events = self.events.lock().expect("events lock");
-        let stored = events.entry(id).or_default();
+        let _one_at_a_time = self.write.lock().expect("write lock");
+        let stored = self.store.events(&id)?;
         let last_of_boot = stored
             .iter()
             .rev()
@@ -250,55 +243,50 @@ impl Hub {
             Some(_) => None,
         };
         let seq = event.seq;
-        stored.push(Stored {
-            received_at: (self.clock)(),
-            event,
-            integrity,
-        });
+        self.store
+            .append_event(event, (self.clock)(), integrity.map(str::to_owned))?;
         Ok(seq)
     }
 
     /// Every stick the admin made, with its last heartbeat when it has sent one.
-    #[must_use]
-    pub fn sticks(&self) -> Vec<StickView> {
+    /// # Errors
+    /// When the data cannot be read.
+    pub fn sticks(&self) -> Result<Vec<StickView>, StoreError> {
         let now = (self.clock)();
         let mut registry = self.registry.lock().expect("registry lock");
         registry.refresh();
-        let seen = self.seen.lock().expect("state lock");
-        let events = self.events.lock().expect("events lock");
-        registry
-            .all()
-            .into_iter()
-            .map(|entry| {
-                let last = seen.get(&entry.stick_id).map(|s| LastHeartbeat {
-                    received_at: s.received_at,
-                    seconds_ago: (now - s.received_at).num_seconds().max(0),
-                    boot_id: s.heartbeat.boot_id.clone(),
-                    seq: s.heartbeat.seq,
-                    uptime_s: s.heartbeat.uptime_s,
-                    hostname: s.heartbeat.hostname.clone(),
-                    image_version: s.heartbeat.image_version.clone(),
-                    recorder: recorder_text(s.heartbeat.recording.state).to_owned(),
-                    heartbeats: s.count,
-                });
-                let stored = events.get(&entry.stick_id).map_or(&[][..], Vec::as_slice);
-                StickView {
-                    stick_id: entry.stick_id.to_string(),
-                    team: entry.team.clone(),
-                    site: entry.site.clone(),
-                    contest: entry.contest.clone(),
-                    machine_number: entry.machine_number,
-                    online: last
-                        .as_ref()
-                        .is_some_and(|l| l.seconds_ago <= ONLINE_WINDOW_SECONDS),
-                    last,
-                    events: stored.len(),
-                    last_event_at: stored.last().map(|s| s.received_at),
-                    current_user: users_of_latest_boot(stored).pop(),
-                    warnings: warnings(stored),
-                }
-            })
-            .collect()
+        let mut views = Vec::new();
+        for entry in registry.all() {
+            let seen = self.store.last_heartbeat(&entry.stick_id)?;
+            let stored = self.store.events(&entry.stick_id)?;
+            let last = seen.map(|s| LastHeartbeat {
+                received_at: s.received_at,
+                seconds_ago: (now - s.received_at).num_seconds().max(0),
+                boot_id: s.heartbeat.boot_id.clone(),
+                seq: s.heartbeat.seq,
+                uptime_s: s.heartbeat.uptime_s,
+                hostname: s.heartbeat.hostname.clone(),
+                image_version: s.heartbeat.image_version.clone(),
+                recorder: recorder_text(s.heartbeat.recording.state).to_owned(),
+                heartbeats: s.count,
+            });
+            views.push(StickView {
+                stick_id: entry.stick_id.to_string(),
+                team: entry.team.clone(),
+                site: entry.site.clone(),
+                contest: entry.contest.clone(),
+                machine_number: entry.machine_number,
+                online: last
+                    .as_ref()
+                    .is_some_and(|l| l.seconds_ago <= ONLINE_WINDOW_SECONDS),
+                last,
+                events: stored.len(),
+                last_event_at: stored.last().map(|s| s.received_at),
+                current_user: users_of_latest_boot(&stored).pop(),
+                warnings: warnings(&stored),
+            });
+        }
+        Ok(views)
     }
 
     /// One line per message in the log file: what happened and to which stick, never the secret,
@@ -329,7 +317,7 @@ fn recorder_text(state: RecorderState) -> &'static str {
 
 /// The user names of the logins in the latest boot that has any events, in order of login and
 /// without repeats of the same name in a row.
-fn users_of_latest_boot(stored: &[Stored]) -> Vec<String> {
+fn users_of_latest_boot(stored: &[StoredEvent]) -> Vec<String> {
     let Some(boot) = stored.last().map(|s| s.event.boot_id.as_str()) else {
         return Vec::new();
     };
@@ -348,7 +336,7 @@ fn users_of_latest_boot(stored: &[Stored]) -> Vec<String> {
 }
 
 /// Why an organizer should look at this stick.
-fn warnings(stored: &[Stored]) -> Vec<String> {
+fn warnings(stored: &[StoredEvent]) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     let mut distinct: Vec<String> = users_of_latest_boot(stored);
     distinct.sort();
@@ -361,7 +349,7 @@ fn warnings(stored: &[Stored]) -> Vec<String> {
         ));
     }
     for item in stored {
-        if let Some(problem) = item.integrity {
+        if let Some(problem) = &item.integrity {
             let text = format!(
                 "event {} of boot {}: {problem}",
                 item.event.seq, item.event.boot_id

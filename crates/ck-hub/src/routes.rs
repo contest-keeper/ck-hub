@@ -47,6 +47,7 @@ async fn heartbeat(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes)
             (StatusCode::UNAUTHORIZED, "unknown stick or bad signature").into_response()
         }
         Err(Rejection::Conflict(why)) => (StatusCode::CONFLICT, why).into_response(),
+        Err(Rejection::Unavailable) => unavailable(),
     }
 }
 
@@ -64,6 +65,7 @@ async fn event(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) -> 
         }
         // The stick treats this as "already have it" and stops sending that event.
         Err(Rejection::Conflict(why)) => (StatusCode::CONFLICT, why).into_response(),
+        Err(Rejection::Unavailable) => unavailable(),
     }
 }
 
@@ -71,8 +73,23 @@ async fn page() -> Html<&'static str> {
     Html(PAGE)
 }
 
-async fn sticks(State(hub): State<Arc<Hub>>) -> Json<Vec<StickView>> {
-    Json(hub.sticks())
+async fn sticks(State(hub): State<Arc<Hub>>) -> Response {
+    match hub.sticks() {
+        Ok(sticks) => Json::<Vec<StickView>>(sticks).into_response(),
+        Err(error) => {
+            tracing::error!("{error}");
+            unavailable()
+        }
+    }
+}
+
+/// The stick keeps what it could not send and tries again later.
+fn unavailable() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the Hub cannot keep or read its data right now",
+    )
+        .into_response()
 }
 
 fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
