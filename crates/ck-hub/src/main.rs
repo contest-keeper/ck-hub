@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use chrono::Utc;
-use ck_hub::{Hub, Registry, router};
+use ck_hub::{Hub, MemoryStore, Registry, router};
 use clap::Parser;
 
 #[derive(Parser)]
@@ -48,7 +48,12 @@ async fn run(cli: Cli) -> Result<(), String> {
         ),
         None => None,
     };
-    let hub = Arc::new(Hub::new(registry, log, Box::new(Utc::now)));
+    let hub = Arc::new(Hub::new(
+        registry,
+        Box::new(MemoryStore::default()),
+        log,
+        Box::new(Utc::now),
+    ));
 
     let listener = tokio::net::TcpListener::bind(cli.listen)
         .await

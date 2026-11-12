@@ -6,7 +6,9 @@
 mod hub;
 mod registry;
 mod routes;
+mod store;
 
 pub use hub::{Hub, LastHeartbeat, ONLINE_WINDOW_SECONDS, Rejection, StickView};
 pub use registry::{Entry, Registry, RegistryError};
 pub use routes::router;
+pub use store::{MemoryStore, SeenHeartbeat, Store, StoreError, StoredEvent};

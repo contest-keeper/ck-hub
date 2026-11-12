@@ -5,7 +5,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{DateTime, Duration, Utc};
-use ck_hub::{Hub, ONLINE_WINDOW_SECONDS, Registry, router};
+use ck_hub::{Hub, MemoryStore, ONLINE_WINDOW_SECONDS, Registry, router};
 use ck_protocol::{
     Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, RecorderStatus, RecordingMode,
     SIGNATURE_HEADER, STICK_HEADER, StickId, Token,
@@ -62,7 +62,12 @@ fn setup() -> Setup {
         let now = Arc::clone(&now);
         Box::new(move || *now.lock().expect("clock"))
     };
-    let app = router(Arc::new(Hub::new(registry, Some(log), clock)));
+    let app = router(Arc::new(Hub::new(
+        registry,
+        Box::new(MemoryStore::default()),
+        Some(log),
+        clock,
+    )));
     Setup { dir, app, now }
 }
 
