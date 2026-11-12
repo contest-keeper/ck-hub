@@ -97,19 +97,23 @@ impl Accounts {
 
     fn blocked(&self, key: &str, now: DateTime<Utc>, max: u32, window: i64) -> bool {
         let failures = self.failures.lock().expect("failures lock");
-        failures.get(key).is_some_and(|f| {
-            f.count >= max && now < f.since + Duration::seconds(window)
-        })
+        failures
+            .get(key)
+            .is_some_and(|f| f.count >= max && now < f.since + Duration::seconds(window))
     }
 
     fn fail(&self, key: &str, now: DateTime<Utc>, window: i64) {
         let mut failures = self.failures.lock().expect("failures lock");
-        let entry = failures
-            .entry(key.to_owned())
-            .or_insert(Failures { count: 0, since: now });
+        let entry = failures.entry(key.to_owned()).or_insert(Failures {
+            count: 0,
+            since: now,
+        });
         // A new window starts when the old one is over.
         if now >= entry.since + Duration::seconds(window) {
-            *entry = Failures { count: 0, since: now };
+            *entry = Failures {
+                count: 0,
+                since: now,
+            };
         }
         entry.count += 1;
     }
@@ -170,7 +174,11 @@ impl Hub {
                 unavailable(&error);
                 CreateUserError::Unavailable
             })?;
-        if created { Ok(()) } else { Err(CreateUserError::NameTaken) }
+        if created {
+            Ok(())
+        } else {
+            Err(CreateUserError::NameTaken)
+        }
     }
 
     /// Checks a name and password. On success returns the session token for the browser's cookie.
