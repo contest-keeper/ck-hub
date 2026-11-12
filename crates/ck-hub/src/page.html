@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Keeper Hub</title>
+<style>
+  :root {
+    --bg: #f3f5f8; --panel: #ffffff; --fg: #14202c; --muted: #596675; --line: #cdd5de;
+    --ok: #0b7a6f; --ok-bg: #e3f4f1; --off: #8a3b2e; --off-bg: #f8e6e2;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e151e; --panel: #151f2b; --fg: #e5ecf3; --muted: #93a2b2; --line: #2e3b4a;
+      --ok: #3fd0c0; --ok-bg: #0f2e2e; --off: #f0a090; --off-bg: #3a1f1a;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, "Segoe UI", sans-serif; }
+  main { max-width: 1180px; margin: 0 auto; padding: 28px max(16px, env(safe-area-inset-left)); }
+  h1 { margin: 0 0 4px; font-size: 24px; }
+  #summary { color: var(--muted); margin-bottom: 16px; }
+  #problem { display: none; margin-bottom: 12px; padding: 8px 12px; border-radius: 6px; background: var(--off-bg); color: var(--off); }
+  .wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  table { border-collapse: collapse; width: 100%; min-width: 760px; }
+  th { text-align: left; font-size: 12px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); padding: 10px 12px; }
+  td { padding: 9px 12px; border-top: 1px solid var(--line); white-space: nowrap; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .pill { display: inline-block; padding: 1px 9px; border-radius: 10px; font-size: 13px; font-weight: 600; }
+  .pill.on { background: var(--ok-bg); color: var(--ok); }
+  .pill.off { background: var(--off-bg); color: var(--off); }
+  .mono { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+  .muted { color: var(--muted); }
+  #empty { display: none; padding: 20px 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Keeper Hub</h1>
+  <div id="summary">Loading…</div>
+  <div id="problem">The Hub cannot be reached. The list below is the last one received.</div>
+  <div class="wrap">
+    <table>
+      <thead><tr>
+        <th class="num">#</th><th>Team</th><th>Site</th><th>Contest</th><th>Status</th>
+        <th>Last seen</th><th>Computer</th><th class="num">Up</th><th>Recorder</th>
+        <th class="num">Heartbeats</th><th>Image</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div id="empty">No sticks yet. Make one with ck-forge and it appears here.</div>
+  </div>
+</main>
+<script>
+const REFRESH_MS = 5000;
+
+function ago(seconds) {
+  if (seconds < 5) return "just now";
+  if (seconds < 90) return seconds + " s ago";
+  if (seconds < 5400) return Math.round(seconds / 60) + " min ago";
+  return Math.round(seconds / 3600) + " h ago";
+}
+
+function span(seconds) {
+  if (seconds < 90) return seconds + " s";
+  if (seconds < 5400) return Math.round(seconds / 60) + " min";
+  return (seconds / 3600).toFixed(1) + " h";
+}
+
+function cell(row, text, className) {
+  const td = document.createElement("td");
+  if (className) td.className = className;
+  td.textContent = text;
+  row.appendChild(td);
+  return td;
+}
+
+function render(sticks) {
+  const body = document.getElementById("rows");
+  body.replaceChildren();
+  let online = 0;
+  for (const stick of sticks) {
+    if (stick.online) online += 1;
+    const last = stick.last;
+    const row = document.createElement("tr");
+    cell(row, stick.machine_number ?? "", "num");
+    cell(row, stick.team);
+    cell(row, stick.site);
+    cell(row, stick.contest);
+    const status = cell(row, "");
+    const pill = document.createElement("span");
+    pill.className = "pill " + (stick.online ? "on" : "off");
+    pill.textContent = stick.online ? "online" : (last ? "offline" : "not seen yet");
+    status.appendChild(pill);
+    cell(row, last ? ago(last.seconds_ago) : "", last ? "" : "muted");
+    cell(row, last ? last.hostname : "", "mono");
+    cell(row, last ? span(last.uptime_s) : "", "num");
+    cell(row, last ? last.recorder : "");
+    cell(row, last ? String(last.heartbeats) : "", "num");
+    cell(row, last ? last.image_version : "", "muted");
+    body.appendChild(row);
+  }
+  document.getElementById("empty").style.display = sticks.length ? "none" : "block";
+  document.getElementById("summary").textContent =
+    sticks.length + (sticks.length === 1 ? " stick" : " sticks") + " · " + online + " online";
+}
+
+async function refresh() {
+  const problem = document.getElementById("problem");
+  try {
+    const response = await fetch("/api/v1/sticks", { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    render(await response.json());
+    problem.style.display = "none";
+  } catch (error) {
+    problem.style.display = "block";
+  }
+}
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>

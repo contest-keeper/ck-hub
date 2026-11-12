@@ -360,3 +360,40 @@ async fn an_unknown_route_is_not_found() {
         .expect("response");
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn the_page_is_served_and_needs_nothing_from_outside() {
+    let setup = setup();
+    let response = setup
+        .app
+        .clone()
+        .oneshot(Request::get("/").body(Body::empty()).expect("request"))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response.headers()["content-type"]
+        .to_str()
+        .expect("text")
+        .to_owned();
+    assert!(content_type.starts_with("text/html"), "{content_type}");
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let page = String::from_utf8_lossy(&bytes);
+    assert!(
+        page.contains("/api/v1/sticks"),
+        "the page reads the stick list"
+    );
+    // Everything is in the one file: no scripts, styles or images from another address.
+    assert!(
+        !page.contains("http://") && !page.contains("https://"),
+        "an outside address"
+    );
+    assert!(
+        !page.contains("innerHTML"),
+        "stick names must not be put into the page as markup"
+    );
+}
