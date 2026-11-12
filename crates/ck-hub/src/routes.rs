@@ -35,37 +35,36 @@ pub fn router(hub: Arc<Hub>) -> Router {
 }
 
 async fn heartbeat(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) -> Response {
-    let result = hub.accept_heartbeat(
-        header(&headers, STICK_HEADER),
-        header(&headers, SIGNATURE_HEADER),
-        &body,
-    );
-    match result {
-        Ok(seq) => Json(json!({ "accepted": seq })).into_response(),
-        Err(Rejection::BadRequest(why)) => (StatusCode::BAD_REQUEST, why).into_response(),
-        Err(Rejection::Unauthorized) => {
-            (StatusCode::UNAUTHORIZED, "unknown stick or bad signature").into_response()
-        }
-        Err(Rejection::Conflict(why)) => (StatusCode::CONFLICT, why).into_response(),
-        Err(Rejection::Unavailable) => unavailable(),
-    }
+    let (stick, signature) = auth_headers(&headers);
+    // The store may talk to a database, which blocks. That belongs on a thread of its own, never
+    // on the threads that serve requests.
+    let result = tokio::task::spawn_blocking(move || {
+        hub.accept_heartbeat(stick.as_deref(), signature.as_deref(), &body)
+    })
+    .await;
+    accepted(result)
 }
 
 async fn event(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) -> Response {
-    let result = hub.accept_event(
-        header(&headers, STICK_HEADER),
-        header(&headers, SIGNATURE_HEADER),
-        &body,
-    );
+    let (stick, signature) = auth_headers(&headers);
+    let result = tokio::task::spawn_blocking(move || {
+        hub.accept_event(stick.as_deref(), signature.as_deref(), &body)
+    })
+    .await;
+    accepted(result)
+}
+
+/// The answer to a heartbeat or an event. A 409 means the Hub already has it, which a stick counts
+/// as sent.
+fn accepted(result: Result<Result<u64, Rejection>, tokio::task::JoinError>) -> Response {
     match result {
-        Ok(seq) => Json(json!({ "accepted": seq })).into_response(),
-        Err(Rejection::BadRequest(why)) => (StatusCode::BAD_REQUEST, why).into_response(),
-        Err(Rejection::Unauthorized) => {
+        Ok(Ok(seq)) => Json(json!({ "accepted": seq })).into_response(),
+        Ok(Err(Rejection::BadRequest(why))) => (StatusCode::BAD_REQUEST, why).into_response(),
+        Ok(Err(Rejection::Unauthorized)) => {
             (StatusCode::UNAUTHORIZED, "unknown stick or bad signature").into_response()
         }
-        // The stick treats this as "already have it" and stops sending that event.
-        Err(Rejection::Conflict(why)) => (StatusCode::CONFLICT, why).into_response(),
-        Err(Rejection::Unavailable) => unavailable(),
+        Ok(Err(Rejection::Conflict(why))) => (StatusCode::CONFLICT, why).into_response(),
+        Ok(Err(Rejection::Unavailable)) | Err(_) => unavailable(),
     }
 }
 
@@ -74,12 +73,13 @@ async fn page() -> Html<&'static str> {
 }
 
 async fn sticks(State(hub): State<Arc<Hub>>) -> Response {
-    match hub.sticks() {
-        Ok(sticks) => Json::<Vec<StickView>>(sticks).into_response(),
-        Err(error) => {
+    match tokio::task::spawn_blocking(move || hub.sticks()).await {
+        Ok(Ok(sticks)) => Json::<Vec<StickView>>(sticks).into_response(),
+        Ok(Err(error)) => {
             tracing::error!("{error}");
             unavailable()
         }
+        Err(_) => unavailable(),
     }
 }
 
@@ -92,6 +92,13 @@ fn unavailable() -> Response {
         .into_response()
 }
 
-fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers.get(name).and_then(|value| value.to_str().ok())
+/// The stick id and the signature, as owned text so they can move to the blocking thread.
+fn auth_headers(headers: &HeaderMap) -> (Option<String>, Option<String>) {
+    let get = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    (get(STICK_HEADER), get(SIGNATURE_HEADER))
 }

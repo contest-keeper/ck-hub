@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use chrono::Utc;
-use ck_hub::{Hub, MemoryStore, Registry, router};
+use ck_hub::{Hub, MemoryStore, PostgresStore, Registry, Store, router};
 use clap::Parser;
 
 #[derive(Parser)]
@@ -19,6 +19,10 @@ struct Cli {
     /// The registry file ck-forge writes. It holds every stick's secret, so keep it private
     #[arg(long)]
     registry: PathBuf,
+    /// The PostgreSQL address, like `postgres://user:password@localhost/ckhub`. Without it the Hub
+    /// keeps everything in memory and forgets it when it stops
+    #[arg(long, env = "CK_DATABASE_URL", hide_env_values = true)]
+    database_url: Option<String>,
     /// A file to add one line to for every heartbeat, accepted or not. No secrets go in it
     #[arg(long)]
     log: Option<PathBuf>,
@@ -48,12 +52,18 @@ async fn run(cli: Cli) -> Result<(), String> {
         ),
         None => None,
     };
-    let hub = Arc::new(Hub::new(
-        registry,
-        Box::new(MemoryStore::default()),
-        log,
-        Box::new(Utc::now),
-    ));
+    let store: Box<dyn Store> = if let Some(url) = cli.database_url.clone() {
+        // The database client blocks and starts a runtime of its own, so it must not connect on a
+        // thread that already runs async tasks.
+        let connected = tokio::task::spawn_blocking(move || PostgresStore::connect(&url))
+            .await
+            .map_err(|e| e.to_string())?;
+        Box::new(connected.map_err(|e| e.to_string())?)
+    } else {
+        tracing::warn!("no database: everything is kept in memory and lost when the Hub stops");
+        Box::new(MemoryStore::default())
+    };
+    let hub = Arc::new(Hub::new(registry, store, log, Box::new(Utc::now)));
 
     let listener = tokio::net::TcpListener::bind(cli.listen)
         .await

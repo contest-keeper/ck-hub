@@ -4,11 +4,13 @@
 //! sticks and their secrets come from the registry file `ck-forge` writes.
 
 mod hub;
+mod postgres_store;
 mod registry;
 mod routes;
 mod store;
 
 pub use hub::{Hub, LastHeartbeat, ONLINE_WINDOW_SECONDS, Rejection, StickView};
+pub use postgres_store::PostgresStore;
 pub use registry::{Entry, Registry, RegistryError};
 pub use routes::router;
 pub use store::{MemoryStore, SeenHeartbeat, Store, StoreError, StoredEvent};
