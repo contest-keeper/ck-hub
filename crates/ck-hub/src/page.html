@@ -60,6 +60,7 @@ try { if (localStorage.getItem("ck-theme") === "classic") document.documentEleme
   :root[data-theme="classic"] .logo { background: #0b2545; }
   .brand { font-weight: 700; font-size: 17px; }
   .grow { flex: 1; }
+  [hidden] { display: none !important; }
   .live { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; }
   .live i { width: 8px; height: 8px; border-radius: 50%; background: var(--live); display: block; }
   #who { display: none; align-items: center; gap: 10px; font-size: 13px; }
@@ -259,7 +260,12 @@ function matches(stick) {
 function facts(stick) {
   const last = stick.last;
   const list = el("dl", "facts");
-  const add = (name, value) => { list.appendChild(el("dt", "", name)); list.appendChild(el("dd", "", value)); };
+  const add = (name, value) => {
+    const pair = el("div");
+    pair.appendChild(el("dt", "", name));
+    pair.appendChild(el("dd", "", value));
+    list.appendChild(pair);
+  };
   add("Contest", stick.contest);
   add("Site", stick.site);
   add("Computer", last ? last.hostname : "—");
