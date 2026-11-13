@@ -1,8 +1,9 @@
 //! What the Hub knows about the sticks, and the rules for accepting a heartbeat.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use ck_protocol::{Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, StickId};
@@ -11,10 +12,14 @@ use serde_json::json;
 
 use crate::accounts::{Accounts, PasswordCost};
 use crate::registry::Registry;
-use crate::store::{Store, StoreError, StoredEvent};
+use crate::store::{Stick, Store, StoreError, StoredEvent};
 
 /// A stick that has sent nothing for longer than this is shown as offline.
 pub const ONLINE_WINDOW_SECONDS: i64 = 60;
+
+/// A stick sends a heartbeat every few seconds and a few events; this leaves room for a burst and
+/// stops a stick with a leaked secret from filling the database.
+const MAX_MESSAGES_PER_MINUTE: u32 = 120;
 
 /// Why a heartbeat was not accepted. The caller turns this into an HTTP answer.
 #[derive(Debug, PartialEq, Eq)]
@@ -27,6 +32,8 @@ pub enum Rejection {
     Unauthorized,
     /// A message that is not newer than the last one of this boot.
     Conflict(String),
+    /// One stick sent more than [`MAX_MESSAGES_PER_MINUTE`] messages in a minute.
+    TooManyRequests,
     /// The Hub could not keep or read the data. The stick tries again later.
     Unavailable,
 }
@@ -74,11 +81,13 @@ pub struct LastHeartbeat {
 
 pub struct Hub {
     pub(crate) registry: Mutex<Registry>,
-    pub(crate) store: Box<dyn Store>,
+    pub(crate) store: Arc<dyn Store>,
     pub(crate) accounts: Accounts,
     /// One message at a time is read, judged and kept, so two heartbeats of one stick cannot both
     /// pass the sequence check.
     write: Mutex<()>,
+    /// Per stick: when the current minute started and how many messages it has seen.
+    rates: Mutex<HashMap<StickId, (DateTime<Utc>, u32)>>,
     log: Option<Mutex<File>>,
     pub(crate) clock: Box<dyn Fn() -> DateTime<Utc> + Send + Sync>,
 }
@@ -87,7 +96,7 @@ impl Hub {
     #[must_use]
     pub fn new(
         registry: Registry,
-        store: Box<dyn Store>,
+        store: Arc<dyn Store>,
         log: Option<File>,
         clock: Box<dyn Fn() -> DateTime<Utc> + Send + Sync>,
     ) -> Self {
@@ -96,6 +105,7 @@ impl Hub {
             store,
             accounts: Accounts::new(PasswordCost::default()),
             write: Mutex::new(()),
+            rates: Mutex::new(HashMap::new()),
             log: log.map(Mutex::new),
             clock,
         }
@@ -109,9 +119,6 @@ impl Hub {
     }
 
     /// Checks a heartbeat and, when it is fine, remembers it. Returns its sequence number.
-    ///
-    /// # Errors
-    /// See [`Rejection`].
     pub fn accept_heartbeat(
         &self,
         stick_header: Option<&str>,
@@ -119,14 +126,7 @@ impl Hub {
         body: &[u8],
     ) -> Result<u64, Rejection> {
         let result = self.check(stick_header, signature, body);
-        let (outcome, seq) = match &result {
-            Ok(seq) => ("accepted", Some(*seq)),
-            Err(Rejection::BadRequest(why)) => (*why, None),
-            Err(Rejection::Unauthorized) => ("unknown stick or bad signature", None),
-            Err(Rejection::Conflict(_)) => ("sequence not newer", None),
-            Err(Rejection::Unavailable) => ("the store failed", None),
-        };
-        self.record(outcome, stick_header, seq);
+        self.record(&result, "accepted", "sequence not newer", stick_header);
         result
     }
 
@@ -137,27 +137,44 @@ impl Hub {
         body: &[u8],
     ) -> Result<u64, Rejection> {
         let id = self.authenticate(stick_header, signature, body)?;
+        self.rate_limit(&id)?;
         let heartbeat: Heartbeat = serde_json::from_slice(body)
             .map_err(|_| Rejection::BadRequest("the heartbeat cannot be read"))?;
         if heartbeat.stick_id != id {
             return Err(Rejection::BadRequest("the heartbeat is for another stick"));
         }
+        storable(body, heartbeat.seq)?;
 
         let _one_at_a_time = self.write.lock().expect("write lock");
-        let previous = self.store.last_heartbeat(&id)?;
         // The sequence starts again at every boot, so only a message of the same boot is compared.
-        if let Some(previous) = &previous
-            && previous.heartbeat.boot_id == heartbeat.boot_id
-            && heartbeat.seq <= previous.heartbeat.seq
+        // The highest one of each boot is kept, so an old boot cannot be replayed after a newer
+        // one.
+        if let Some(top) = self.store.heartbeat_seq_of_boot(&id, &heartbeat.boot_id)?
+            && heartbeat.seq <= top
         {
             return Err(Rejection::Conflict(format!(
-                "sequence {} is not newer than {}",
-                heartbeat.seq, previous.heartbeat.seq
+                "sequence {} is not newer than {top}",
+                heartbeat.seq
             )));
         }
         let seq = heartbeat.seq;
         self.store.record_heartbeat(heartbeat, (self.clock)())?;
         Ok(seq)
+    }
+
+    /// Counts a message of `id` in the current minute and refuses it past the limit.
+    fn rate_limit(&self, id: &StickId) -> Result<(), Rejection> {
+        let now = (self.clock)();
+        let mut rates = self.rates.lock().expect("rates lock");
+        let (since, count) = rates.entry(id.clone()).or_insert((now, 0));
+        if (now - *since).num_seconds() >= 60 {
+            (*since, *count) = (now, 0);
+        }
+        *count += 1;
+        if *count > MAX_MESSAGES_PER_MINUTE {
+            return Err(Rejection::TooManyRequests);
+        }
+        Ok(())
     }
 
     /// Who sent this: the stick named in the header, if the registry knows it and its secret
@@ -196,9 +213,7 @@ impl Hub {
     /// send it again for ever and block everything behind it. The problem is kept with the event
     /// and shown as a warning, because a gap or a changed event is the thing worth seeing.
     ///
-    /// # Errors
-    /// [`Rejection::Conflict`] for an event the Hub already has, which the stick counts as sent.
-    /// See [`Rejection`] for the rest.
+    /// An event the Hub already has is a [`Rejection::Conflict`], which the stick counts as sent.
     pub fn accept_event(
         &self,
         stick_header: Option<&str>,
@@ -206,14 +221,12 @@ impl Hub {
         body: &[u8],
     ) -> Result<u64, Rejection> {
         let result = self.check_event(stick_header, signature, body);
-        let (outcome, seq) = match &result {
-            Ok(seq) => ("event accepted", Some(*seq)),
-            Err(Rejection::BadRequest(why)) => (*why, None),
-            Err(Rejection::Unauthorized) => ("unknown stick or bad signature", None),
-            Err(Rejection::Conflict(_)) => ("event already received", None),
-            Err(Rejection::Unavailable) => ("the store failed", None),
-        };
-        self.record(outcome, stick_header, seq);
+        self.record(
+            &result,
+            "event accepted",
+            "event already received",
+            stick_header,
+        );
         result
     }
 
@@ -224,18 +237,17 @@ impl Hub {
         body: &[u8],
     ) -> Result<u64, Rejection> {
         let id = self.authenticate(stick_header, signature, body)?;
+        self.rate_limit(&id)?;
         let event: Event = serde_json::from_slice(body)
             .map_err(|_| Rejection::BadRequest("the event cannot be read"))?;
         if event.stick_id != id {
             return Err(Rejection::BadRequest("the event is for another stick"));
         }
+        storable(body, event.seq)?;
 
         let _one_at_a_time = self.write.lock().expect("write lock");
-        let stored = self.store.events(&id)?;
-        let last_of_boot = stored
-            .iter()
-            .rev()
-            .find(|s| s.event.boot_id == event.boot_id);
+        let last_of_boot = self.store.last_event_of_boot(&id, &event.boot_id)?;
+        let last_of_boot = last_of_boot.as_ref();
         let integrity = match last_of_boot {
             Some(last) if event.seq <= last.event.seq => {
                 return Err(Rejection::Conflict(format!(
@@ -264,25 +276,16 @@ impl Hub {
     }
 
     /// Every stick the admin made, with its last heartbeat when it has sent one.
-    /// # Errors
-    /// When the data cannot be read.
     pub fn sticks(&self) -> Result<Vec<StickView>, StoreError> {
         let now = (self.clock)();
-        let mut entries: Vec<crate::registry::Entry> = {
+        let mut entries: Vec<Stick> = {
             let mut registry = self.registry.lock().expect("registry lock");
             registry.refresh();
-            registry.all().into_iter().cloned().collect()
+            registry.all().cloned().collect()
         };
         for stick in self.store.sticks()? {
             if !entries.iter().any(|e| e.stick_id == stick.stick_id) {
-                entries.push(crate::registry::Entry {
-                    stick_id: stick.stick_id,
-                    token: stick.token,
-                    team: stick.team,
-                    site: stick.site,
-                    contest: stick.contest,
-                    machine_number: stick.machine_number,
-                });
+                entries.push(stick);
             }
         }
         // The order an organizer reads them in: by contest, then machine number.
@@ -297,6 +300,7 @@ impl Hub {
         for entry in &entries {
             let seen = self.store.last_heartbeat(&entry.stick_id)?;
             let stored = self.store.events(&entry.stick_id)?;
+            let boot = seen.as_ref().map(|s| s.heartbeat.boot_id.clone());
             let last = seen.map(|s| LastHeartbeat {
                 received_at: s.received_at,
                 seconds_ago: (now - s.received_at).num_seconds().max(0),
@@ -320,16 +324,30 @@ impl Hub {
                 last,
                 events: stored.len(),
                 last_event_at: stored.last().map(|s| s.received_at),
-                current_user: users_of_latest_boot(&stored).pop(),
-                warnings: warnings(&stored),
+                current_user: users_of_boot(&stored, boot.as_deref()).pop(),
+                warnings: warnings(&stored, boot.as_deref()),
             });
         }
         Ok(views)
     }
 
     /// One line per message in the log file: what happened and to which stick, never the secret,
-    /// the signature or the body.
-    fn record(&self, outcome: &str, stick: Option<&str>, seq: Option<u64>) {
+    /// the signature or the body. `accepted` and `conflict` are the words for those two outcomes.
+    fn record(
+        &self,
+        result: &Result<u64, Rejection>,
+        accepted: &'static str,
+        conflict: &'static str,
+        stick: Option<&str>,
+    ) {
+        let (outcome, seq) = match result {
+            Ok(seq) => (accepted, Some(*seq)),
+            Err(Rejection::BadRequest(why)) => (*why, None),
+            Err(Rejection::Unauthorized) => ("unknown stick or bad signature", None),
+            Err(Rejection::Conflict(_)) => (conflict, None),
+            Err(Rejection::TooManyRequests) => ("too many messages from this stick", None),
+            Err(Rejection::Unavailable) => ("the store failed", None),
+        };
         tracing::info!(outcome, stick, seq, "heartbeat");
         let Some(log) = &self.log else { return };
         let line = json!({
@@ -353,10 +371,19 @@ fn recorder_text(state: RecorderState) -> &'static str {
     }
 }
 
-/// The user names of the logins in the latest boot that has any events, in order of login and
-/// without repeats of the same name in a row.
-fn users_of_latest_boot(stored: &[StoredEvent]) -> Vec<String> {
-    let Some(boot) = stored.last().map(|s| s.event.boot_id.as_str()) else {
+/// Refuses what PostgreSQL could not keep, so the stick is told once instead of retrying for ever:
+/// a sequence above `i64::MAX`, or text with a NUL character.
+fn storable(body: &[u8], seq: u64) -> Result<(), Rejection> {
+    if i64::try_from(seq).is_err() || body.windows(6).any(|w| w == b"\\u0000") {
+        return Err(Rejection::BadRequest("a value cannot be stored"));
+    }
+    Ok(())
+}
+
+/// The user names of the logins in `boot` (the boot of the last heartbeat, or of the last event
+/// when there is no heartbeat), in order of login and without repeats of the same name in a row.
+fn users_of_boot(stored: &[StoredEvent], boot: Option<&str>) -> Vec<String> {
+    let Some(boot) = boot.or_else(|| stored.last().map(|s| s.event.boot_id.as_str())) else {
         return Vec::new();
     };
     let mut users: Vec<String> = Vec::new();
@@ -374,9 +401,9 @@ fn users_of_latest_boot(stored: &[StoredEvent]) -> Vec<String> {
 }
 
 /// Why an organizer should look at this stick.
-fn warnings(stored: &[StoredEvent]) -> Vec<String> {
+fn warnings(stored: &[StoredEvent], boot: Option<&str>) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
-    let mut distinct: Vec<String> = users_of_latest_boot(stored);
+    let mut distinct: Vec<String> = users_of_boot(stored, boot);
     distinct.sort();
     distinct.dedup();
     if distinct.len() > 1 {

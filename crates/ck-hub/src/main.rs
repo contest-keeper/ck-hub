@@ -216,14 +216,14 @@ async fn run(args: ServeArgs) -> Result<(), String> {
         None => None,
     };
     let has_database = args.database.database_url.is_some();
-    let store: Box<dyn Store> = if let Some(url) = args.database.database_url {
-        Box::new(connect(url).await?)
+    let store: Arc<dyn Store> = if let Some(url) = args.database.database_url {
+        Arc::new(connect(url).await?)
     } else {
         tracing::warn!(
             "no database: everything is kept in memory, no organizer account exists, and the data \
              is lost when the Hub stops"
         );
-        Box::new(MemoryStore::default())
+        Arc::new(MemoryStore::default())
     };
     if args.registry.is_none() && !has_database {
         tracing::warn!(
@@ -237,9 +237,26 @@ async fn run(args: ServeArgs) -> Result<(), String> {
         .map_err(|e| format!("cannot listen on {}: {e}", args.listen))?;
     tracing::info!("listening on {}", args.listen);
     axum::serve(listener, router(hub))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Resolves on Ctrl-C, or on SIGTERM, which is what `docker stop` sends.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! { () = ctrl_c => {}, _ = term.recv() => {} }
+            }
+            Err(_) => ctrl_c.await,
+        }
+    }
+    #[cfg(not(unix))]
+    ctrl_c.await;
 }

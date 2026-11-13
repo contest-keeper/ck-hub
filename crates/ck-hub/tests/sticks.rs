@@ -29,7 +29,7 @@ fn setup_with_registry(registry_json: &str) -> Setup {
     };
     let hub = Hub::new(
         registry,
-        Box::new(MemoryStore::default()),
+        Arc::new(MemoryStore::default()),
         None,
         Box::new(Utc::now),
     )
@@ -239,6 +239,13 @@ async fn a_bad_request_registers_nothing_at_all() {
     with_control["team"] = json!("bad\nname");
     assert_eq!(
         register(&setup.app, Some(&admin), &with_control).await.0,
+        StatusCode::BAD_REQUEST
+    );
+
+    let mut huge_number = stick("stick-4", TOKEN);
+    huge_number["machine_number"] = json!(3_000_000_000_u32);
+    assert_eq!(
+        register(&setup.app, Some(&admin), &huge_number).await.0,
         StatusCode::BAD_REQUEST
     );
 

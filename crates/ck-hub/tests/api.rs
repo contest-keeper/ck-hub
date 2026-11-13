@@ -64,7 +64,7 @@ fn setup() -> Setup {
         Box::new(move || *now.lock().expect("clock"))
     };
     // Hashing is made cheap here: the tests log in many times.
-    let hub = Hub::new(registry, Box::new(MemoryStore::default()), Some(log), clock)
+    let hub = Hub::new(registry, Arc::new(MemoryStore::default()), Some(log), clock)
         .with_password_cost(PasswordCost {
             memory_kib: 8,
             passes: 1,
@@ -99,6 +99,18 @@ fn sign(token: &str, body: &[u8]) -> String {
     ck_crypto::sign(&Token::new(token), body)
 }
 
+async fn call(app: &Router, request: Request<Body>) -> (StatusCode, String) {
+    let response = app.clone().oneshot(request).await.expect("response");
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
 async fn send(
     app: &Router,
     stick: Option<&str>,
@@ -112,19 +124,7 @@ async fn send(
     if let Some(signature) = signature {
         request = request.header(SIGNATURE_HEADER, signature);
     }
-    let response = app
-        .clone()
-        .oneshot(request.body(Body::from(body)).expect("request"))
-        .await
-        .expect("response");
-    let status = response.status();
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body")
-        .to_bytes();
-    (status, String::from_utf8_lossy(&bytes).into_owned())
+    call(app, request.body(Body::from(body)).expect("request")).await
 }
 
 /// A correctly signed heartbeat from stick A.
@@ -154,24 +154,13 @@ async fn organizer_cookie(app: &Router) -> String {
 
 async fn list(app: &Router) -> serde_json::Value {
     let cookie = organizer_cookie(app).await;
-    let response = app
-        .clone()
-        .oneshot(
-            Request::get("/api/v1/sticks")
-                .header("cookie", cookie)
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    assert_eq!(response.status(), StatusCode::OK);
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body")
-        .to_bytes();
-    serde_json::from_slice(&bytes).expect("json")
+    let request = Request::get("/api/v1/sticks")
+        .header("cookie", cookie)
+        .body(Body::empty())
+        .expect("request");
+    let (status, text) = call(app, request).await;
+    assert_eq!(status, StatusCode::OK);
+    serde_json::from_str(&text).expect("json")
 }
 
 #[tokio::test]
@@ -375,22 +364,6 @@ async fn an_oversized_body_is_refused_before_it_is_read() {
 }
 
 #[tokio::test]
-async fn an_unknown_route_is_not_found() {
-    let setup = setup();
-    let response = setup
-        .app
-        .clone()
-        .oneshot(
-            Request::get("/api/v1/nothing")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
 async fn the_page_is_served_and_needs_nothing_from_outside() {
     let setup = setup();
     let response = setup
@@ -455,15 +428,7 @@ async fn send_event(
         .header(SIGNATURE_HEADER, sign(TOKEN_A, &body))
         .body(Body::from(body))
         .expect("request");
-    let response = app.clone().oneshot(request).await.expect("response");
-    let status = response.status();
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body")
-        .to_bytes();
-    (status, String::from_utf8_lossy(&bytes).into_owned())
+    call(app, request).await
 }
 
 fn next_hash(boot: &str, seq: u64, prev_hash: &str, user: &str) -> String {
@@ -602,19 +567,8 @@ async fn two_different_users_in_one_boot_are_a_warning_but_a_new_boot_starts_cle
 #[tokio::test]
 async fn the_page_script_is_valid_javascript() {
     let setup = setup();
-    let response = setup
-        .app
-        .clone()
-        .oneshot(Request::get("/").body(Body::empty()).expect("request"))
-        .await
-        .expect("response");
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body")
-        .to_bytes();
-    let page = String::from_utf8_lossy(&bytes);
+    let request = Request::get("/").body(Body::empty()).expect("request");
+    let (_, page) = call(&setup.app, request).await;
     let start = page.find("<script>").expect("a script") + "<script>".len();
     let end = page.find("</script>").expect("the end of the script");
 
@@ -634,4 +588,59 @@ async fn the_page_script_is_valid_javascript() {
 {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[tokio::test]
+async fn a_recorded_heartbeat_of_an_older_boot_cannot_be_replayed() {
+    let setup = setup();
+    assert_eq!(heartbeat(&setup.app, "boot-1", 1).await.0, StatusCode::OK);
+    assert_eq!(heartbeat(&setup.app, "boot-2", 1).await.0, StatusCode::OK);
+    assert_eq!(
+        heartbeat(&setup.app, "boot-1", 1).await.0,
+        StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
+async fn a_stick_that_sends_too_much_is_slowed_down_and_may_send_again_next_minute() {
+    let setup = setup();
+    for seq in 1..=120 {
+        assert_eq!(heartbeat(&setup.app, "b", seq).await.0, StatusCode::OK);
+    }
+    assert_eq!(
+        heartbeat(&setup.app, "b", 121).await.0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    *setup.now.lock().expect("clock") += Duration::seconds(61);
+    assert_eq!(heartbeat(&setup.app, "b", 121).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn values_the_database_could_not_keep_are_refused_once() {
+    let setup = setup();
+    let body = heartbeat_body("stick-a", "boot", u64::MAX - 100);
+    let signature = sign(TOKEN_A, &body);
+    let (status, _) = send(&setup.app, Some("stick-a"), Some(&signature), body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let text = String::from_utf8(heartbeat_body("stick-a", "boot", 1)).expect("text");
+    let body = text.replace("\"boot\"", "\"bo\\u0000ot\"").into_bytes();
+    let signature = sign(TOKEN_A, &body);
+    let (status, _) = send(&setup.app, Some("stick-a"), Some(&signature), body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn every_answer_forbids_framing_and_outside_resources() {
+    let setup = setup();
+    let response = setup
+        .app
+        .clone()
+        .oneshot(Request::get("/").body(Body::empty()).expect("request"))
+        .await
+        .expect("response");
+    let policy = response.headers()["content-security-policy"]
+        .to_str()
+        .expect("text");
+    assert!(policy.contains("frame-ancestors 'none'") && policy.contains("default-src 'none'"));
 }

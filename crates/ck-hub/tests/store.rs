@@ -3,6 +3,7 @@
 //! the shared checks do not start a database of their own.
 
 use std::fs;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
@@ -91,6 +92,22 @@ fn the_store_contract(store: &dyn Store) {
         .expect("read")
         .expect("a heartbeat");
     assert_eq!((other.heartbeat.seq, other.count), (7, 1));
+    // The highest sequence of every boot is remembered, also after a newer boot started.
+    store
+        .record_heartbeat(heartbeat(&a, "boot-2", 1), time(4))
+        .expect("write");
+    assert_eq!(
+        store.heartbeat_seq_of_boot(&a_id, "boot-1").expect("read"),
+        Some(2)
+    );
+    assert_eq!(
+        store.heartbeat_seq_of_boot(&a_id, "boot-2").expect("read"),
+        Some(1)
+    );
+    assert_eq!(
+        store.heartbeat_seq_of_boot(&a_id, "boot-3").expect("read"),
+        None
+    );
 
     // Events: kept whole, in the order received, for each stick on its own.
     assert!(store.events(&a_id).expect("read").is_empty());
@@ -110,6 +127,17 @@ fn the_store_contract(store: &dyn Store) {
     assert_eq!(events[0].integrity, None);
     assert_eq!(events[1].event, event(&a, 2, "bob"));
     assert_eq!(events[1].integrity.as_deref(), Some("a note"));
+    let last = store
+        .last_event_of_boot(&a_id, &events[1].event.boot_id)
+        .expect("read")
+        .expect("an event");
+    assert_eq!(last.event, event(&a, 2, "bob"));
+    assert!(
+        store
+            .last_event_of_boot(&a_id, "no-such-boot")
+            .expect("read")
+            .is_none()
+    );
 
     // Sticks: added once, never replaced, and read back whole.
     let new = |token: &str| ck_hub::Stick {
@@ -139,6 +167,55 @@ fn the_store_contract(store: &dyn Store) {
             .iter()
             .any(|s| s.stick_id == a_id)
     );
+
+    accounts_and_sessions(store, &a);
+}
+
+fn accounts_and_sessions(store: &dyn Store, a: &str) {
+    // Accounts: a name is taken once and read back whole.
+    let user = |hash: &str, role: Role| ck_hub::User {
+        name: a.to_owned(),
+        password_hash: hash.to_owned(),
+        role,
+    };
+    assert!(store.user(a).expect("read").is_none());
+    assert!(
+        store
+            .create_user(user("hash-1", Role::Viewer))
+            .expect("write")
+    );
+    assert!(
+        !store
+            .create_user(user("hash-2", Role::Admin))
+            .expect("write"),
+        "never replaced"
+    );
+    let kept = store.user(a).expect("read").expect("a user");
+    assert_eq!(
+        (kept.password_hash.as_str(), kept.role),
+        ("hash-1", Role::Viewer)
+    );
+
+    // Sessions: found by their hash until they are deleted; deleting twice is fine.
+    let session = format!("{a}-session");
+    assert!(store.session(&session).expect("read").is_none());
+    store.create_session(&session, a, time(100)).expect("write");
+    assert_eq!(
+        store.session(&session).expect("read"),
+        Some((a.to_owned(), time(100)))
+    );
+    store.delete_session(&session).expect("delete");
+    store.delete_session(&session).expect("delete again");
+    assert!(store.session(&session).expect("read").is_none());
+
+    // Expired sessions are removed; the ones still running stay.
+    let (old, current) = (format!("{a}-old"), format!("{a}-current"));
+    store.create_session(&old, a, time(50)).expect("write");
+    store.create_session(&current, a, time(500)).expect("write");
+    store.delete_expired_sessions(time(100)).expect("delete");
+    assert!(store.session(&old).expect("read").is_none());
+    assert!(store.session(&current).expect("read").is_some());
+    store.delete_session(&current).expect("delete");
 }
 
 #[test]
@@ -234,7 +311,7 @@ fn a_restarted_hub_on_postgres_remembers_what_it_accepted() {
     let start = || {
         Hub::new(
             Registry::open(dir.path().join("registry.json")).expect("registry"),
-            Box::new(PostgresStore::connect(&url).expect("connect")),
+            Arc::new(PostgresStore::connect(&url).expect("connect")),
             None,
             Box::new(Utc::now),
         )
@@ -282,7 +359,7 @@ async fn a_hub_on_postgres_answers_real_http_requests() {
         .expect("connect");
     let hub = Hub::new(
         Registry::open(dir.path().join("registry.json")).expect("registry"),
-        Box::new(store),
+        Arc::new(store),
         None,
         Box::new(Utc::now),
     )
@@ -291,9 +368,9 @@ async fn a_hub_on_postgres_answers_real_http_requests() {
         passes: 1,
     });
     let organizer = format!("{stick}-organizer");
-    let hub = std::sync::Arc::new(hub);
+    let hub = Arc::new(hub);
     // The database client blocks, so even a test must not call it from async code.
-    let for_user = std::sync::Arc::clone(&hub);
+    let for_user = Arc::clone(&hub);
     let organizer_name = organizer.clone();
     tokio::task::spawn_blocking(move || {
         for_user.create_user(&organizer_name, "correct horse battery", Role::Viewer)

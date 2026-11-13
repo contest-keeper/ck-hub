@@ -3,15 +3,14 @@
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
-use ck_protocol::{Event, Heartbeat, StickId};
+use ck_protocol::{Event, Heartbeat, StickId, Token};
 use postgres::{Client, NoTls};
 
 use crate::store::{Role, SeenHeartbeat, Stick, Store, StoreError, StoredEvent, User};
-use ck_protocol::Token;
 
 /// The schema, in the order it is applied. A migration that was applied is never run again and
 /// never edited: a change is a new file.
-const MIGRATIONS: [(&str, &str); 3] = [
+const MIGRATIONS: [(&str, &str); 4] = [
     (
         "0001_heartbeats_and_events",
         include_str!("../migrations/0001_heartbeats_and_events.sql"),
@@ -21,10 +20,16 @@ const MIGRATIONS: [(&str, &str); 3] = [
         include_str!("../migrations/0002_users_and_sessions.sql"),
     ),
     ("0003_sticks", include_str!("../migrations/0003_sticks.sql")),
+    (
+        "0004_heartbeat_boots",
+        include_str!("../migrations/0004_heartbeat_boots.sql"),
+    ),
 ];
 
 pub struct PostgresStore {
-    /// `None` only while the store is being dropped.
+    url: String,
+    /// `None` while the store is being dropped, and after a connection was lost and not yet
+    /// opened again.
     client: Mutex<Option<Client>>,
 }
 
@@ -37,19 +42,27 @@ impl PostgresStore {
     ///
     /// The connection is not encrypted: the database is meant to run next to the Hub, on the same
     /// machine or the same private network.
-    ///
-    /// # Errors
-    /// When the database cannot be reached or a migration fails.
     pub fn connect(url: &str) -> Result<Self, StoreError> {
         let mut client = Client::connect(url, NoTls).map_err(failed)?;
         migrate(&mut client)?;
         Ok(Self {
+            url: url.to_owned(),
             client: Mutex::new(Some(client)),
         })
     }
 
-    fn client(&self) -> std::sync::MutexGuard<'_, Option<Client>> {
-        self.client.lock().expect("database lock")
+    fn run<T>(
+        &self,
+        query: impl FnOnce(&mut Client) -> Result<T, postgres::Error>,
+    ) -> Result<T, StoreError> {
+        let mut slot = self.client.lock().expect("database lock");
+        // After the database restarted the old connection is closed for good, so open a new one
+        // instead of failing every request until the Hub restarts.
+        if slot.as_ref().is_none_or(Client::is_closed) {
+            *slot = Some(Client::connect(&self.url, NoTls).map_err(failed)?);
+        }
+        let client = slot.as_mut().expect("the connection was just opened");
+        query(client).map_err(failed)
     }
 }
 
@@ -112,10 +125,14 @@ impl Store for PostgresStore {
     ) -> Result<(), StoreError> {
         let json = serde_json::to_value(&heartbeat).map_err(failed)?;
         let seq = i64::try_from(heartbeat.seq).map_err(failed)?;
-        self.client()
-            .as_mut()
-            .expect("the connection is open")
-            .execute(
+        self.run(|client| {
+            client.execute(
+                "INSERT INTO heartbeat_boots (stick_id, boot_id, seq) VALUES ($1, $2, $3)
+                 ON CONFLICT (stick_id, boot_id)
+                 DO UPDATE SET seq = GREATEST(heartbeat_boots.seq, EXCLUDED.seq)",
+                &[&heartbeat.stick_id.as_str(), &heartbeat.boot_id, &seq],
+            )?;
+            client.execute(
                 "INSERT INTO heartbeats (stick_id, boot_id, seq, received_at, count, heartbeat)
                  VALUES ($1, $2, $3, $4, 1, $5)
                  ON CONFLICT (stick_id) DO UPDATE SET
@@ -130,20 +147,17 @@ impl Store for PostgresStore {
                     &json,
                 ],
             )
-            .map_err(failed)?;
+        })?;
         Ok(())
     }
 
     fn last_heartbeat(&self, stick: &StickId) -> Result<Option<SeenHeartbeat>, StoreError> {
-        let row = self
-            .client()
-            .as_mut()
-            .expect("the connection is open")
-            .query_opt(
+        let row = self.run(|client| {
+            client.query_opt(
                 "SELECT heartbeat, received_at, count FROM heartbeats WHERE stick_id = $1",
                 &[&stick.as_str()],
             )
-            .map_err(failed)?;
+        })?;
         let Some(row) = row else { return Ok(None) };
         let json: serde_json::Value = row.get(0);
         let count: i64 = row.get(2);
@@ -151,6 +165,42 @@ impl Store for PostgresStore {
             heartbeat: serde_json::from_value(json).map_err(failed)?,
             received_at: row.get(1),
             count: u64::try_from(count).map_err(failed)?,
+        }))
+    }
+
+    fn heartbeat_seq_of_boot(
+        &self,
+        stick: &StickId,
+        boot: &str,
+    ) -> Result<Option<u64>, StoreError> {
+        let row = self.run(|client| {
+            client.query_opt(
+                "SELECT seq FROM heartbeat_boots WHERE stick_id = $1 AND boot_id = $2",
+                &[&stick.as_str(), &boot],
+            )
+        })?;
+        row.map(|row| u64::try_from(row.get::<_, i64>(0)).map_err(failed))
+            .transpose()
+    }
+
+    fn last_event_of_boot(
+        &self,
+        stick: &StickId,
+        boot: &str,
+    ) -> Result<Option<StoredEvent>, StoreError> {
+        let row = self.run(|client| {
+            client.query_opt(
+                "SELECT event, received_at, integrity FROM events
+                 WHERE stick_id = $1 AND boot_id = $2 ORDER BY id DESC LIMIT 1",
+                &[&stick.as_str(), &boot],
+            )
+        })?;
+        let Some(row) = row else { return Ok(None) };
+        let json: serde_json::Value = row.get(0);
+        Ok(Some(StoredEvent {
+            event: serde_json::from_value(json).map_err(failed)?,
+            received_at: row.get(1),
+            integrity: row.get(2),
         }))
     }
 
@@ -162,10 +212,8 @@ impl Store for PostgresStore {
     ) -> Result<(), StoreError> {
         let json = serde_json::to_value(&event).map_err(failed)?;
         let seq = i64::try_from(event.seq).map_err(failed)?;
-        self.client()
-            .as_mut()
-            .expect("the connection is open")
-            .execute(
+        self.run(|client| {
+            client.execute(
                 "INSERT INTO events (stick_id, boot_id, seq, received_at, integrity, event)
                  VALUES ($1, $2, $3, $4, $5, $6)",
                 &[
@@ -177,65 +225,54 @@ impl Store for PostgresStore {
                     &json,
                 ],
             )
-            .map_err(failed)?;
+        })?;
         Ok(())
     }
 
     fn events(&self, stick: &StickId) -> Result<Vec<StoredEvent>, StoreError> {
-        let rows = self
-            .client()
-            .as_mut()
-            .expect("the connection is open")
-            .query(
+        let rows = self.run(|client| {
+            client.query(
                 "SELECT event, received_at, integrity FROM events WHERE stick_id = $1 ORDER BY id",
                 &[&stick.as_str()],
             )
-            .map_err(failed)?;
-        rows.into_iter()
-            .map(|row| {
-                let json: serde_json::Value = row.get(0);
-                Ok(StoredEvent {
-                    event: serde_json::from_value(json).map_err(failed)?,
-                    received_at: row.get(1),
-                    integrity: row.get(2),
-                })
-            })
-            .collect()
+        })?;
+        let mut events = Vec::with_capacity(rows.len());
+        for row in rows {
+            let json: serde_json::Value = row.get(0);
+            events.push(StoredEvent {
+                event: serde_json::from_value(json).map_err(failed)?,
+                received_at: row.get(1),
+                integrity: row.get(2),
+            });
+        }
+        Ok(events)
     }
 
     fn create_user(&self, user: User) -> Result<bool, StoreError> {
-        let created = self
-            .client()
-            .as_mut()
-            .expect("the connection is open")
-            .execute(
+        let created = self.run(|client| {
+            client.execute(
                 "INSERT INTO users (name, password_hash, role) VALUES ($1, $2, $3)
                  ON CONFLICT (name) DO NOTHING",
                 &[&user.name, &user.password_hash, &user.role.as_str()],
             )
-            .map_err(failed)?;
+        })?;
         Ok(created == 1)
     }
 
     fn user(&self, name: &str) -> Result<Option<User>, StoreError> {
-        let row = self
-            .client()
-            .as_mut()
-            .expect("the connection is open")
-            .query_opt(
+        let row = self.run(|client| {
+            client.query_opt(
                 "SELECT name, password_hash, role FROM users WHERE name = $1",
                 &[&name],
             )
-            .map_err(failed)?;
-        row.map(|row| {
-            let role: String = row.get(2);
-            Ok(User {
-                name: row.get(0),
-                password_hash: row.get(1),
-                role: Role::parse(&role).ok_or_else(|| failed(format!("unknown role {role}")))?,
-            })
-        })
-        .transpose()
+        })?;
+        let Some(row) = row else { return Ok(None) };
+        let role: String = row.get(2);
+        Ok(Some(User {
+            name: row.get(0),
+            password_hash: row.get(1),
+            role: Role::parse(&role).ok_or_else(|| failed(format!("unknown role {role}")))?,
+        }))
     }
 
     fn create_session(
@@ -244,36 +281,34 @@ impl Store for PostgresStore {
         user: &str,
         expires_at: DateTime<Utc>,
     ) -> Result<(), StoreError> {
-        self.client()
-            .as_mut()
-            .expect("the connection is open")
-            .execute(
+        self.run(|client| {
+            client.execute(
                 "INSERT INTO sessions (token_hash, user_name, expires_at) VALUES ($1, $2, $3)",
                 &[&token_hash, &user, &expires_at],
             )
-            .map_err(failed)?;
+        })?;
         Ok(())
     }
 
     fn session(&self, token_hash: &str) -> Result<Option<(String, DateTime<Utc>)>, StoreError> {
-        let row = self
-            .client()
-            .as_mut()
-            .expect("the connection is open")
-            .query_opt(
+        let row = self.run(|client| {
+            client.query_opt(
                 "SELECT user_name, expires_at FROM sessions WHERE token_hash = $1",
                 &[&token_hash],
             )
-            .map_err(failed)?;
+        })?;
         Ok(row.map(|row| (row.get(0), row.get(1))))
     }
 
     fn delete_session(&self, token_hash: &str) -> Result<(), StoreError> {
-        self.client()
-            .as_mut()
-            .expect("the connection is open")
-            .execute("DELETE FROM sessions WHERE token_hash = $1", &[&token_hash])
-            .map_err(failed)?;
+        self.run(|client| {
+            client.execute("DELETE FROM sessions WHERE token_hash = $1", &[&token_hash])
+        })?;
+        Ok(())
+    }
+
+    fn delete_expired_sessions(&self, now: DateTime<Utc>) -> Result<(), StoreError> {
+        self.run(|client| client.execute("DELETE FROM sessions WHERE expires_at <= $1", &[&now]))?;
         Ok(())
     }
 
@@ -283,11 +318,8 @@ impl Store for PostgresStore {
             .map(i32::try_from)
             .transpose()
             .map_err(failed)?;
-        let added = self
-            .client()
-            .as_mut()
-            .expect("the connection is open")
-            .execute(
+        let added = self.run(|client| {
+            client.execute(
                 "INSERT INTO sticks (stick_id, token, team, site, contest, machine_number)
                  VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (stick_id) DO NOTHING",
                 &[
@@ -299,34 +331,28 @@ impl Store for PostgresStore {
                     &machine,
                 ],
             )
-            .map_err(failed)?;
+        })?;
         Ok(added == 1)
     }
 
     fn stick(&self, id: &StickId) -> Result<Option<Stick>, StoreError> {
-        let row = self
-            .client()
-            .as_mut()
-            .expect("the connection is open")
-            .query_opt(
+        let row = self.run(|client| {
+            client.query_opt(
                 "SELECT stick_id, token, team, site, contest, machine_number
                  FROM sticks WHERE stick_id = $1",
                 &[&id.as_str()],
             )
-            .map_err(failed)?;
-        row.map(|row| stick_from(&row)).transpose()
+        })?;
+        row.as_ref().map(stick_from).transpose()
     }
 
     fn sticks(&self) -> Result<Vec<Stick>, StoreError> {
-        let rows = self
-            .client()
-            .as_mut()
-            .expect("the connection is open")
-            .query(
+        let rows = self.run(|client| {
+            client.query(
                 "SELECT stick_id, token, team, site, contest, machine_number FROM sticks",
                 &[],
             )
-            .map_err(failed)?;
+        })?;
         rows.iter().map(stick_from).collect()
     }
 }

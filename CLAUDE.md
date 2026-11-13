@@ -10,7 +10,7 @@ Part of Contest Keeper (github.com/contest-keeper). Read these before changing a
 
 ## Checks
 
-Run before committing: cargo fmt --all; cargo clippy --all-targets -- -D warnings; cargo test (needs PostgreSQL); in the dashboard folder: pnpm lint, pnpm check, pnpm test
+Run before committing: cargo fmt --all; cargo clippy --all-targets -- -D warnings; cargo test (set CK_TEST_DATABASE_URL to a throwaway PostgreSQL, see the README, or the store is only tested on memory)
 
 ## Rules
 

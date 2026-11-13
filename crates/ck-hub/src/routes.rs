@@ -11,18 +11,21 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use ck_protocol::{HEARTBEAT_PATH, SIGNATURE_HEADER, STICK_HEADER};
+use serde::Deserialize;
 use serde_json::json;
 
-use serde::Deserialize;
-
 use crate::accounts::{AccessError, Account, LoginError, SESSION_LIFETIME_HOURS};
-use crate::hub::{Hub, Rejection, StickView};
+use crate::hub::{Hub, Rejection};
 use crate::register::{NewStick, RegisterError};
 use crate::store::Role;
 
 /// The page organizers watch. It is one file with no outside resources, so it works on a network
 /// with no internet.
 const PAGE: &str = include_str!("page.html");
+
+/// Argon2 uses about 19 MiB per hash, so only a few logins may hash at the same time; the rest
+/// wait here instead of allocating memory.
+static HASHING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
 /// Where sticks send events. The stick's agent uses the same address.
 const EVENTS_PATH: &str = "/api/v1/events";
@@ -48,7 +51,24 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/logout", post(logout))
         .route("/api/v1/me", get(me))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(axum::middleware::map_response(security_headers))
         .with_state(hub)
+}
+
+/// The page is one file with inline script and style and talks only to its own server, so nothing
+/// else may load, and no other site may put it in a frame.
+async fn security_headers(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(
+        "content-security-policy",
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; \
+         connect-src 'self'; frame-ancestors 'none'"
+            .parse()
+            .expect("a valid header"),
+    );
+    headers.insert("x-content-type-options", "nosniff".parse().expect("valid"));
+    headers.insert("x-frame-options", "DENY".parse().expect("valid"));
+    response
 }
 
 async fn heartbeat(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) -> Response {
@@ -81,6 +101,9 @@ fn accepted(result: Result<Result<u64, Rejection>, tokio::task::JoinError>) -> R
             (StatusCode::UNAUTHORIZED, "unknown stick or bad signature").into_response()
         }
         Ok(Err(Rejection::Conflict(why))) => (StatusCode::CONFLICT, why).into_response(),
+        Ok(Err(Rejection::TooManyRequests)) => {
+            (StatusCode::TOO_MANY_REQUESTS, "too many messages").into_response()
+        }
         Ok(Err(Rejection::Unavailable)) | Err(_) => unavailable(),
     }
 }
@@ -94,7 +117,7 @@ async fn sticks(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Response {
         return denied(reason);
     }
     match tokio::task::spawn_blocking(move || hub.sticks()).await {
-        Ok(Ok(sticks)) => Json::<Vec<StickView>>(sticks).into_response(),
+        Ok(Ok(sticks)) => Json(sticks).into_response(),
         Ok(Err(error)) => {
             tracing::error!("{error}");
             unavailable()
@@ -123,7 +146,6 @@ fn auth_headers(headers: &HeaderMap) -> (Option<String>, Option<String>) {
     (get(STICK_HEADER), get(SIGNATURE_HEADER))
 }
 
-/// The name of the cookie that holds the session token.
 const SESSION_COOKIE: &str = "ck_session";
 
 #[derive(Deserialize)]
@@ -133,6 +155,9 @@ struct LoginBody {
 }
 
 async fn login(State(hub): State<Arc<Hub>>, Json(body): Json<LoginBody>) -> Response {
+    let Ok(_permit) = HASHING.acquire().await else {
+        return unavailable();
+    };
     // Hashing a password is slow on purpose, so it runs off the request threads.
     let result =
         tokio::task::spawn_blocking(move || hub.login(&body.username, &body.password)).await;
@@ -194,7 +219,12 @@ fn session_token(headers: &HeaderMap) -> Option<String> {
     let cookies = headers.get(COOKIE)?.to_str().ok()?;
     cookies
         .split(';')
-        .filter_map(|cookie| cookie.trim().strip_prefix("ck_session="))
+        .filter_map(|cookie| {
+            cookie
+                .trim()
+                .strip_prefix(SESSION_COOKIE)?
+                .strip_prefix('=')
+        })
         .find(|value| !value.is_empty())
         .map(str::to_owned)
 }

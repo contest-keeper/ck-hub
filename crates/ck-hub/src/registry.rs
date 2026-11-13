@@ -8,8 +8,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use ck_protocol::{StickId, Token};
+use ck_protocol::StickId;
 use serde::Deserialize;
+
+use crate::store::Stick;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
@@ -27,25 +29,10 @@ pub enum RegistryError {
     },
 }
 
-/// One stick, with only the fields the Hub uses. Other fields in the file are ignored.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Entry {
-    pub stick_id: StickId,
-    pub token: Token,
-    #[serde(default)]
-    pub team: String,
-    #[serde(default)]
-    pub site: String,
-    #[serde(default)]
-    pub contest: String,
-    #[serde(default)]
-    pub machine_number: Option<u32>,
-}
-
 #[derive(Deserialize)]
 struct File {
     #[serde(default)]
-    sticks: Vec<Entry>,
+    sticks: Vec<Stick>,
 }
 
 /// What the file looked like when it was read, to notice when the admin adds a stick.
@@ -58,12 +45,10 @@ struct Version {
 pub struct Registry {
     path: PathBuf,
     version: Version,
-    sticks: HashMap<StickId, Entry>,
+    sticks: HashMap<StickId, Stick>,
 }
 
 impl Registry {
-    /// # Errors
-    /// Fails when the file cannot be read or is not a registry.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, RegistryError> {
         let path = path.into();
         let (version, sticks) = read(&path)?;
@@ -107,22 +92,13 @@ impl Registry {
     }
 
     #[must_use]
-    pub fn find(&self, id: &StickId) -> Option<&Entry> {
+    pub fn find(&self, id: &StickId) -> Option<&Stick> {
         self.sticks.get(id)
     }
 
-    /// Every stick, in the order an organizer reads them: by contest, then machine number.
-    #[must_use]
-    pub fn all(&self) -> Vec<&Entry> {
-        let mut sticks: Vec<&Entry> = self.sticks.values().collect();
-        sticks.sort_by(|a, b| {
-            (&a.contest, a.machine_number, a.stick_id.as_str()).cmp(&(
-                &b.contest,
-                b.machine_number,
-                b.stick_id.as_str(),
-            ))
-        });
-        sticks
+    /// Every stick of the file, in no particular order.
+    pub fn all(&self) -> impl Iterator<Item = &Stick> {
+        self.sticks.values()
     }
 }
 
@@ -134,7 +110,7 @@ fn version_of(path: &PathBuf) -> Result<Version, std::io::Error> {
     })
 }
 
-fn read(path: &PathBuf) -> Result<(Version, HashMap<StickId, Entry>), RegistryError> {
+fn read(path: &PathBuf) -> Result<(Version, HashMap<StickId, Stick>), RegistryError> {
     let shown = path.display().to_string();
     let version = version_of(path).map_err(|source| RegistryError::Io {
         path: shown.clone(),

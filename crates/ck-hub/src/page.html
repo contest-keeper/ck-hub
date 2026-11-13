@@ -159,14 +159,20 @@ document.getElementById("login").addEventListener("submit", async (event) => {
   event.preventDefault();
   const message = document.getElementById("login-error");
   message.textContent = "";
-  const response = await fetch("/api/v1/login", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      username: document.getElementById("user").value,
-      password: document.getElementById("pass").value,
-    }),
-  });
+  let response;
+  try {
+    response = await fetch("/api/v1/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: document.getElementById("user").value,
+        password: document.getElementById("pass").value,
+      }),
+    });
+  } catch (error) {
+    message.textContent = "Could not reach the Hub.";
+    return;
+  }
   document.getElementById("pass").value = "";
   if (response.ok) { await refresh(); return; }
   try { message.textContent = (await response.json()).error; }
@@ -174,7 +180,7 @@ document.getElementById("login").addEventListener("submit", async (event) => {
 });
 
 document.getElementById("logout").addEventListener("click", async () => {
-  await fetch("/api/v1/logout", { method: "POST" });
+  try { await fetch("/api/v1/logout", { method: "POST" }); } catch (error) { /* refresh shows it */ }
   await refresh();
 });
 
