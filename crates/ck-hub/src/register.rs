@@ -35,7 +35,6 @@ pub enum RegisterError {
     Unavailable,
 }
 
-/// What registering did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Registered {
     pub added: usize,
@@ -61,6 +60,13 @@ fn check(stick: &NewStick) -> Result<(), String> {
             "stick {id}: the secret must be {MIN_TOKEN_LENGTH} to {MAX_TOKEN_LENGTH} characters without spaces"
         ));
     }
+    // PostgreSQL keeps the number as a 32-bit integer.
+    if stick
+        .machine_number
+        .is_some_and(|number| i32::try_from(number).is_err())
+    {
+        return Err(format!("stick {id}: the machine number is too large"));
+    }
     if ![&stick.team, &stick.site, &stick.contest]
         .iter()
         .all(|t| plain_text(t))
@@ -77,9 +83,6 @@ fn check(stick: &NewStick) -> Result<(), String> {
 /// Every stick is checked before any is written. A stick that is already known with the same
 /// secret is left alone, so sending the same registry twice is safe; one known with a different
 /// secret is reported and left alone, never overwritten.
-///
-/// # Errors
-/// See [`RegisterError`].
 pub fn register_sticks(
     store: &dyn Store,
     in_file: &dyn Fn(&StickId) -> Option<Token>,
@@ -129,15 +132,12 @@ pub fn register_sticks(
 }
 
 impl Hub {
-    /// Registers sticks. See [`register_sticks`].
-    ///
-    /// # Errors
-    /// See [`RegisterError`].
+    /// See [`register_sticks`].
     pub fn register_sticks(&self, sticks: Vec<NewStick>) -> Result<Registered, RegisterError> {
         let registry = self.registry.lock().expect("registry lock");
         register_sticks(
-            &*self.store,
-            &|id| registry.find(id).map(|entry| entry.token.clone()),
+            self.store.as_ref(),
+            &|id| registry.find(id).map(|stick| stick.token.clone()),
             sticks,
         )
     }

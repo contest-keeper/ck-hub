@@ -36,7 +36,7 @@ fn setup() -> Setup {
     };
     let hub = Hub::new(
         Registry::open(dir.path().join("registry.json")).expect("open"),
-        Box::new(MemoryStore::default()),
+        Arc::new(MemoryStore::default()),
         None,
         clock,
     )
@@ -265,65 +265,6 @@ fn accounts_are_checked_when_made_and_only_hashes_are_kept() {
     assert!(setup.hub.login("ana", PASSWORD).is_ok());
 }
 
-/// The same store, seen from the Hub and from the test.
-struct Shared(Arc<MemoryStore>);
-impl Store for Shared {
-    fn record_heartbeat(
-        &self,
-        h: ck_protocol::Heartbeat,
-        t: DateTime<Utc>,
-    ) -> Result<(), ck_hub::StoreError> {
-        self.0.record_heartbeat(h, t)
-    }
-    fn last_heartbeat(
-        &self,
-        s: &ck_protocol::StickId,
-    ) -> Result<Option<ck_hub::SeenHeartbeat>, ck_hub::StoreError> {
-        self.0.last_heartbeat(s)
-    }
-    fn append_event(
-        &self,
-        e: ck_protocol::Event,
-        t: DateTime<Utc>,
-        i: Option<String>,
-    ) -> Result<(), ck_hub::StoreError> {
-        self.0.append_event(e, t, i)
-    }
-    fn events(
-        &self,
-        s: &ck_protocol::StickId,
-    ) -> Result<Vec<ck_hub::StoredEvent>, ck_hub::StoreError> {
-        self.0.events(s)
-    }
-    fn create_user(&self, u: ck_hub::User) -> Result<bool, ck_hub::StoreError> {
-        self.0.create_user(u)
-    }
-    fn user(&self, n: &str) -> Result<Option<ck_hub::User>, ck_hub::StoreError> {
-        self.0.user(n)
-    }
-    fn create_session(&self, h: &str, u: &str, e: DateTime<Utc>) -> Result<(), ck_hub::StoreError> {
-        self.0.create_session(h, u, e)
-    }
-    fn session(&self, h: &str) -> Result<Option<(String, DateTime<Utc>)>, ck_hub::StoreError> {
-        self.0.session(h)
-    }
-    fn add_stick(&self, s: ck_hub::Stick) -> Result<bool, ck_hub::StoreError> {
-        self.0.add_stick(s)
-    }
-    fn stick(
-        &self,
-        id: &ck_protocol::StickId,
-    ) -> Result<Option<ck_hub::Stick>, ck_hub::StoreError> {
-        self.0.stick(id)
-    }
-    fn sticks(&self) -> Result<Vec<ck_hub::Stick>, ck_hub::StoreError> {
-        self.0.sticks()
-    }
-    fn delete_session(&self, h: &str) -> Result<(), ck_hub::StoreError> {
-        self.0.delete_session(h)
-    }
-}
-
 #[test]
 fn neither_the_password_nor_the_session_token_is_what_the_store_holds() {
     let dir = TempDir::new().expect("temp dir");
@@ -331,7 +272,7 @@ fn neither_the_password_nor_the_session_token_is_what_the_store_holds() {
     let store = Arc::new(MemoryStore::default());
     let hub = Hub::new(
         Registry::open(dir.path().join("registry.json")).expect("open"),
-        Box::new(Shared(Arc::clone(&store))),
+        Arc::clone(&store) as Arc<dyn Store>,
         None,
         Box::new(Utc::now),
     )

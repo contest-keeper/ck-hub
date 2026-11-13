@@ -24,11 +24,6 @@ must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
-# SHA-256 of a 30 GB image is far too slow unoptimized: a debug `image build` took 14 minutes where
-# a release build took 1.5. Optimizing just this crate keeps debug builds quick to compile.
-[profile.dev.package.sha2]
-opt-level = 3
-
 [profile.release]
 lto = "thin"
 codegen-units = 1

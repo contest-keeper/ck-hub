@@ -12,7 +12,7 @@ use chrono::{DateTime, Duration, Utc};
 use crate::hub::Hub;
 use crate::store::{Role, Store, StoreError, User};
 
-/// A browser that has not been used for this long has to log in again.
+/// A session ends this long after the login, used or not.
 pub const SESSION_LIFETIME_HOURS: i64 = 12;
 /// Wrong passwords tried for one name before it is locked for [`NAME_LOCKOUT_SECONDS`].
 pub const MAX_FAILED_LOGINS: u32 = 5;
@@ -104,6 +104,9 @@ impl Accounts {
 
     fn fail(&self, key: &str, now: DateTime<Utc>, window: i64) {
         let mut failures = self.failures.lock().expect("failures lock");
+        // Failures older than the longest lockout no longer count, so they are dropped here and
+        // the map cannot grow for ever.
+        failures.retain(|_, f| now < f.since + Duration::seconds(NAME_LOCKOUT_SECONDS));
         let entry = failures.entry(key.to_owned()).or_insert(Failures {
             count: 0,
             since: now,
@@ -140,29 +143,32 @@ fn unavailable(error: &StoreError) {
 }
 
 impl Hub {
-    /// Adds an organizer account.
-    ///
-    /// # Errors
-    /// See [`CreateUserError`].
     pub fn create_user(
         &self,
         name: &str,
         password: &str,
         role: Role,
     ) -> Result<(), CreateUserError> {
-        create_user(&*self.store, self.accounts.cost, name, password, role)
+        create_user(
+            self.store.as_ref(),
+            self.accounts.cost,
+            name,
+            password,
+            role,
+        )
     }
 
     /// Checks a name and password. On success returns the session token for the browser's cookie.
-    ///
-    /// # Errors
-    /// See [`LoginError`].
     pub fn login(&self, name: &str, password: &str) -> Result<(String, Account), LoginError> {
         let now = (self.clock)();
-        let key = name.to_lowercase();
+        // No account has a longer name, so such a name is only counted with all the others: it
+        // must not make the Hub remember text of any size a stranger sends.
+        let key = (name.chars().count() <= MAX_NAME_LENGTH).then(|| name.to_lowercase());
         let accounts = &self.accounts;
         // A locked name or a flood of guesses is refused before any hashing is done.
-        if accounts.blocked(&key, now, MAX_FAILED_LOGINS, NAME_LOCKOUT_SECONDS)
+        if key
+            .as_deref()
+            .is_some_and(|key| accounts.blocked(key, now, MAX_FAILED_LOGINS, NAME_LOCKOUT_SECONDS))
             || accounts.blocked("*", now, MAX_FAILED_LOGINS_ALL, ALL_LOCKOUT_SECONDS)
         {
             return Err(LoginError::TooManyAttempts);
@@ -179,11 +185,15 @@ impl Hub {
             .verify_password(password.as_bytes(), hash)
             .is_ok();
         let Some(user) = user.filter(|_| matches) else {
-            accounts.fail(&key, now, NAME_LOCKOUT_SECONDS);
+            if let Some(key) = &key {
+                accounts.fail(key, now, NAME_LOCKOUT_SECONDS);
+            }
             accounts.fail("*", now, ALL_LOCKOUT_SECONDS);
             return Err(LoginError::BadCredentials);
         };
-        accounts.clear(&key);
+        if let Some(key) = &key {
+            accounts.clear(key);
+        }
 
         let token = ck_crypto::generate_stick_token();
         let token = token.expose().to_owned();
@@ -207,9 +217,6 @@ impl Hub {
     }
 
     /// Who the session token belongs to, if its role may do what `needed` asks.
-    ///
-    /// # Errors
-    /// See [`AccessError`].
     pub fn access(&self, token: &str, needed: Role) -> Result<Account, AccessError> {
         let hash = token_hash(token);
         let store_failed = |error: StoreError| {
@@ -250,9 +257,6 @@ impl Hub {
 
 /// Adds an organizer account to `store`: checks the name and the password, and keeps only a hash of
 /// the password. `ck-hub create-user` uses this without starting a Hub.
-///
-/// # Errors
-/// See [`CreateUserError`].
 pub fn create_user(
     store: &dyn Store,
     cost: PasswordCost,
@@ -287,5 +291,60 @@ pub fn create_user(
         Ok(())
     } else {
         Err(CreateUserError::NameTaken)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::registry::Registry;
+    use crate::store::MemoryStore;
+
+    fn hub(now: Arc<Mutex<DateTime<Utc>>>) -> Hub {
+        let clock = Box::new(move || *now.lock().expect("clock"));
+        Hub::new(
+            Registry::empty(),
+            Arc::new(MemoryStore::default()),
+            None,
+            clock,
+        )
+        .with_password_cost(PasswordCost {
+            memory_kib: 8,
+            passes: 1,
+        })
+    }
+
+    fn remembered(hub: &Hub) -> usize {
+        hub.accounts.failures.lock().expect("failures lock").len()
+    }
+
+    #[test]
+    fn wrong_logins_cannot_fill_the_memory_of_the_hub() {
+        let now = Arc::new(Mutex::new(Utc::now()));
+        let hub = hub(Arc::clone(&now));
+
+        // A name no account can have is refused like any other, but not remembered by name.
+        let huge = "x".repeat(60_000);
+        assert_eq!(
+            hub.login(&huge, "whatever").err(),
+            Some(LoginError::BadCredentials)
+        );
+        assert_eq!(remembered(&hub), 1, "only the count for all names");
+
+        for name in ["a", "b", "c"] {
+            assert!(hub.login(name, "whatever").is_err());
+        }
+        assert_eq!(remembered(&hub), 4);
+
+        // Once their lockout time has passed, old failures are forgotten at the next one.
+        *now.lock().expect("clock") += Duration::seconds(NAME_LOCKOUT_SECONDS);
+        assert!(hub.login("d", "whatever").is_err());
+        assert_eq!(
+            remembered(&hub),
+            2,
+            "the new name and the count for all names"
+        );
     }
 }

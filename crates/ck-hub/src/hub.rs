@@ -2,7 +2,7 @@
 
 use std::fs::File;
 use std::io::Write;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use ck_protocol::{Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, StickId};
@@ -11,7 +11,7 @@ use serde_json::json;
 
 use crate::accounts::{Accounts, PasswordCost};
 use crate::registry::Registry;
-use crate::store::{Store, StoreError, StoredEvent};
+use crate::store::{Stick, Store, StoreError, StoredEvent};
 
 /// A stick that has sent nothing for longer than this is shown as offline.
 pub const ONLINE_WINDOW_SECONDS: i64 = 60;
@@ -74,7 +74,7 @@ pub struct LastHeartbeat {
 
 pub struct Hub {
     pub(crate) registry: Mutex<Registry>,
-    pub(crate) store: Box<dyn Store>,
+    pub(crate) store: Arc<dyn Store>,
     pub(crate) accounts: Accounts,
     /// One message at a time is read, judged and kept, so two heartbeats of one stick cannot both
     /// pass the sequence check.
@@ -87,7 +87,7 @@ impl Hub {
     #[must_use]
     pub fn new(
         registry: Registry,
-        store: Box<dyn Store>,
+        store: Arc<dyn Store>,
         log: Option<File>,
         clock: Box<dyn Fn() -> DateTime<Utc> + Send + Sync>,
     ) -> Self {
@@ -109,9 +109,6 @@ impl Hub {
     }
 
     /// Checks a heartbeat and, when it is fine, remembers it. Returns its sequence number.
-    ///
-    /// # Errors
-    /// See [`Rejection`].
     pub fn accept_heartbeat(
         &self,
         stick_header: Option<&str>,
@@ -119,14 +116,7 @@ impl Hub {
         body: &[u8],
     ) -> Result<u64, Rejection> {
         let result = self.check(stick_header, signature, body);
-        let (outcome, seq) = match &result {
-            Ok(seq) => ("accepted", Some(*seq)),
-            Err(Rejection::BadRequest(why)) => (*why, None),
-            Err(Rejection::Unauthorized) => ("unknown stick or bad signature", None),
-            Err(Rejection::Conflict(_)) => ("sequence not newer", None),
-            Err(Rejection::Unavailable) => ("the store failed", None),
-        };
-        self.record(outcome, stick_header, seq);
+        self.record(&result, "accepted", "sequence not newer", stick_header);
         result
     }
 
@@ -196,9 +186,7 @@ impl Hub {
     /// send it again for ever and block everything behind it. The problem is kept with the event
     /// and shown as a warning, because a gap or a changed event is the thing worth seeing.
     ///
-    /// # Errors
-    /// [`Rejection::Conflict`] for an event the Hub already has, which the stick counts as sent.
-    /// See [`Rejection`] for the rest.
+    /// An event the Hub already has is a [`Rejection::Conflict`], which the stick counts as sent.
     pub fn accept_event(
         &self,
         stick_header: Option<&str>,
@@ -206,14 +194,12 @@ impl Hub {
         body: &[u8],
     ) -> Result<u64, Rejection> {
         let result = self.check_event(stick_header, signature, body);
-        let (outcome, seq) = match &result {
-            Ok(seq) => ("event accepted", Some(*seq)),
-            Err(Rejection::BadRequest(why)) => (*why, None),
-            Err(Rejection::Unauthorized) => ("unknown stick or bad signature", None),
-            Err(Rejection::Conflict(_)) => ("event already received", None),
-            Err(Rejection::Unavailable) => ("the store failed", None),
-        };
-        self.record(outcome, stick_header, seq);
+        self.record(
+            &result,
+            "event accepted",
+            "event already received",
+            stick_header,
+        );
         result
     }
 
@@ -264,25 +250,16 @@ impl Hub {
     }
 
     /// Every stick the admin made, with its last heartbeat when it has sent one.
-    /// # Errors
-    /// When the data cannot be read.
     pub fn sticks(&self) -> Result<Vec<StickView>, StoreError> {
         let now = (self.clock)();
-        let mut entries: Vec<crate::registry::Entry> = {
+        let mut entries: Vec<Stick> = {
             let mut registry = self.registry.lock().expect("registry lock");
             registry.refresh();
-            registry.all().into_iter().cloned().collect()
+            registry.all().cloned().collect()
         };
         for stick in self.store.sticks()? {
             if !entries.iter().any(|e| e.stick_id == stick.stick_id) {
-                entries.push(crate::registry::Entry {
-                    stick_id: stick.stick_id,
-                    token: stick.token,
-                    team: stick.team,
-                    site: stick.site,
-                    contest: stick.contest,
-                    machine_number: stick.machine_number,
-                });
+                entries.push(stick);
             }
         }
         // The order an organizer reads them in: by contest, then machine number.
@@ -328,8 +305,21 @@ impl Hub {
     }
 
     /// One line per message in the log file: what happened and to which stick, never the secret,
-    /// the signature or the body.
-    fn record(&self, outcome: &str, stick: Option<&str>, seq: Option<u64>) {
+    /// the signature or the body. `accepted` and `conflict` are the words for those two outcomes.
+    fn record(
+        &self,
+        result: &Result<u64, Rejection>,
+        accepted: &'static str,
+        conflict: &'static str,
+        stick: Option<&str>,
+    ) {
+        let (outcome, seq) = match result {
+            Ok(seq) => (accepted, Some(*seq)),
+            Err(Rejection::BadRequest(why)) => (*why, None),
+            Err(Rejection::Unauthorized) => ("unknown stick or bad signature", None),
+            Err(Rejection::Conflict(_)) => (conflict, None),
+            Err(Rejection::Unavailable) => ("the store failed", None),
+        };
         tracing::info!(outcome, stick, seq, "heartbeat");
         let Some(log) = &self.log else { return };
         let line = json!({

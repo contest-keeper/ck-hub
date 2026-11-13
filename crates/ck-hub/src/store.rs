@@ -10,6 +10,7 @@ use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use ck_protocol::{Event, Heartbeat, StickId, Token};
+use serde::Deserialize;
 
 #[derive(Debug, thiserror::Error)]
 #[error("the store failed: {0}")]
@@ -49,14 +50,19 @@ impl Role {
     }
 }
 
-/// A stick the admin made. The Hub keeps its secret to check what the stick signs.
-#[derive(Debug, Clone)]
+/// A stick the admin made. The Hub keeps its secret to check what the stick signs. It reads as
+/// an entry of the admin tool's registry file, whose other fields are ignored.
+#[derive(Debug, Clone, Deserialize)]
 pub struct Stick {
     pub stick_id: StickId,
     pub token: Token,
+    #[serde(default)]
     pub team: String,
+    #[serde(default)]
     pub site: String,
+    #[serde(default)]
     pub contest: String,
+    #[serde(default)]
     pub machine_number: Option<u32>,
 }
 
@@ -84,25 +90,18 @@ pub struct StoredEvent {
     pub integrity: Option<String>,
 }
 
+/// Every method fails with [`StoreError`] when the data cannot be read or written.
 pub trait Store: Send + Sync {
     /// Keeps `heartbeat` as the latest of its stick and counts it.
-    ///
-    /// # Errors
-    /// When the data cannot be written.
     fn record_heartbeat(
         &self,
         heartbeat: Heartbeat,
         received_at: DateTime<Utc>,
     ) -> Result<(), StoreError>;
 
-    /// # Errors
-    /// When the data cannot be read.
     fn last_heartbeat(&self, stick: &StickId) -> Result<Option<SeenHeartbeat>, StoreError>;
 
     /// Adds an event after the ones already kept for its stick.
-    ///
-    /// # Errors
-    /// When the data cannot be written.
     fn append_event(
         &self,
         event: Event,
@@ -111,25 +110,14 @@ pub trait Store: Send + Sync {
     ) -> Result<(), StoreError>;
 
     /// Every event of the stick, in the order they were received.
-    ///
-    /// # Errors
-    /// When the data cannot be read.
     fn events(&self, stick: &StickId) -> Result<Vec<StoredEvent>, StoreError>;
 
     /// Adds an account. Returns false, and changes nothing, when the name is taken.
-    ///
-    /// # Errors
-    /// When the data cannot be written.
     fn create_user(&self, user: User) -> Result<bool, StoreError>;
 
-    /// # Errors
-    /// When the data cannot be read.
     fn user(&self, name: &str) -> Result<Option<User>, StoreError>;
 
     /// Starts a session. `token_hash` is a hash of the token the browser holds, never the token.
-    ///
-    /// # Errors
-    /// When the data cannot be written.
     fn create_session(
         &self,
         token_hash: &str,
@@ -138,30 +126,17 @@ pub trait Store: Send + Sync {
     ) -> Result<(), StoreError>;
 
     /// The user a session belongs to and when it ends, if there is such a session.
-    ///
-    /// # Errors
-    /// When the data cannot be read.
     fn session(&self, token_hash: &str) -> Result<Option<(String, DateTime<Utc>)>, StoreError>;
 
-    /// # Errors
-    /// When the data cannot be written.
     fn delete_session(&self, token_hash: &str) -> Result<(), StoreError>;
 
     /// Adds a stick. Returns false, and changes nothing, when its id is already known: a stick's
     /// secret is never replaced.
-    ///
-    /// # Errors
-    /// When the data cannot be written.
     fn add_stick(&self, stick: Stick) -> Result<bool, StoreError>;
 
-    /// # Errors
-    /// When the data cannot be read.
     fn stick(&self, id: &StickId) -> Result<Option<Stick>, StoreError>;
 
     /// Every registered stick.
-    ///
-    /// # Errors
-    /// When the data cannot be read.
     fn sticks(&self) -> Result<Vec<Stick>, StoreError>;
 }
 
