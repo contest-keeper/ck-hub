@@ -226,25 +226,29 @@ async fn require(hub: &Arc<Hub>, headers: &HeaderMap, needed: Role) -> Result<Ac
     }
 }
 
-/// One stick, or a whole registry file of the admin tool.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RegisterBody {
-    Many { sticks: Vec<NewStick> },
-    One(NewStick),
+/// One stick, or a whole registry file of the admin tool (`{"sticks": [...]}`). It is read by hand
+/// instead of by an untagged type, so a mistake is reported with the name of the wrong field.
+fn read_sticks(body: &[u8]) -> Result<Vec<NewStick>, String> {
+    let value: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("the request is not valid JSON: {e}"))?;
+    let invalid = |e: serde_json::Error| format!("the request is not a stick or a registry: {e}");
+    match value.get("sticks") {
+        Some(list) => serde_json::from_value(list.clone()).map_err(invalid),
+        None => serde_json::from_value(value)
+            .map(|stick| vec![stick])
+            .map_err(invalid),
+    }
 }
 
-async fn register(
-    State(hub): State<Arc<Hub>>,
-    headers: HeaderMap,
-    Json(body): Json<RegisterBody>,
-) -> Response {
+async fn register(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) -> Response {
     if let Err(reason) = require(&hub, &headers, Role::Admin).await {
         return denied(reason);
     }
-    let sticks = match body {
-        RegisterBody::Many { sticks } => sticks,
-        RegisterBody::One(stick) => vec![stick],
+    let sticks = match read_sticks(&body) {
+        Ok(sticks) => sticks,
+        Err(why) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": why }))).into_response();
+        }
     };
     match tokio::task::spawn_blocking(move || hub.register_sticks(sticks)).await {
         Ok(Ok(done)) => {

@@ -215,6 +215,7 @@ async fn run(args: ServeArgs) -> Result<(), String> {
         ),
         None => None,
     };
+    let has_database = args.database.database_url.is_some();
     let store: Box<dyn Store> = if let Some(url) = args.database.database_url {
         Box::new(connect(url).await?)
     } else {
@@ -224,6 +225,11 @@ async fn run(args: ServeArgs) -> Result<(), String> {
         );
         Box::new(MemoryStore::default())
     };
+    if args.registry.is_none() && !has_database {
+        tracing::warn!(
+            "no database and no --registry: the Hub knows no stick and refuses every heartbeat"
+        );
+    }
     let hub = Arc::new(Hub::new(registry, store, log, Box::new(Utc::now)));
 
     let listener = tokio::net::TcpListener::bind(args.listen)
