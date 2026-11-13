@@ -1,79 +1,212 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="modern">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Keeper Hub</title>
+<script>
+try { if (localStorage.getItem("ck-theme") === "classic") document.documentElement.dataset.theme = "classic"; } catch (error) { /* the default look stays */ }
+</script>
 <style>
-  :root {
-    --bg: #f3f5f8; --panel: #ffffff; --fg: #14202c; --muted: #596675; --line: #cdd5de;
-    --ok: #0b7a6f; --ok-bg: #e3f4f1; --off: #8a3b2e; --off-bg: #f8e6e2;
-    color-scheme: light;
+  /* Two looks. Classic is the Windows 9x style of the browser extension, modern is the newer one. */
+  :root[data-theme="modern"] {
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --bg: linear-gradient(150deg, #d5efec 0%, #e6ebf8 52%, #f2e7f6 100%);
+    --panel: #fff; --soft: rgba(60, 70, 90, .07); --text: #1d1d1f; --muted: #636368;
+    --line: rgba(60, 70, 90, .12); --line-strong: rgba(60, 70, 90, .22);
+    --accent: #0b7a76; --accent-text: #fff; --top-bg: rgba(255, 255, 255, .72); --top-text: #1d1d1f; --live: #2fb45a;
+    --ok: #14683a; --ok-bg: #e1f5e8; --warn: #85500a; --warn-bg: #fff0cc; --warn-row: #fffbf0;
+    --bad: #b0161f; --bad-bg: #ffedec; --bad-line: rgba(215, 0, 21, .28); --input-bg: rgba(120, 130, 150, .09);
+    --radius: 12px; --radius-lg: 20px; color-scheme: light;
   }
   @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0e151e; --panel: #151f2b; --fg: #e5ecf3; --muted: #93a2b2; --line: #2e3b4a;
-      --ok: #3fd0c0; --ok-bg: #0f2e2e; --off: #f0a090; --off-bg: #3a1f1a;
+    :root[data-theme="modern"] {
+      --bg: linear-gradient(150deg, #0e2624 0%, #151a2b 52%, #231a2b 100%);
+      --panel: #232a36; --soft: rgba(255, 255, 255, .08); --text: #f2f2f4; --muted: #a4a9b3;
+      --line: rgba(255, 255, 255, .12); --line-strong: rgba(255, 255, 255, .24);
+      --accent: #3cc3bd; --accent-text: #06201f; --top-bg: rgba(30, 36, 48, .72); --top-text: #f2f2f4;
+      --ok: #7fdca1; --ok-bg: rgba(60, 180, 100, .2); --warn: #f2c56b; --warn-bg: rgba(240, 185, 91, .18); --warn-row: rgba(240, 185, 91, .07);
+      --bad: #ff9a92; --bad-bg: rgba(255, 90, 80, .14); --bad-line: rgba(255, 120, 110, .4); --input-bg: rgba(255, 255, 255, .08);
       color-scheme: dark;
     }
   }
+  :root[data-theme="classic"] {
+    --font: Tahoma, "MS Sans Serif", Verdana, sans-serif; --mono: "Courier New", ui-monospace, monospace;
+    --bg: #c0c0c0; --panel: #c0c0c0; --soft: #dfdfdf; --text: #000; --muted: #404040;
+    --line: #808080; --line-strong: #808080; --accent: #0a6f6c; --accent-text: #fff;
+    --top-bg: linear-gradient(90deg, #0b2545, #1b8a8f); --top-text: #fff; --live: #6fd6d2;
+    --ok: #064643; --ok-bg: #fff; --warn: #7a4200; --warn-bg: #ffd84a; --warn-row: #ffffe1;
+    --bad: #a00000; --bad-bg: #ffffe1; --bad-line: #a00000; --input-bg: #fff;
+    --radius: 0; --radius-lg: 0; color-scheme: light; font-size: 13px;
+    --raised: inset -1px -1px #0a0a0a, inset 1px 1px #fff, inset -2px -2px #808080, inset 2px 2px #dfdfdf;
+    --pressed: inset 1px 1px #0a0a0a, inset -1px -1px #fff, inset 2px 2px #808080, inset -2px -2px #dfdfdf;
+    --sunken: inset 1px 1px #808080, inset -1px -1px #fff, inset 2px 2px #0a0a0a, inset -2px -2px #dfdfdf;
+    --thin: inset 1px 1px #808080, inset -1px -1px #fff;
+  }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, "Segoe UI", sans-serif; }
-  main { max-width: 1180px; margin: 0 auto; padding: 28px max(16px, env(safe-area-inset-left)); }
-  h1 { margin: 0 0 4px; font-size: 24px; }
-  #summary { color: var(--muted); margin-bottom: 16px; }
-  #problem { display: none; margin-bottom: 12px; padding: 8px 12px; border-radius: 6px; background: var(--off-bg); color: var(--off); }
-  .wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
-  table { border-collapse: collapse; width: 100%; min-width: 980px; }
-  th { text-align: left; font-size: 12px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); padding: 10px 12px; }
-  td { padding: 9px 12px; border-top: 1px solid var(--line); white-space: nowrap; }
-  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .pill { display: inline-block; padding: 1px 9px; border-radius: 10px; font-size: 13px; font-weight: 600; }
-  .pill.on { background: var(--ok-bg); color: var(--ok); }
-  .pill.off { background: var(--off-bg); color: var(--off); }
-  .mono { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+  body { margin: 0; min-height: 100vh; background: var(--bg); background-attachment: fixed; color: var(--text); font: 15px/1.5 var(--font); -webkit-font-smoothing: antialiased; }
+  :root[data-theme="classic"] body { font-size: 13px; }
+  h1, h2, p { margin: 0; }
+  .sr { position: absolute; left: -9999px; }
   .muted { color: var(--muted); }
-  td.warn { color: var(--off); font-weight: 600; white-space: normal; min-width: 180px; }
-  #login { display: none; max-width: 340px; margin: 40px auto; padding: 20px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
-  #login h2 { margin: 0 0 12px; font-size: 18px; }
-  #login label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 13px; }
-  #login input { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: inherit; }
-  #login button, #who button { margin-top: 14px; padding: 8px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fg); font: inherit; cursor: pointer; }
-  #login-error { color: var(--off); min-height: 1.4em; margin-top: 8px; }
-  #who { display: none; float: right; color: var(--muted); font-size: 14px; }
-  #who button { margin: 0 0 0 10px; padding: 2px 10px; }
-  #empty { display: none; padding: 20px 12px; color: var(--muted); }
+  .mono { font-family: var(--mono); font-size: .9em; }
+
+  header { background: var(--top-bg); color: var(--top-text); border-bottom: 1px solid var(--line); }
+  :root[data-theme="modern"] header { -webkit-backdrop-filter: blur(30px) saturate(1.6); backdrop-filter: blur(30px) saturate(1.6); }
+  :root[data-theme="classic"] header { border-bottom: 0; }
+  .bar { max-width: 1280px; margin: 0 auto; padding: 12px 24px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .logo { width: 32px; height: 32px; border-radius: var(--radius); background: #0b7a76; display: flex; align-items: center; justify-content: center; flex: none; }
+  :root[data-theme="classic"] .logo { background: #0b2545; }
+  .brand { font-weight: 700; font-size: 17px; }
+  .grow { flex: 1; }
+  .live { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; }
+  .live i { width: 8px; height: 8px; border-radius: 50%; background: var(--live); display: block; }
+  #who { display: none; align-items: center; gap: 10px; font-size: 13px; }
+
+  button { font: inherit; cursor: pointer; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-weight: 600; font-size: 13px; }
+  .btn.pri { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  .seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: 999px; background: var(--soft); }
+  .seg button { min-height: 32px; padding: 0 12px; border: 0; border-radius: 999px; background: none; color: inherit; font-size: 12.5px; font-weight: 600; opacity: .8; }
+  .seg button[aria-pressed="true"] { background: var(--panel); color: var(--text); opacity: 1; box-shadow: 0 1px 3px rgba(0, 0, 0, .18); }
+  :root[data-theme="modern"] .btn { border: 0; border-radius: 999px; background: var(--soft); }
+  :root[data-theme="modern"] .btn.pri { background: var(--accent); }
+  :root[data-theme="classic"] .btn { border: 0; background: #c0c0c0; box-shadow: var(--raised); color: #000; font-weight: 400; min-height: 30px; }
+  :root[data-theme="classic"] .btn:active { box-shadow: var(--pressed); }
+  :root[data-theme="classic"] .btn.pri { font-weight: 700; outline: 2px solid #000; outline-offset: -2px; background: #c0c0c0; color: #000; }
+  :root[data-theme="classic"] .seg { gap: 4px; padding: 0; border-radius: 0; background: none; }
+  :root[data-theme="classic"] .seg button { border-radius: 0; background: #c0c0c0; color: #000; box-shadow: var(--raised); opacity: 1; font-weight: 400; min-height: 28px; }
+  :root[data-theme="classic"] .seg button[aria-pressed="true"] { background: #d4d0c8; box-shadow: var(--pressed); font-weight: 700; }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  main { max-width: 1280px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 26px; font-weight: 700; letter-spacing: -.01em; }
+  :root[data-theme="classic"] h1 { font-size: 20px; }
+  #problem { display: none; margin-bottom: 14px; padding: 10px 14px; border-radius: var(--radius); background: var(--bad-bg); color: var(--bad); border: 1px solid var(--bad-line); }
+  #content { display: none; }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-top: 16px; }
+  .tile { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 16px 20px; }
+  .tile b { display: block; font-size: 32px; line-height: 1.2; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+  .tile span { font-size: 13px; color: var(--muted); font-weight: 500; }
+  .tile.up b { color: var(--ok); }
+  .tile.attn { background: var(--bad-bg); border-color: var(--bad-line); }
+  .tile.attn b { color: var(--bad); }
+  :root[data-theme="modern"] .tile, :root[data-theme="modern"] .wrap { border: 0; box-shadow: 0 0 0 1px var(--line), 0 2px 8px rgba(30, 50, 80, .05); }
+  :root[data-theme="classic"] .tile { background: #fff; border: 0; box-shadow: var(--sunken); }
+  :root[data-theme="classic"] .tile.attn { background: #ffffe1; }
+  :root[data-theme="classic"] .tile b { font-size: 26px; }
+
+  .tools { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 20px 0 12px; }
+  #search { flex: 1 1 240px; min-width: 200px; height: 44px; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--input-bg); color: var(--text); font: inherit; }
+  :root[data-theme="modern"] #search { border-color: transparent; }
+  :root[data-theme="classic"] #search { height: 30px; border: 0; box-shadow: var(--sunken); }
+  .chip { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--panel); color: var(--text); font-size: 13px; font-weight: 600; }
+  .chip[aria-pressed="true"] { background: var(--text); color: var(--panel); border-color: var(--text); }
+  :root[data-theme="modern"] .chip { border: 0; box-shadow: 0 0 0 1px var(--line); }
+  :root[data-theme="classic"] .chip { min-height: 30px; border: 0; border-radius: 0; background: #c0c0c0; box-shadow: var(--raised); color: #000; font-weight: 400; }
+  :root[data-theme="classic"] .chip[aria-pressed="true"] { background: #d4d0c8; box-shadow: var(--pressed); font-weight: 700; }
+
+  .wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-lg); }
+  :root[data-theme="classic"] .wrap { background: #fff; border: 0; box-shadow: var(--sunken); }
+  table { border-collapse: collapse; width: 100%; min-width: 860px; }
+  th { text-align: left; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); padding: 12px 16px; background: var(--soft); font-weight: 600; }
+  :root[data-theme="classic"] th { background: #c0c0c0; box-shadow: var(--raised); color: #000; text-transform: none; letter-spacing: 0; }
+  td { padding: 12px 16px; border-top: 1px solid var(--line); vertical-align: middle; }
+  :root[data-theme="classic"] td { border-top-color: #dfdfdf; }
+  tr.flag > td { background: var(--warn-row); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td .sub { display: block; font-size: 12.5px; color: var(--muted); }
+  .pill { display: inline-flex; align-items: center; gap: 7px; padding: 3px 11px 3px 9px; border-radius: 999px; font-size: 13px; font-weight: 600; white-space: nowrap; }
+  .pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .pill.on { background: var(--ok-bg); color: var(--ok); }
+  .pill.off { background: var(--bad-bg); color: var(--bad); }
+  .pill.new { background: var(--soft); color: var(--muted); }
+  :root[data-theme="classic"] .pill { border-radius: 0; font-size: 12px; padding: 2px 8px; }
+  :root[data-theme="classic"] .pill.on { background: #0a6f6c; color: #fff; }
+  :root[data-theme="classic"] .pill.off { background: #a00000; color: #fff; }
+  :root[data-theme="classic"] .pill.new { background: #dfdfdf; color: #000; box-shadow: var(--thin); }
+  .warn { display: inline-block; padding: 3px 10px; border-radius: 8px; background: var(--warn-bg); color: var(--warn); font-weight: 600; font-size: 13px; margin: 1px 6px 1px 0; }
+  :root[data-theme="classic"] .warn { border-radius: 0; font-size: 12px; }
+  tr.detail > td { background: var(--soft); padding: 14px 16px 16px; }
+  :root[data-theme="classic"] tr.detail > td { background: #dfdfdf; }
+  .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px 20px; margin: 0; }
+  .facts dt { font-size: 12px; color: var(--muted); }
+  .facts dd { margin: 0; font-weight: 500; overflow-wrap: anywhere; }
+  #empty { display: none; padding: 22px 16px; color: var(--muted); }
+  .hint { margin: 12px 4px; font-size: 13px; color: var(--muted); }
+
+  #login { display: none; width: 100%; max-width: 400px; margin: 48px auto; padding: 30px 28px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-lg); flex-direction: column; gap: 14px; }
+  :root[data-theme="modern"] #login { border: 0; border-radius: 26px; box-shadow: 0 20px 50px rgba(30, 50, 80, .16); }
+  :root[data-theme="classic"] #login { border: 0; box-shadow: inset -1px -1px #0a0a0a, inset 1px 1px #dfdfdf, inset -2px -2px #808080, inset 2px 2px #fff; padding: 20px 18px; }
+  #login h2 { font-size: 22px; font-weight: 700; text-align: center; }
+  #login .intro { text-align: center; color: var(--muted); font-size: 14px; }
+  #login label { font-size: 13px; font-weight: 600; display: block; margin-bottom: 5px; }
+  #login input { width: 100%; height: 46px; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--input-bg); color: var(--text); font: inherit; }
+  :root[data-theme="modern"] #login input { border-color: transparent; }
+  :root[data-theme="classic"] #login input { height: 30px; border: 0; box-shadow: var(--sunken); }
+  #login .btn { min-height: 46px; width: 100%; font-size: 15px; }
+  :root[data-theme="classic"] #login .btn { min-height: 34px; font-size: 13px; }
+  #login-error { min-height: 1.4em; color: var(--bad); font-size: 13.5px; }
 </style>
 </head>
 <body>
+<header><div class="bar">
+  <span class="logo"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg></span>
+  <span class="brand">Keeper Hub</span>
+  <span class="grow"></span>
+  <span class="live" id="live" hidden><i></i><span id="live-text">Live</span></span>
+  <span class="seg" role="group" aria-label="Look">
+    <button type="button" id="theme-classic" aria-pressed="false">Classic</button>
+    <button type="button" id="theme-modern" aria-pressed="true">Modern</button>
+  </span>
+  <span id="who"><span id="who-name"></span><button class="btn" id="logout" type="button">Log out</button></span>
+</div></header>
 <main>
-  <div id="who"><span id="who-name"></span><button id="logout" type="button">Log out</button></div>
-  <h1>Keeper Hub</h1>
   <form id="login" autocomplete="on">
-    <h2>Log in</h2>
-    <label for="user">Name</label>
-    <input id="user" name="username" autocomplete="username" required>
-    <label for="pass">Password</label>
-    <input id="pass" name="password" type="password" autocomplete="current-password" required>
-    <button type="submit">Log in</button>
+    <h2>Log in to Keeper Hub</h2>
+    <p class="intro">See which contest machines are online and which need attention.</p>
+    <div><label for="user">Name</label><input id="user" name="username" autocomplete="username" required></div>
+    <div><label for="pass">Password</label><input id="pass" name="password" type="password" autocomplete="current-password" required></div>
+    <button class="btn pri" type="submit">Log in</button>
     <div id="login-error" role="alert"></div>
   </form>
-  <div id="summary">Loading…</div>
-  <div id="problem">The Hub cannot be reached. The list below is the last one received.</div>
-  <div class="wrap">
-    <table>
-      <thead><tr>
-        <th class="num">#</th><th>Team</th><th>Site</th><th>Contest</th><th>Status</th>
-        <th>User</th><th>Last seen</th><th>Computer</th><th class="num">Up</th><th>Recorder</th>
-        <th class="num">Heartbeats</th><th>Image</th><th>Warnings</th>
-      </tr></thead>
-      <tbody id="rows"></tbody>
-    </table>
-    <div id="empty">No sticks yet. Make one with ck-forge and it appears here.</div>
+  <div id="problem" role="alert">The Hub cannot be reached. The list below is the last one received.</div>
+  <div id="content">
+    <h1>Sticks</h1>
+    <section class="tiles" aria-label="Summary">
+      <div class="tile"><b id="n-all">0</b><span>Sticks registered</span></div>
+      <div class="tile up"><b id="n-online">0</b><span>Online now</span></div>
+      <div class="tile"><b id="n-offline">0</b><span>Offline</span></div>
+      <div class="tile attn"><b id="n-attn">0</b><span>Need a look</span></div>
+    </section>
+    <div class="tools">
+      <label for="search" class="sr">Search sticks</label>
+      <input id="search" type="search" placeholder="Search team, computer or user" autocomplete="off">
+      <button class="chip" type="button" data-filter="all" aria-pressed="true">All <span id="c-all"></span></button>
+      <button class="chip" type="button" data-filter="attn" aria-pressed="false">Need a look <span id="c-attn"></span></button>
+      <button class="chip" type="button" data-filter="offline" aria-pressed="false">Offline <span id="c-offline"></span></button>
+      <button class="chip" type="button" data-filter="new" aria-pressed="false">Not seen yet <span id="c-new"></span></button>
+    </div>
+    <div class="wrap">
+      <table>
+        <thead><tr>
+          <th class="num">#</th><th>Team</th><th>Status</th><th>Logged in</th><th>Last seen</th><th>Needs a look</th><th><span class="sr">Details</span></th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div id="empty">No sticks yet. Make one with ck-forge and it appears here.</div>
+    </div>
+    <p class="hint">Problems are listed first. Open a row for the computer name, uptime, recorder, heartbeats and image version.</p>
   </div>
 </main>
 <script>
 const REFRESH_MS = 5000;
+let sticks = [];
+let filter = "all";
+let query = "";
+const opened = new Set();
 
 function ago(seconds) {
   if (seconds < 5) return "just now";
@@ -88,52 +221,123 @@ function span(seconds) {
   return (seconds / 3600).toFixed(1) + " h";
 }
 
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
 function cell(row, text, className) {
-  const td = document.createElement("td");
-  if (className) td.className = className;
-  td.textContent = text;
+  const td = el("td", className, text);
   row.appendChild(td);
   return td;
 }
 
-function render(sticks) {
+const needsLook = (stick) => stick.warnings.length > 0;
+const neverSeen = (stick) => !stick.last;
+const isOffline = (stick) => !stick.online && !!stick.last;
+
+// Problems first, then offline sticks, then the rest by machine number.
+function rank(stick) {
+  if (needsLook(stick)) return 0;
+  if (isOffline(stick)) return 1;
+  if (neverSeen(stick)) return 2;
+  return 3;
+}
+
+function matches(stick) {
+  if (filter === "attn" && !needsLook(stick)) return false;
+  if (filter === "offline" && !isOffline(stick)) return false;
+  if (filter === "new" && !neverSeen(stick)) return false;
+  if (!query) return true;
+  const text = [stick.team, stick.site, stick.contest, stick.machine_number, stick.current_user,
+    stick.last ? stick.last.hostname : ""].join(" ").toLowerCase();
+  return text.includes(query);
+}
+
+function facts(stick) {
+  const last = stick.last;
+  const list = el("dl", "facts");
+  const add = (name, value) => { list.appendChild(el("dt", "", name)); list.appendChild(el("dd", "", value)); };
+  add("Contest", stick.contest);
+  add("Site", stick.site);
+  add("Computer", last ? last.hostname : "—");
+  add("Up for", last ? span(last.uptime_s) : "—");
+  add("Recorder", last ? last.recorder : "—");
+  add("Heartbeats", last ? String(last.heartbeats) : "—");
+  add("Image", last ? last.image_version : "—");
+  add("Events", String(stick.events));
+  return list;
+}
+
+function render() {
   const body = document.getElementById("rows");
   body.replaceChildren();
-  let online = 0;
+  const counts = { all: sticks.length, online: 0, offline: 0, attn: 0, new: 0 };
   for (const stick of sticks) {
-    if (stick.online) online += 1;
-    const last = stick.last;
-    const row = document.createElement("tr");
-    cell(row, stick.machine_number ?? "", "num");
-    cell(row, stick.team);
-    cell(row, stick.site);
-    cell(row, stick.contest);
-    const status = cell(row, "");
-    const pill = document.createElement("span");
-    pill.className = "pill " + (stick.online ? "on" : "off");
-    pill.textContent = stick.online ? "online" : (last ? "offline" : "not seen yet");
-    status.appendChild(pill);
-    cell(row, stick.current_user ?? "");
-    cell(row, last ? ago(last.seconds_ago) : "", last ? "" : "muted");
-    cell(row, last ? last.hostname : "", "mono");
-    cell(row, last ? span(last.uptime_s) : "", "num");
-    cell(row, last ? last.recorder : "");
-    cell(row, last ? String(last.heartbeats) : "", "num");
-    cell(row, last ? last.image_version : "", "muted");
-    const warning = cell(row, stick.warnings.join(" · "), "warn");
-    if (stick.warnings.length) warning.title = stick.warnings.join(String.fromCharCode(10));
-    body.appendChild(row);
+    if (stick.online) counts.online += 1;
+    if (isOffline(stick)) counts.offline += 1;
+    if (needsLook(stick)) counts.attn += 1;
+    if (neverSeen(stick)) counts.new += 1;
   }
-  document.getElementById("empty").style.display = sticks.length ? "none" : "block";
-  document.getElementById("summary").textContent =
-    sticks.length + (sticks.length === 1 ? " stick" : " sticks") + " · " + online + " online";
+  document.getElementById("n-all").textContent = counts.all;
+  document.getElementById("n-online").textContent = counts.online;
+  document.getElementById("n-offline").textContent = counts.offline;
+  document.getElementById("n-attn").textContent = counts.attn;
+  for (const name of ["all", "attn", "offline", "new"]) {
+    document.getElementById("c-" + name).textContent = counts[name];
+  }
+
+  const shown = sticks.filter(matches).sort((a, b) =>
+    rank(a) - rank(b) || (a.machine_number ?? 0) - (b.machine_number ?? 0));
+  for (const stick of shown) {
+    const last = stick.last;
+    const row = el("tr", needsLook(stick) ? "flag" : "");
+    cell(row, stick.machine_number ?? "", "num mono");
+    const team = cell(row, "");
+    team.appendChild(el("b", "", stick.team));
+    team.appendChild(el("span", "sub", stick.site));
+    const status = cell(row, "");
+    status.appendChild(el("span", "pill " + (stick.online ? "on" : last ? "off" : "new"),
+      stick.online ? "online" : (last ? "offline" : "not seen yet")));
+    cell(row, stick.current_user ?? "", stick.current_user ? "" : "muted");
+    cell(row, last ? ago(last.seconds_ago) : "—", last ? "" : "muted");
+    const warnings = cell(row, "");
+    if (stick.warnings.length === 0) warnings.className = "muted";
+    if (stick.warnings.length === 0) warnings.textContent = last ? "No warnings" : "Waiting for the first heartbeat";
+    for (const text of stick.warnings) warnings.appendChild(el("span", "warn", text));
+    const open = opened.has(stick.stick_id);
+    const toggle = el("button", "btn", open ? "Hide" : "Details");
+    toggle.type = "button";
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    toggle.setAttribute("aria-label", (open ? "Hide" : "Show") + " details for " + stick.team + " " + (stick.machine_number ?? ""));
+    toggle.addEventListener("click", () => {
+      if (opened.has(stick.stick_id)) opened.delete(stick.stick_id); else opened.add(stick.stick_id);
+      render();
+    });
+    cell(row, "").appendChild(toggle);
+    body.appendChild(row);
+    if (open) {
+      const detail = el("tr", "detail");
+      const td = el("td");
+      td.colSpan = 7;
+      td.appendChild(facts(stick));
+      detail.appendChild(td);
+      body.appendChild(detail);
+    }
+  }
+  document.getElementById("empty").style.display = shown.length ? "none" : "block";
+  document.getElementById("empty").textContent = sticks.length
+    ? "No stick matches. Change the search or the filter."
+    : "No sticks yet. Make one with ck-forge and it appears here.";
 }
 
 function showLogin(visible) {
-  document.getElementById("login").style.display = visible ? "block" : "none";
-  document.querySelector(".wrap").style.display = visible ? "none" : "block";
-  document.getElementById("summary").style.display = visible ? "none" : "block";
-  document.getElementById("who").style.display = visible ? "none" : "block";
+  document.getElementById("login").style.display = visible ? "flex" : "none";
+  document.getElementById("content").style.display = visible ? "none" : "block";
+  document.getElementById("who").style.display = visible ? "none" : "inline-flex";
+  document.getElementById("live").hidden = visible;
 }
 
 async function refresh() {
@@ -143,7 +347,9 @@ async function refresh() {
     if (response.status === 401) { showLogin(true); problem.style.display = "none"; return; }
     if (!response.ok) throw new Error("HTTP " + response.status);
     showLogin(false);
-    render(await response.json());
+    sticks = await response.json();
+    render();
+    document.getElementById("live-text").textContent = "Live · updated " + new Date().toLocaleTimeString();
     problem.style.display = "none";
     const me = await fetch("/api/v1/me", { cache: "no-store" });
     if (me.ok) {
@@ -153,6 +359,32 @@ async function refresh() {
   } catch (error) {
     problem.style.display = "block";
   }
+}
+
+function setTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  document.getElementById("theme-classic").setAttribute("aria-pressed", String(theme === "classic"));
+  document.getElementById("theme-modern").setAttribute("aria-pressed", String(theme === "modern"));
+  try { localStorage.setItem("ck-theme", theme); } catch (error) { /* the choice lasts until the page closes */ }
+}
+
+document.getElementById("theme-classic").addEventListener("click", () => setTheme("classic"));
+document.getElementById("theme-modern").addEventListener("click", () => setTheme("modern"));
+setTheme(document.documentElement.dataset.theme);
+
+document.getElementById("search").addEventListener("input", (event) => {
+  query = event.target.value.trim().toLowerCase();
+  render();
+});
+
+for (const chip of document.querySelectorAll(".chip")) {
+  chip.addEventListener("click", () => {
+    filter = chip.dataset.filter;
+    for (const other of document.querySelectorAll(".chip")) {
+      other.setAttribute("aria-pressed", String(other === chip));
+    }
+    render();
+  });
 }
 
 document.getElementById("login").addEventListener("submit", async (event) => {
