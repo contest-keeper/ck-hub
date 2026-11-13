@@ -293,3 +293,29 @@ async fn the_answers_never_contain_a_secret() {
             .contains(TOKEN)
     );
 }
+
+#[tokio::test]
+async fn a_bad_registration_names_the_wrong_field() {
+    let setup = setup();
+    let admin = cookie_for(&setup.app, "ana").await;
+
+    let (status, answer) =
+        register(&setup.app, Some(&admin), &json!({ "stick_id": "stick-1" })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        answer["error"].as_str().unwrap_or("").contains("token"),
+        "{answer}"
+    );
+
+    let (status, answer) = register(
+        &setup.app,
+        Some(&admin),
+        &json!({ "sticks": [{ "token": TOKEN }] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        answer["error"].as_str().unwrap_or("").contains("stick_id"),
+        "{answer}"
+    );
+}
