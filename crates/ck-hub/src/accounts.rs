@@ -195,6 +195,11 @@ impl Hub {
             accounts.clear(key);
         }
 
+        // Expired sessions are only ever deleted here, so the table does not grow for ever.
+        self.store.delete_expired_sessions(now).map_err(|error| {
+            unavailable(&error);
+            LoginError::Unavailable
+        })?;
         let token = ck_crypto::generate_stick_token();
         let token = token.expose().to_owned();
         self.store

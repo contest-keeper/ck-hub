@@ -10,7 +10,7 @@ use crate::store::{Role, SeenHeartbeat, Stick, Store, StoreError, StoredEvent, U
 
 /// The schema, in the order it is applied. A migration that was applied is never run again and
 /// never edited: a change is a new file.
-const MIGRATIONS: [(&str, &str); 3] = [
+const MIGRATIONS: [(&str, &str); 4] = [
     (
         "0001_heartbeats_and_events",
         include_str!("../migrations/0001_heartbeats_and_events.sql"),
@@ -20,10 +20,16 @@ const MIGRATIONS: [(&str, &str); 3] = [
         include_str!("../migrations/0002_users_and_sessions.sql"),
     ),
     ("0003_sticks", include_str!("../migrations/0003_sticks.sql")),
+    (
+        "0004_heartbeat_boots",
+        include_str!("../migrations/0004_heartbeat_boots.sql"),
+    ),
 ];
 
 pub struct PostgresStore {
-    /// `None` only while the store is being dropped.
+    url: String,
+    /// `None` while the store is being dropped, and after a connection was lost and not yet
+    /// opened again.
     client: Mutex<Option<Client>>,
 }
 
@@ -40,6 +46,7 @@ impl PostgresStore {
         let mut client = Client::connect(url, NoTls).map_err(failed)?;
         migrate(&mut client)?;
         Ok(Self {
+            url: url.to_owned(),
             client: Mutex::new(Some(client)),
         })
     }
@@ -49,7 +56,13 @@ impl PostgresStore {
         query: impl FnOnce(&mut Client) -> Result<T, postgres::Error>,
     ) -> Result<T, StoreError> {
         let mut slot = self.client.lock().expect("database lock");
-        query(slot.as_mut().expect("the connection is open")).map_err(failed)
+        // After the database restarted the old connection is closed for good, so open a new one
+        // instead of failing every request until the Hub restarts.
+        if slot.as_ref().is_none_or(Client::is_closed) {
+            *slot = Some(Client::connect(&self.url, NoTls).map_err(failed)?);
+        }
+        let client = slot.as_mut().expect("the connection was just opened");
+        query(client).map_err(failed)
     }
 }
 
@@ -114,6 +127,12 @@ impl Store for PostgresStore {
         let seq = i64::try_from(heartbeat.seq).map_err(failed)?;
         self.run(|client| {
             client.execute(
+                "INSERT INTO heartbeat_boots (stick_id, boot_id, seq) VALUES ($1, $2, $3)
+                 ON CONFLICT (stick_id, boot_id)
+                 DO UPDATE SET seq = GREATEST(heartbeat_boots.seq, EXCLUDED.seq)",
+                &[&heartbeat.stick_id.as_str(), &heartbeat.boot_id, &seq],
+            )?;
+            client.execute(
                 "INSERT INTO heartbeats (stick_id, boot_id, seq, received_at, count, heartbeat)
                  VALUES ($1, $2, $3, $4, 1, $5)
                  ON CONFLICT (stick_id) DO UPDATE SET
@@ -146,6 +165,42 @@ impl Store for PostgresStore {
             heartbeat: serde_json::from_value(json).map_err(failed)?,
             received_at: row.get(1),
             count: u64::try_from(count).map_err(failed)?,
+        }))
+    }
+
+    fn heartbeat_seq_of_boot(
+        &self,
+        stick: &StickId,
+        boot: &str,
+    ) -> Result<Option<u64>, StoreError> {
+        let row = self.run(|client| {
+            client.query_opt(
+                "SELECT seq FROM heartbeat_boots WHERE stick_id = $1 AND boot_id = $2",
+                &[&stick.as_str(), &boot],
+            )
+        })?;
+        row.map(|row| u64::try_from(row.get::<_, i64>(0)).map_err(failed))
+            .transpose()
+    }
+
+    fn last_event_of_boot(
+        &self,
+        stick: &StickId,
+        boot: &str,
+    ) -> Result<Option<StoredEvent>, StoreError> {
+        let row = self.run(|client| {
+            client.query_opt(
+                "SELECT event, received_at, integrity FROM events
+                 WHERE stick_id = $1 AND boot_id = $2 ORDER BY id DESC LIMIT 1",
+                &[&stick.as_str(), &boot],
+            )
+        })?;
+        let Some(row) = row else { return Ok(None) };
+        let json: serde_json::Value = row.get(0);
+        Ok(Some(StoredEvent {
+            event: serde_json::from_value(json).map_err(failed)?,
+            received_at: row.get(1),
+            integrity: row.get(2),
         }))
     }
 
@@ -249,6 +304,11 @@ impl Store for PostgresStore {
         self.run(|client| {
             client.execute("DELETE FROM sessions WHERE token_hash = $1", &[&token_hash])
         })?;
+        Ok(())
+    }
+
+    fn delete_expired_sessions(&self, now: DateTime<Utc>) -> Result<(), StoreError> {
+        self.run(|client| client.execute("DELETE FROM sessions WHERE expires_at <= $1", &[&now]))?;
         Ok(())
     }
 

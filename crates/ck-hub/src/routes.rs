@@ -51,7 +51,24 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/logout", post(logout))
         .route("/api/v1/me", get(me))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(axum::middleware::map_response(security_headers))
         .with_state(hub)
+}
+
+/// The page is one file with inline script and style and talks only to its own server, so nothing
+/// else may load, and no other site may put it in a frame.
+async fn security_headers(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(
+        "content-security-policy",
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; \
+         connect-src 'self'; frame-ancestors 'none'"
+            .parse()
+            .expect("a valid header"),
+    );
+    headers.insert("x-content-type-options", "nosniff".parse().expect("valid"));
+    headers.insert("x-frame-options", "DENY".parse().expect("valid"));
+    response
 }
 
 async fn heartbeat(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) -> Response {
@@ -84,6 +101,9 @@ fn accepted(result: Result<Result<u64, Rejection>, tokio::task::JoinError>) -> R
             (StatusCode::UNAUTHORIZED, "unknown stick or bad signature").into_response()
         }
         Ok(Err(Rejection::Conflict(why))) => (StatusCode::CONFLICT, why).into_response(),
+        Ok(Err(Rejection::TooManyRequests)) => {
+            (StatusCode::TOO_MANY_REQUESTS, "too many messages").into_response()
+        }
         Ok(Err(Rejection::Unavailable)) | Err(_) => unavailable(),
     }
 }

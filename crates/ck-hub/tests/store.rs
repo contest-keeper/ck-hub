@@ -92,6 +92,22 @@ fn the_store_contract(store: &dyn Store) {
         .expect("read")
         .expect("a heartbeat");
     assert_eq!((other.heartbeat.seq, other.count), (7, 1));
+    // The highest sequence of every boot is remembered, also after a newer boot started.
+    store
+        .record_heartbeat(heartbeat(&a, "boot-2", 1), time(4))
+        .expect("write");
+    assert_eq!(
+        store.heartbeat_seq_of_boot(&a_id, "boot-1").expect("read"),
+        Some(2)
+    );
+    assert_eq!(
+        store.heartbeat_seq_of_boot(&a_id, "boot-2").expect("read"),
+        Some(1)
+    );
+    assert_eq!(
+        store.heartbeat_seq_of_boot(&a_id, "boot-3").expect("read"),
+        None
+    );
 
     // Events: kept whole, in the order received, for each stick on its own.
     assert!(store.events(&a_id).expect("read").is_empty());
@@ -111,6 +127,17 @@ fn the_store_contract(store: &dyn Store) {
     assert_eq!(events[0].integrity, None);
     assert_eq!(events[1].event, event(&a, 2, "bob"));
     assert_eq!(events[1].integrity.as_deref(), Some("a note"));
+    let last = store
+        .last_event_of_boot(&a_id, &events[1].event.boot_id)
+        .expect("read")
+        .expect("an event");
+    assert_eq!(last.event, event(&a, 2, "bob"));
+    assert!(
+        store
+            .last_event_of_boot(&a_id, "no-such-boot")
+            .expect("read")
+            .is_none()
+    );
 
     // Sticks: added once, never replaced, and read back whole.
     let new = |token: &str| ck_hub::Stick {
@@ -180,6 +207,15 @@ fn accounts_and_sessions(store: &dyn Store, a: &str) {
     store.delete_session(&session).expect("delete");
     store.delete_session(&session).expect("delete again");
     assert!(store.session(&session).expect("read").is_none());
+
+    // Expired sessions are removed; the ones still running stay.
+    let (old, current) = (format!("{a}-old"), format!("{a}-current"));
+    store.create_session(&old, a, time(50)).expect("write");
+    store.create_session(&current, a, time(500)).expect("write");
+    store.delete_expired_sessions(time(100)).expect("delete");
+    assert!(store.session(&old).expect("read").is_none());
+    assert!(store.session(&current).expect("read").is_some());
+    store.delete_session(&current).expect("delete");
 }
 
 #[test]

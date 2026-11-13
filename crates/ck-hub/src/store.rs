@@ -101,6 +101,10 @@ pub trait Store: Send + Sync {
 
     fn last_heartbeat(&self, stick: &StickId) -> Result<Option<SeenHeartbeat>, StoreError>;
 
+    /// The highest heartbeat sequence ever accepted from `stick` in `boot`, if any.
+    fn heartbeat_seq_of_boot(&self, stick: &StickId, boot: &str)
+    -> Result<Option<u64>, StoreError>;
+
     /// Adds an event after the ones already kept for its stick.
     fn append_event(
         &self,
@@ -108,6 +112,13 @@ pub trait Store: Send + Sync {
         received_at: DateTime<Utc>,
         integrity: Option<String>,
     ) -> Result<(), StoreError>;
+
+    /// The newest event of `stick` in `boot`, if any.
+    fn last_event_of_boot(
+        &self,
+        stick: &StickId,
+        boot: &str,
+    ) -> Result<Option<StoredEvent>, StoreError>;
 
     /// Every event of the stick, in the order they were received.
     fn events(&self, stick: &StickId) -> Result<Vec<StoredEvent>, StoreError>;
@@ -130,6 +141,9 @@ pub trait Store: Send + Sync {
 
     fn delete_session(&self, token_hash: &str) -> Result<(), StoreError>;
 
+    /// Removes every session that ended at or before `now`.
+    fn delete_expired_sessions(&self, now: DateTime<Utc>) -> Result<(), StoreError>;
+
     /// Adds a stick. Returns false, and changes nothing, when its id is already known: a stick's
     /// secret is never replaced.
     fn add_stick(&self, stick: Stick) -> Result<bool, StoreError>;
@@ -145,6 +159,7 @@ pub trait Store: Send + Sync {
 #[derive(Default)]
 pub struct MemoryStore {
     heartbeats: Mutex<HashMap<StickId, SeenHeartbeat>>,
+    boot_seqs: Mutex<HashMap<(StickId, String), u64>>,
     events: Mutex<HashMap<StickId, Vec<StoredEvent>>>,
     users: Mutex<HashMap<String, User>>,
     sessions: Mutex<HashMap<String, (String, DateTime<Utc>)>>,
@@ -157,6 +172,13 @@ impl Store for MemoryStore {
         heartbeat: Heartbeat,
         received_at: DateTime<Utc>,
     ) -> Result<(), StoreError> {
+        {
+            let mut boots = self.boot_seqs.lock().expect("boots lock");
+            let top = boots
+                .entry((heartbeat.stick_id.clone(), heartbeat.boot_id.clone()))
+                .or_insert(0);
+            *top = (*top).max(heartbeat.seq);
+        }
         let mut heartbeats = self.heartbeats.lock().expect("heartbeats lock");
         let count = heartbeats
             .get(&heartbeat.stick_id)
@@ -179,6 +201,33 @@ impl Store for MemoryStore {
             .lock()
             .expect("heartbeats lock")
             .get(stick)
+            .cloned())
+    }
+
+    fn heartbeat_seq_of_boot(
+        &self,
+        stick: &StickId,
+        boot: &str,
+    ) -> Result<Option<u64>, StoreError> {
+        Ok(self
+            .boot_seqs
+            .lock()
+            .expect("boots lock")
+            .get(&(stick.clone(), boot.to_owned()))
+            .copied())
+    }
+
+    fn last_event_of_boot(
+        &self,
+        stick: &StickId,
+        boot: &str,
+    ) -> Result<Option<StoredEvent>, StoreError> {
+        Ok(self
+            .events
+            .lock()
+            .expect("events lock")
+            .get(stick)
+            .and_then(|all| all.iter().rev().find(|s| s.event.boot_id == boot))
             .cloned())
     }
 
@@ -251,6 +300,14 @@ impl Store for MemoryStore {
             .lock()
             .expect("sessions lock")
             .remove(token_hash);
+        Ok(())
+    }
+
+    fn delete_expired_sessions(&self, now: DateTime<Utc>) -> Result<(), StoreError> {
+        self.sessions
+            .lock()
+            .expect("sessions lock")
+            .retain(|_, (_, ends)| *ends > now);
         Ok(())
     }
 

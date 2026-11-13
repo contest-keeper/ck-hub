@@ -589,3 +589,58 @@ async fn the_page_script_is_valid_javascript() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[tokio::test]
+async fn a_recorded_heartbeat_of_an_older_boot_cannot_be_replayed() {
+    let setup = setup();
+    assert_eq!(heartbeat(&setup.app, "boot-1", 1).await.0, StatusCode::OK);
+    assert_eq!(heartbeat(&setup.app, "boot-2", 1).await.0, StatusCode::OK);
+    assert_eq!(
+        heartbeat(&setup.app, "boot-1", 1).await.0,
+        StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
+async fn a_stick_that_sends_too_much_is_slowed_down_and_may_send_again_next_minute() {
+    let setup = setup();
+    for seq in 1..=120 {
+        assert_eq!(heartbeat(&setup.app, "b", seq).await.0, StatusCode::OK);
+    }
+    assert_eq!(
+        heartbeat(&setup.app, "b", 121).await.0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    *setup.now.lock().expect("clock") += Duration::seconds(61);
+    assert_eq!(heartbeat(&setup.app, "b", 121).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn values_the_database_could_not_keep_are_refused_once() {
+    let setup = setup();
+    let body = heartbeat_body("stick-a", "boot", u64::MAX - 100);
+    let signature = sign(TOKEN_A, &body);
+    let (status, _) = send(&setup.app, Some("stick-a"), Some(&signature), body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let text = String::from_utf8(heartbeat_body("stick-a", "boot", 1)).expect("text");
+    let body = text.replace("\"boot\"", "\"bo\\u0000ot\"").into_bytes();
+    let signature = sign(TOKEN_A, &body);
+    let (status, _) = send(&setup.app, Some("stick-a"), Some(&signature), body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn every_answer_forbids_framing_and_outside_resources() {
+    let setup = setup();
+    let response = setup
+        .app
+        .clone()
+        .oneshot(Request::get("/").body(Body::empty()).expect("request"))
+        .await
+        .expect("response");
+    let policy = response.headers()["content-security-policy"]
+        .to_str()
+        .expect("text");
+    assert!(policy.contains("frame-ancestors 'none'") && policy.contains("default-src 'none'"));
+}
