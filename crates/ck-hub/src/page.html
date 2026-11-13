@@ -56,8 +56,7 @@ try { if (localStorage.getItem("ck-theme") === "classic") document.documentEleme
   :root[data-theme="modern"] header { -webkit-backdrop-filter: blur(30px) saturate(1.6); backdrop-filter: blur(30px) saturate(1.6); }
   :root[data-theme="classic"] header { border-bottom: 0; }
   .bar { max-width: 1280px; margin: 0 auto; padding: 12px 24px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-  .logo { width: 32px; height: 32px; border-radius: var(--radius); background: #0b7a76; display: flex; align-items: center; justify-content: center; flex: none; }
-  :root[data-theme="classic"] .logo { background: #0b2545; }
+  .logo { width: 32px; height: 32px; flex: none; image-rendering: pixelated; }
   .brand { font-weight: 700; font-size: 17px; }
   .grow { flex: 1; }
   [hidden] { display: none !important; }
@@ -154,7 +153,16 @@ try { if (localStorage.getItem("ck-theme") === "classic") document.documentEleme
 </head>
 <body>
 <header><div class="bar">
-  <span class="logo"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg></span>
+  <svg class="logo" aria-hidden="true" viewBox="0 0 32 32" width="32" height="32" shape-rendering="crispEdges">
+<path fill="#0A0A0A" d="M1 2h30v1h-30zM1 3h1v1h-1zM30 3h1v1h-1zM1 4h1v1h-1zM30 4h1v1h-1zM1 5h1v1h-1zM30 5h1v1h-1zM1 6h1v1h-1zM30 6h1v1h-1zM1 7h1v1h-1zM30 7h1v1h-1zM1 8h1v1h-1zM30 8h1v1h-1zM1 9h1v1h-1zM30 9h1v1h-1zM1 10h1v1h-1zM30 10h1v1h-1zM1 11h1v1h-1zM30 11h1v1h-1zM1 12h1v1h-1zM30 12h1v1h-1zM1 13h1v1h-1zM30 13h1v1h-1zM1 14h1v1h-1zM30 14h1v1h-1zM1 15h1v1h-1zM30 15h1v1h-1zM1 16h1v1h-1zM30 16h1v1h-1zM1 17h1v1h-1zM30 17h1v1h-1zM1 18h1v1h-1zM30 18h1v1h-1zM1 19h1v1h-1zM30 19h1v1h-1zM1 20h1v1h-1zM30 20h1v1h-1zM1 21h1v1h-1zM30 21h1v1h-1zM1 22h1v1h-1zM30 22h1v1h-1zM1 23h30v1h-30zM11 24h1v1h-1zM20 24h1v1h-1zM11 25h1v1h-1zM20 25h1v1h-1zM7 26h18v1h-18zM7 27h1v1h-1zM24 27h1v1h-1zM7 28h1v1h-1zM24 28h1v1h-1zM7 29h18v1h-18z"/>
+<path fill="#FFFFFF" d="M2 3h27v1h-27zM2 4h1v1h-1zM2 5h1v1h-1zM27 5h1v1h-1zM2 6h1v1h-1zM27 6h1v1h-1zM2 7h1v1h-1zM27 7h1v1h-1zM2 8h1v1h-1zM27 8h1v1h-1zM2 9h1v1h-1zM13 9h2v1h-2zM17 9h2v1h-2zM27 9h1v1h-1zM2 10h1v1h-1zM8 10h1v1h-1zM13 10h1v1h-1zM17 10h2v1h-2zM23 10h1v1h-1zM27 10h1v1h-1zM2 11h1v1h-1zM7 11h1v1h-1zM11 11h2v1h-2zM16 11h1v1h-1zM19 11h2v1h-2zM24 11h1v1h-1zM27 11h1v1h-1zM2 12h1v1h-1zM6 12h1v1h-1zM11 12h2v1h-2zM15 12h1v1h-1zM19 12h2v1h-2zM25 12h1v1h-1zM27 12h1v1h-1zM2 13h1v1h-1zM7 13h1v1h-1zM13 13h2v1h-2zM18 13h1v1h-1zM24 13h1v1h-1zM27 13h1v1h-1zM2 14h1v1h-1zM8 14h1v1h-1zM13 14h2v1h-2zM17 14h2v1h-2zM23 14h1v1h-1zM27 14h1v1h-1zM2 15h1v1h-1zM27 15h1v1h-1zM2 16h1v1h-1zM27 16h1v1h-1zM2 17h1v1h-1zM27 17h1v1h-1zM2 18h1v1h-1zM27 18h1v1h-1zM2 19h1v1h-1zM27 19h1v1h-1zM2 20h1v1h-1zM5 20h23v1h-23zM2 21h1v1h-1zM12 24h1v1h-1zM12 25h1v1h-1zM8 27h15v1h-15z"/>
+<path fill="#808080" d="M29 3h1v1h-1zM4 4h24v1h-24zM29 4h1v1h-1zM4 5h1v1h-1zM29 5h1v1h-1zM4 6h1v1h-1zM29 6h1v1h-1zM4 7h1v1h-1zM29 7h1v1h-1zM4 8h1v1h-1zM29 8h1v1h-1zM4 9h1v1h-1zM29 9h1v1h-1zM4 10h1v1h-1zM29 10h1v1h-1zM4 11h1v1h-1zM29 11h1v1h-1zM4 12h1v1h-1zM29 12h1v1h-1zM4 13h1v1h-1zM29 13h1v1h-1zM4 14h1v1h-1zM29 14h1v1h-1zM4 15h1v1h-1zM29 15h1v1h-1zM4 16h1v1h-1zM29 16h1v1h-1zM4 17h1v1h-1zM29 17h1v1h-1zM4 18h1v1h-1zM29 18h1v1h-1zM4 19h1v1h-1zM29 19h1v1h-1zM4 20h1v1h-1zM29 20h1v1h-1zM4 21h5v1h-5zM29 21h1v1h-1zM2 22h28v1h-28zM19 24h1v1h-1zM19 25h1v1h-1zM23 27h1v1h-1zM8 28h16v1h-16z"/>
+<path fill="#C0C0C0" d="M3 4h1v1h-1zM28 4h1v1h-1zM3 5h1v1h-1zM28 5h1v1h-1zM3 6h1v1h-1zM28 6h1v1h-1zM3 7h1v1h-1zM28 7h1v1h-1zM3 8h1v1h-1zM28 8h1v1h-1zM3 9h1v1h-1zM28 9h1v1h-1zM3 10h1v1h-1zM28 10h1v1h-1zM3 11h1v1h-1zM28 11h1v1h-1zM3 12h1v1h-1zM28 12h1v1h-1zM3 13h1v1h-1zM28 13h1v1h-1zM3 14h1v1h-1zM28 14h1v1h-1zM3 15h1v1h-1zM28 15h1v1h-1zM3 16h1v1h-1zM28 16h1v1h-1zM3 17h1v1h-1zM28 17h1v1h-1zM3 18h1v1h-1zM28 18h1v1h-1zM3 19h1v1h-1zM28 19h1v1h-1zM3 20h1v1h-1zM28 20h1v1h-1zM3 21h1v1h-1zM9 21h17v1h-17zM28 21h1v1h-1zM13 24h6v1h-6zM13 25h6v1h-6z"/>
+<path fill="#102F57" d="M5 5h22v1h-22zM5 6h22v1h-22zM5 7h8v1h-8zM19 7h8v1h-8zM5 8h8v1h-8zM19 8h8v1h-8zM5 9h6v1h-6zM21 9h6v1h-6zM5 10h3v1h-3zM9 10h2v1h-2zM21 10h2v1h-2zM24 10h3v1h-3zM5 11h2v1h-2zM8 11h1v1h-1zM23 11h1v1h-1zM25 11h2v1h-2zM5 12h1v1h-1zM7 12h2v1h-2zM23 12h2v1h-2zM26 12h1v1h-1zM5 13h2v1h-2zM8 13h3v1h-3zM21 13h3v1h-3zM25 13h2v1h-2zM5 14h3v1h-3zM9 14h2v1h-2zM21 14h2v1h-2zM24 14h3v1h-3zM5 15h8v1h-8zM19 15h8v1h-8zM5 16h8v1h-8zM19 16h8v1h-8zM5 17h22v1h-22zM5 18h22v1h-22zM5 19h22v1h-22z"/>
+<path fill="#6FD6D2" d="M13 7h6v1h-6zM13 8h6v1h-6zM11 9h2v1h-2zM19 9h2v1h-2zM11 10h2v1h-2zM19 10h2v1h-2zM9 11h2v1h-2zM21 11h2v1h-2zM9 12h2v1h-2zM21 12h2v1h-2zM11 13h2v1h-2zM19 13h2v1h-2zM11 14h2v1h-2zM19 14h2v1h-2zM13 15h6v1h-6zM13 16h6v1h-6z"/>
+<path fill="#14A3A0" d="M15 9h2v1h-2zM13 11h1v1h-1zM18 11h1v1h-1zM13 12h1v1h-1zM18 12h1v1h-1zM15 14h2v1h-2zM26 21h2v1h-2z"/>
+<path fill="#0B2545" d="M14 10h3v1h-3zM14 11h2v1h-2zM17 11h1v1h-1zM14 12h1v1h-1zM16 12h2v1h-2zM15 13h3v1h-3z"/>
+</svg>
   <span class="brand">Keeper Hub</span>
   <span class="grow"></span>
   <span class="live" id="live" hidden><i></i><span id="live-text">Live</span></span>
