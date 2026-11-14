@@ -1,0 +1,19 @@
+name: PR title
+
+# Separate from PR so that editing the title does not rerun the builds and tests.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  title:
+    uses: contest-keeper/.github/.github/workflows/pr-title.yml@main
