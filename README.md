@@ -16,11 +16,13 @@ cargo run -p ck-hub -- --registry ck-registry.json --log hub.log
 
 - `--registry` is the file `ck-forge` writes. It holds every stick's secret, so keep it private. A
   stick added to it later is known without restarting the Hub.
-- `--listen` defaults to `127.0.0.1:8088`. A QEMU test machine reaches the host as `10.0.2.2`.
+- `--listen` (or `CK_LISTEN`) defaults to `127.0.0.1:8088`; the container image sets `0.0.0.0:8088`. A QEMU test machine reaches the host as `10.0.2.2`.
 - `--database-url` (or the environment variable `CK_DATABASE_URL`) is a PostgreSQL address such as
   `postgres://user:password@localhost/ckhub`. The Hub creates its tables itself on start. Without it
   everything is kept in memory and lost when the Hub stops, and it says so in its log. The connection
-  is not encrypted, so run the database next to the Hub.
+  is encrypted when the database offers TLS and always with `?sslmode=require` (the certificate is
+  checked against the public web roots, which covers Azure Database for PostgreSQL). Add
+  `?sslmode=disable` for a database on the same machine that has no TLS.
 - `--log` adds one line per heartbeat, accepted or refused. It never holds a secret or a signature.
 
 | Route | What it does |

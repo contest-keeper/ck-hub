@@ -1,0 +1,7 @@
+target/
+.git/
+.github/
+.claude/
+*.log
+.env*
+ck-registry*.json

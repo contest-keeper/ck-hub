@@ -1,0 +1,29 @@
+name: Develop
+
+# Every merge to develop builds the image and deploys it to the develop environment in Azure.
+
+on:
+  push:
+    branches: [develop]
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: contest-keeper/.github/.github/workflows/release-container.yml@main
+
+  deploy:
+    needs: image
+    permissions:
+      contents: read
+      id-token: write
+    uses: contest-keeper/ck-hub-setup/.github/workflows/deploy.yml@main
+    with:
+      environment: develop
+      image_tag: ${{ needs.image.outputs.image_tag }}

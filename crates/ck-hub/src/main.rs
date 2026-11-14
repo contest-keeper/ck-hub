@@ -38,7 +38,7 @@ enum Command {
 #[derive(Args)]
 struct ServeArgs {
     /// Where to listen. Sticks in a QEMU test machine reach the host as 10.0.2.2
-    #[arg(long, default_value = "127.0.0.1:8088")]
+    #[arg(long, env = "CK_LISTEN", default_value = "127.0.0.1:8088")]
     listen: SocketAddr,
     /// A registry file ck-forge writes, read directly. It holds every stick's secret, so keep it
     /// private. Optional when sticks are registered in the database instead

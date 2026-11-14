@@ -4,7 +4,8 @@ use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use ck_protocol::{Event, Heartbeat, StickId, Token};
-use postgres::{Client, NoTls};
+use postgres::Client;
+use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::store::{Role, SeenHeartbeat, Stick, Store, StoreError, StoredEvent, User};
 
@@ -33,6 +34,21 @@ pub struct PostgresStore {
     client: Mutex<Option<Client>>,
 }
 
+/// TLS settings for every connection: the public web roots, no client certificate.
+fn tls() -> MakeRustlsConnect {
+    let roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    let config = rustls::ClientConfig::builder_with_provider(
+        rustls::crypto::ring::default_provider().into(),
+    )
+    .with_safe_default_protocol_versions()
+    .expect("the ring provider supports the default protocol versions")
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    MakeRustlsConnect::new(config)
+}
+
 fn failed(error: impl std::fmt::Display) -> StoreError {
     StoreError(error.to_string())
 }
@@ -40,10 +56,12 @@ fn failed(error: impl std::fmt::Display) -> StoreError {
 impl PostgresStore {
     /// Connects and brings the schema up to date.
     ///
-    /// The connection is not encrypted: the database is meant to run next to the Hub, on the same
-    /// machine or the same private network.
+    /// The connection is encrypted when the database offers it (`sslmode=prefer`, the default) and
+    /// always with `sslmode=require`; the certificate is then checked against the public web
+    /// roots. A managed database such as Azure Database for PostgreSQL requires it.
+    /// `sslmode=disable` keeps the connection plain for a database on the same machine.
     pub fn connect(url: &str) -> Result<Self, StoreError> {
-        let mut client = Client::connect(url, NoTls).map_err(failed)?;
+        let mut client = Client::connect(url, tls()).map_err(failed)?;
         migrate(&mut client)?;
         Ok(Self {
             url: url.to_owned(),
@@ -59,7 +77,7 @@ impl PostgresStore {
         // After the database restarted the old connection is closed for good, so open a new one
         // instead of failing every request until the Hub restarts.
         if slot.as_ref().is_none_or(Client::is_closed) {
-            *slot = Some(Client::connect(&self.url, NoTls).map_err(failed)?);
+            *slot = Some(Client::connect(&self.url, tls()).map_err(failed)?);
         }
         let client = slot.as_mut().expect("the connection was just opened");
         query(client).map_err(failed)
