@@ -60,3 +60,40 @@ fn the_program_starts_on_postgres_and_answers() {
         std::thread::sleep(Duration::from_millis(200));
     }
 }
+
+/// The Azure key is read from the environment only. Without it the program must stop at once, say
+/// where the key belongs, and never print a key it was given.
+#[test]
+fn acs_mail_needs_its_key_and_never_prints_it() {
+    let program = env!("CARGO_BIN_EXE_ck-hub");
+    let base = [
+        "--listen",
+        "127.0.0.1:0",
+        "--mail",
+        "acs",
+        "--public-url",
+        "https://hub.example.org",
+        "--mail-endpoint",
+        "https://x.communication.azure.com",
+        "--mail-from",
+        "noreply@mail.example.org",
+    ];
+
+    let missing = Command::new(program)
+        .args(base)
+        .env_remove("CK_ACS_KEY")
+        .output()
+        .expect("run the program");
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("CK_ACS_KEY"));
+
+    let secret = "this is not base64 and must not be printed!";
+    let bad = Command::new(program)
+        .args(base)
+        .env("CK_ACS_KEY", secret)
+        .output()
+        .expect("run the program");
+    assert!(!bad.status.success());
+    let all = [bad.stdout, bad.stderr].concat();
+    assert!(!String::from_utf8_lossy(&all).contains(secret));
+}

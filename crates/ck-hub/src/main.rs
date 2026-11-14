@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use ck_hub::{
-    ConsoleMailer, CreateUserError, Download, Hub, MIN_PASSWORD_LENGTH, MemoryStore, NewStick,
-    OrganizationError, PasswordCost, PostgresStore, RegisterError, Registry, Role, Store,
-    add_member, create_organization, create_user, register_sticks, router,
+    AcsMailer, ConsoleMailer, CreateUserError, Download, Hub, MIN_PASSWORD_LENGTH, Mailer,
+    MemoryStore, NewStick, OrganizationError, PasswordCost, PostgresStore, RegisterError, Registry,
+    Role, Store, add_member, create_organization, create_user, register_sticks, router,
 };
 use clap::{Args, Parser, Subcommand};
 
@@ -57,9 +57,17 @@ struct ServeArgs {
     #[command(flatten)]
     download: DownloadArgs,
     /// How the Hub sends mail. `console` prints it, links included, and is for a developer's
-    /// machine only. Without this, sign-up and password reset answer 503
+    /// machine only. `acs` sends through Azure Communication Services (the key is read from the
+    /// environment variable `CK_ACS_KEY`). Without this, sign-up and password reset answer 503
     #[arg(long, env = "CK_MAIL", value_enum, requires = "public_url")]
     mail: Option<MailKind>,
+    /// With `--mail acs`: the address of the Communication Service, such as
+    /// <https://name.communication.azure.com>
+    #[arg(long, env = "CK_MAIL_ENDPOINT")]
+    mail_endpoint: Option<String>,
+    /// With `--mail acs`: the sender, an address of a verified sender domain
+    #[arg(long, env = "CK_MAIL_FROM")]
+    mail_from: Option<String>,
     /// The address people reach this Hub at, for the links in mail, such as
     /// <https://hub.contestkeeper.com>
     #[arg(long, env = "CK_PUBLIC_URL")]
@@ -69,6 +77,7 @@ struct ServeArgs {
 #[derive(Clone, clap::ValueEnum)]
 enum MailKind {
     Console,
+    Acs,
 }
 
 // The field names make the flags `--download-account` and so on, so the shared prefix stays.
@@ -352,7 +361,40 @@ async fn import_registry(args: ImportRegistryArgs) -> Result<(), String> {
     }
 }
 
+/// A mailer and the address its links start with.
+type MailSetup = (Arc<dyn Mailer>, String);
+
+/// The mailer the flags ask for, with the address its links start with. The Azure key is read from the
+/// environment only, never from a flag, so it is not in a process list.
+fn mailer_from(args: &ServeArgs) -> Result<Option<MailSetup>, String> {
+    let (Some(kind), Some(url)) = (&args.mail, &args.public_url) else {
+        return Ok(None);
+    };
+    let mailer: Arc<dyn Mailer> = match kind {
+        MailKind::Console => {
+            tracing::warn!("mail goes to the console: do not use this on a shared Hub");
+            Arc::new(ConsoleMailer)
+        }
+        MailKind::Acs => {
+            let endpoint = args
+                .mail_endpoint
+                .as_deref()
+                .ok_or("--mail acs needs --mail-endpoint (or CK_MAIL_ENDPOINT)")?;
+            let sender = args
+                .mail_from
+                .as_deref()
+                .ok_or("--mail acs needs --mail-from (or CK_MAIL_FROM)")?;
+            let key = std::env::var("CK_ACS_KEY")
+                .map_err(|_| "--mail acs needs the key in the environment variable CK_ACS_KEY")?;
+            Arc::new(AcsMailer::new(endpoint, sender, &key).map_err(|e| e.to_string())?)
+        }
+    };
+    Ok(Some((mailer, url.clone())))
+}
+
 async fn run(args: ServeArgs) -> Result<(), String> {
+    // Checked first, so wrong mail settings stop the program before it connects to anything.
+    let mailer = mailer_from(&args)?;
     // Sticks come from the database, from this file, or from both. A Hub that has neither knows no
     // stick, and every heartbeat is refused.
     let registry = match &args.registry {
@@ -405,9 +447,8 @@ async fn run(args: ServeArgs) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         hub = hub.with_download(download);
     }
-    if let (Some(MailKind::Console), Some(url)) = (&args.mail, &args.public_url) {
-        tracing::warn!("mail goes to the console: do not use this on a shared Hub");
-        hub = hub.with_mail(Arc::new(ConsoleMailer), url);
+    if let Some((mailer, url)) = mailer {
+        hub = hub.with_mail(mailer, &url);
     }
     let hub = Arc::new(hub);
 
