@@ -25,8 +25,14 @@ cargo run -p ck-hub -- --registry ck-registry.json --log hub.log
   `?sslmode=disable` for a database on the same machine that has no TLS.
 - `--mail console --public-url http://127.0.0.1:8088` (or `CK_MAIL` and `CK_PUBLIC_URL`) lets the Hub
   send mail, which sign-up and password reset need. `console` prints each mail, links included, to the
-  terminal: use it on a developer's machine only. A real mail provider is not built in yet. Without
-  mail the two routes answer `503`.
+  terminal: use it on a developer's machine only. Without mail the two routes answer `503`.
+- `--mail acs --public-url https://hub.example.org --mail-endpoint https://NAME.communication.azure.com
+  --mail-from noreply@mail.example.org` (or `CK_MAIL`, `CK_PUBLIC_URL`, `CK_MAIL_ENDPOINT`,
+  `CK_MAIL_FROM`) sends through Azure Communication Services Email. The sender must be an address of a
+  domain verified in that service. The service's access key is read from the environment variable
+  `CK_ACS_KEY` only, never from a flag, so it is not in a process list, and it is never logged. Mail is
+  queued and sent from a background thread: a slow or unavailable Azure does not slow or fail a request,
+  and a mail that cannot be sent is logged with its error (never its text) and dropped.
 - `--log` adds one line per heartbeat, accepted or refused. It never holds a secret or a signature.
 
 | Route | What it does |
