@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Duration, Utc};
 use ck_hub::{
-    Hub, LoginError, MAIL_WINDOW_SECONDS, MAX_FAILED_LOGINS, MAX_MAILS_PER_ADDRESS, Mailer,
+    Hub, LoginError, MAIL_WINDOW_SECONDS, MAX_FAILED_LOGINS, MAX_MAILS_PER_ADDRESS, Mail, Mailer,
     MemoryMailer, MemoryStore, PasswordCost, Registry, SignupError, TokenError,
     VERIFY_LIFETIME_HOURS, token_after,
 };
@@ -115,7 +115,7 @@ fn registering_validates_input_and_needs_a_mailer() {
         s.hub.register_account(NEW, "short"),
         Err(SignupError::PasswordTooShort)
     );
-    assert!(s.mailer.sent().is_empty());
+    assert_eq!(s.mailer.sent(), Vec::<Mail>::new());
 
     let bare = hub_with(&s.now);
     assert_eq!(
@@ -217,7 +217,7 @@ fn a_reset_for_an_unknown_address_sends_nothing_and_says_nothing() {
     s.hub
         .request_password_reset("ghost@example.org")
         .expect("same answer");
-    assert!(s.mailer.sent().is_empty());
+    assert_eq!(s.mailer.sent(), Vec::<Mail>::new());
 }
 
 #[test]
