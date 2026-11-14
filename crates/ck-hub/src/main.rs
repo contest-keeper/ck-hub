@@ -58,7 +58,7 @@ struct ServeArgs {
     download: DownloadArgs,
     /// How the Hub sends mail. `console` prints it, links included, and is for a developer's
     /// machine only. `acs` sends through Azure Communication Services (the key is read from the
-    /// environment variable CK_ACS_KEY). Without this, sign-up and password reset answer 503
+    /// environment variable `CK_ACS_KEY`). Without this, sign-up and password reset answer 503
     #[arg(long, env = "CK_MAIL", value_enum, requires = "public_url")]
     mail: Option<MailKind>,
     /// With `--mail acs`: the address of the Communication Service, such as
