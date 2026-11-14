@@ -56,6 +56,8 @@ impl Mailer for MemoryMailer {
 pub struct ConsoleMailer;
 
 impl Mailer for ConsoleMailer {
+    // Printing is the whole point of this mailer.
+    #[allow(clippy::print_stdout)]
     fn send(&self, mail: Mail) -> Result<(), MailError> {
         println!(
             "--- mail to {} ---\n{}\n\n{}\n---",

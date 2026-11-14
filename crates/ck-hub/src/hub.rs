@@ -12,6 +12,7 @@ use serde_json::json;
 
 use crate::accounts::{Accounts, PasswordCost};
 use crate::download::Download;
+use crate::mail::Mailer;
 use crate::registry::Registry;
 use crate::store::{Stick, Store, StoreError, StoredEvent};
 
@@ -92,6 +93,8 @@ pub struct Hub {
     log: Option<Mutex<File>>,
     default_org: OnceLock<String>,
     pub(crate) download: Option<Download>,
+    /// How mail is sent and the address its links start with, once set up.
+    pub(crate) mailer: Option<(Arc<dyn Mailer>, String)>,
     pub(crate) clock: Box<dyn Fn() -> DateTime<Utc> + Send + Sync>,
 }
 
@@ -119,8 +122,17 @@ impl Hub {
             log: log.map(Mutex::new),
             default_org: OnceLock::new(),
             download: None,
+            mailer: None,
             clock,
         }
+    }
+
+    /// Lets the Hub send mail. `public_url` is the address people reach the Hub at: the links in
+    /// the mail start with it.
+    #[must_use]
+    pub fn with_mail(mut self, mailer: Arc<dyn Mailer>, public_url: &str) -> Self {
+        self.mailer = Some((mailer, public_url.trim_end_matches('/').to_owned()));
+        self
     }
 
     /// Changes how much work hashing a password takes, for a machine that can afford more or less.

@@ -182,7 +182,13 @@ async fn make_user(args: CreateUserArgs) -> Result<(), String> {
     let store = connect(url).await?;
     let email = args.email.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let result = create_user(&store, PasswordCost::default(), &email, &password);
+        let result = create_user(
+            &store,
+            PasswordCost::default(),
+            Utc::now(),
+            &email,
+            &password,
+        );
         // The store is dropped on this blocking thread too, where closing the connection is safe.
         drop(store);
         result

@@ -14,9 +14,12 @@ use ck_protocol::{HEARTBEAT_PATH, SIGNATURE_HEADER, STICK_HEADER};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::accounts::{Access, AccessError, Account, LoginError, SESSION_LIFETIME_HOURS};
+use crate::accounts::{
+    Access, AccessError, Account, LoginError, MIN_PASSWORD_LENGTH, SESSION_LIFETIME_HOURS,
+};
 use crate::hub::{Hub, Rejection};
 use crate::register::{NewStick, RegisterError};
+use crate::signup::{SignupError, TokenError};
 use crate::store::{Membership, Role};
 
 /// The page organizers watch. It is one file with no outside resources, so it works on a network
@@ -60,6 +63,13 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/login", post(login))
         .route("/api/v1/logout", post(logout))
         .route("/api/v1/me", get(me))
+        .route("/api/v1/register", post(sign_up))
+        .route("/api/v1/verify-email", post(verify_email))
+        .route("/api/v1/password-reset", post(password_reset))
+        .route(
+            "/api/v1/password-reset/confirm",
+            post(password_reset_confirm),
+        )
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(axum::middleware::map_response(security_headers))
         .with_state(hub)
@@ -217,12 +227,115 @@ async fn login(State(hub): State<Arc<Hub>>, Json(body): Json<LoginBody>) -> Resp
             Json(json!({ "error": "wrong email or password" })),
         )
             .into_response(),
+        Ok(Err(LoginError::NotVerified)) => (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "confirm your email first: open the link we mailed you" })),
+        )
+            .into_response(),
         Ok(Err(LoginError::TooManyAttempts)) => (
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({ "error": "too many wrong passwords, wait a few minutes" })),
         )
             .into_response(),
         Ok(Err(LoginError::Unavailable)) | Err(_) => unavailable(),
+    }
+}
+
+#[derive(Deserialize)]
+struct RegisterBody {
+    email: String,
+    password: String,
+}
+
+#[derive(Deserialize)]
+struct EmailBody {
+    email: String,
+}
+
+#[derive(Deserialize)]
+struct TokenBody {
+    token: String,
+}
+
+#[derive(Deserialize)]
+struct ResetBody {
+    token: String,
+    password: String,
+}
+
+fn bad_request(text: &str) -> Response {
+    (StatusCode::BAD_REQUEST, Json(json!({ "error": text }))).into_response()
+}
+
+fn no_mail() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({ "error": "this Hub cannot send email, so this is closed" })),
+    )
+        .into_response()
+}
+
+fn short_password() -> Response {
+    bad_request(&format!(
+        "the password needs at least {MIN_PASSWORD_LENGTH} characters"
+    ))
+}
+
+fn bad_link() -> Response {
+    bad_request("this link is not valid any more")
+}
+
+/// The same answer whether or not the address has an account.
+fn accepted_mail(text: &str) -> Response {
+    (StatusCode::ACCEPTED, Json(json!({ "status": text }))).into_response()
+}
+
+async fn sign_up(State(hub): State<Arc<Hub>>, Json(body): Json<RegisterBody>) -> Response {
+    let Ok(_permit) = HASHING.acquire().await else {
+        return unavailable();
+    };
+    let result =
+        tokio::task::spawn_blocking(move || hub.register_account(&body.email, &body.password))
+            .await;
+    match result {
+        Ok(Ok(())) => accepted_mail("check your email"),
+        Ok(Err(SignupError::BadEmail)) => bad_request("that is not an email address"),
+        Ok(Err(SignupError::PasswordTooShort)) => short_password(),
+        Ok(Err(SignupError::MailNotSetUp)) => no_mail(),
+        Ok(Err(SignupError::Unavailable)) | Err(_) => unavailable(),
+    }
+}
+
+async fn verify_email(State(hub): State<Arc<Hub>>, Json(body): Json<TokenBody>) -> Response {
+    match tokio::task::spawn_blocking(move || hub.verify_email(&body.token)).await {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(TokenError::Invalid | TokenError::PasswordTooShort)) => bad_link(),
+        Ok(Err(TokenError::Unavailable)) | Err(_) => unavailable(),
+    }
+}
+
+async fn password_reset(State(hub): State<Arc<Hub>>, Json(body): Json<EmailBody>) -> Response {
+    match tokio::task::spawn_blocking(move || hub.request_password_reset(&body.email)).await {
+        Ok(Ok(())) => accepted_mail("if that address has an account, a link is on its way"),
+        Ok(Err(SignupError::MailNotSetUp)) => no_mail(),
+        Ok(Err(_)) | Err(_) => unavailable(),
+    }
+}
+
+async fn password_reset_confirm(
+    State(hub): State<Arc<Hub>>,
+    Json(body): Json<ResetBody>,
+) -> Response {
+    let Ok(_permit) = HASHING.acquire().await else {
+        return unavailable();
+    };
+    let result =
+        tokio::task::spawn_blocking(move || hub.reset_password(&body.token, &body.password)).await;
+    match result {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(TokenError::Invalid)) => bad_link(),
+        Ok(Err(TokenError::PasswordTooShort)) => short_password(),
+        Ok(Err(TokenError::Unavailable)) | Err(_) => unavailable(),
     }
 }
 
