@@ -24,6 +24,8 @@ jobs:
       contents: read
       id-token: write
     uses: contest-keeper/ck-infra/.github/workflows/deploy.yml@develop
+    secrets:
+      registry_token: ${{ secrets.GHCR_PULL_TOKEN }}
     with:
       environment: develop
       image_tag: ${{ needs.image.outputs.image_tag }}
