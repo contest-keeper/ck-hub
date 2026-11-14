@@ -12,7 +12,15 @@ jobs:
   release-please:
     uses: contest-keeper/.github/.github/workflows/release-please.yml@main
 
-  # Build and upload release files here, e.g.:
-  # build:
-  #   needs: release-please
-  #   if: needs.release-please.outputs.release_created == 'true'
+  # Publishes ghcr.io/contest-keeper/ck-hub:<version> and :latest with an SBOM and provenance.
+  image:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: contest-keeper/.github/.github/workflows/release-container.yml@main
+    with:
+      tag_name: ${{ needs.release-please.outputs.tag_name }}
