@@ -2138,7 +2138,6 @@ admins become its owners, former viewers stay viewers, and they log in with the 
 
 Also fix the mention of `create-user` in the "Registering sticks" paragraph so it says an admin account of the organization, and `ck-hub import-registry` gets `--org <slug>` in its example.
 
-- [ ] The setup repository (`../ck-hub-setup`, `README.md` and `docs/azure.md`) tells people to run `create-user admin`. Note that it needs `create-user admin@<domain>` followed by `create-org main --owner admin@<domain>`. That repository is outside this change: list the needed edits in the final report instead of making them.
 
 ### Step 4.4: Final check
 
