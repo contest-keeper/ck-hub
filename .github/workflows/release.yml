@@ -24,3 +24,14 @@ jobs:
     uses: contest-keeper/.github/.github/workflows/release-container.yml@main
     with:
       tag_name: ${{ needs.release-please.outputs.tag_name }}
+
+  # Production waits for the approval set on the "production" environment of this repository.
+  deploy:
+    needs: [release-please, image]
+    permissions:
+      contents: read
+      id-token: write
+    uses: contest-keeper/ck-hub-setup/.github/workflows/deploy.yml@main
+    with:
+      environment: production
+      image_tag: ${{ needs.image.outputs.image_tag }}
