@@ -37,10 +37,12 @@ fn setup_with_registry(registry_json: &str) -> Setup {
         memory_kib: 8,
         passes: 1,
     });
-    hub.create_user("ana", PASSWORD, Role::Admin)
-        .expect("admin");
-    hub.create_user("vera", PASSWORD, Role::Viewer)
-        .expect("viewer");
+    hub.create_user("ana@example.org", PASSWORD).expect("ana");
+    hub.create_user("vera@example.org", PASSWORD).expect("vera");
+    hub.create_organization("default", "Default", "ana@example.org")
+        .expect("organization");
+    hub.add_member("default", "vera@example.org", Role::Viewer)
+        .expect("vera is a viewer");
     Setup {
         dir,
         app: router(Arc::new(hub)),
@@ -119,7 +121,7 @@ async fn heartbeat_status(app: &Router, id: &str, token: &str) -> StatusCode {
 }
 
 async fn list(app: &Router) -> Vec<Value> {
-    let cookie = cookie_for(app, "vera").await;
+    let cookie = cookie_for(app, "vera@example.org").await;
     let request = Request::get("/api/v1/sticks")
         .header("cookie", cookie)
         .body(Body::empty())
@@ -137,14 +139,14 @@ async fn only_an_admin_may_register_sticks() {
         register(&setup.app, None, &body).await.0,
         StatusCode::UNAUTHORIZED
     );
-    let viewer = cookie_for(&setup.app, "vera").await;
+    let viewer = cookie_for(&setup.app, "vera@example.org").await;
     assert_eq!(
         register(&setup.app, Some(&viewer), &body).await.0,
         StatusCode::FORBIDDEN
     );
     assert_eq!(list(&setup.app).await.len(), 0, "nothing was registered");
 
-    let admin = cookie_for(&setup.app, "ana").await;
+    let admin = cookie_for(&setup.app, "ana@example.org").await;
     let (status, answer) = register(&setup.app, Some(&admin), &body).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!(answer["added"], 1);
@@ -153,7 +155,7 @@ async fn only_an_admin_may_register_sticks() {
 #[tokio::test]
 async fn a_registered_stick_can_report_with_its_secret_and_shows_in_the_list() {
     let setup = setup();
-    let admin = cookie_for(&setup.app, "ana").await;
+    let admin = cookie_for(&setup.app, "ana@example.org").await;
     register(&setup.app, Some(&admin), &stick("stick-1", TOKEN)).await;
 
     assert_eq!(
@@ -175,7 +177,7 @@ async fn a_registered_stick_can_report_with_its_secret_and_shows_in_the_list() {
 #[tokio::test]
 async fn registering_twice_changes_nothing_and_a_different_secret_is_refused() {
     let setup = setup();
-    let admin = cookie_for(&setup.app, "ana").await;
+    let admin = cookie_for(&setup.app, "ana@example.org").await;
     register(&setup.app, Some(&admin), &stick("stick-1", TOKEN)).await;
 
     let (status, again) = register(&setup.app, Some(&admin), &stick("stick-1", TOKEN)).await;
@@ -203,7 +205,7 @@ async fn registering_twice_changes_nothing_and_a_different_secret_is_refused() {
 #[tokio::test]
 async fn a_whole_registry_file_is_accepted_even_a_big_one() {
     let setup = setup();
-    let admin = cookie_for(&setup.app, "ana").await;
+    let admin = cookie_for(&setup.app, "ana@example.org").await;
     // The admin tool's registry has more fields than the Hub uses; they are ignored.
     let entries: Vec<Value> = (1..=400)
         .map(|n| {
@@ -227,7 +229,7 @@ async fn a_whole_registry_file_is_accepted_even_a_big_one() {
 #[tokio::test]
 async fn a_bad_request_registers_nothing_at_all() {
     let setup = setup();
-    let admin = cookie_for(&setup.app, "ana").await;
+    let admin = cookie_for(&setup.app, "ana@example.org").await;
     // The second stick of the batch is wrong, so the first is not registered either.
     let batch = json!({ "sticks": [stick("stick-1", TOKEN), stick("stick-2", "short")] });
     let (status, answer) = register(&setup.app, Some(&admin), &batch).await;
@@ -263,7 +265,7 @@ async fn a_bad_request_registers_nothing_at_all() {
 async fn a_stick_in_the_registry_file_cannot_be_given_another_secret() {
     let file = r#"{"sticks":[{"stick_id":"file-1","token":"the-secret-from-the-file-1","team":"F","site":"S","contest":"C","machine_number":1}]}"#;
     let setup = setup_with_registry(file);
-    let admin = cookie_for(&setup.app, "ana").await;
+    let admin = cookie_for(&setup.app, "ana@example.org").await;
     let (status, answer) = register(&setup.app, Some(&admin), &stick("file-1", TOKEN)).await;
     assert_eq!(status, StatusCode::CONFLICT, "{answer}");
     assert_eq!(
@@ -285,7 +287,7 @@ async fn a_stick_in_the_registry_file_cannot_be_given_another_secret() {
 #[tokio::test]
 async fn the_answers_never_contain_a_secret() {
     let setup = setup();
-    let admin = cookie_for(&setup.app, "ana").await;
+    let admin = cookie_for(&setup.app, "ana@example.org").await;
     let request = Request::post("/api/v1/sticks")
         .header("content-type", "application/json")
         .header("cookie", &admin)
@@ -304,7 +306,7 @@ async fn the_answers_never_contain_a_secret() {
 #[tokio::test]
 async fn a_bad_registration_names_the_wrong_field() {
     let setup = setup();
-    let admin = cookie_for(&setup.app, "ana").await;
+    let admin = cookie_for(&setup.app, "ana@example.org").await;
 
     let (status, answer) =
         register(&setup.app, Some(&admin), &json!({ "stick_id": "stick-1" })).await;
@@ -324,5 +326,104 @@ async fn a_bad_registration_names_the_wrong_field() {
     assert!(
         answer["error"].as_str().unwrap_or("").contains("stick_id"),
         "{answer}"
+    );
+}
+
+/// Two organizations with an owner each: ana owns "default", bo owns "other".
+fn two_organizations() -> Router {
+    let hub = Hub::new(
+        Registry::empty(),
+        Arc::new(MemoryStore::default()),
+        None,
+        Box::new(Utc::now),
+    )
+    .with_password_cost(PasswordCost {
+        memory_kib: 8,
+        passes: 1,
+    });
+    for email in ["ana@example.org", "bo@example.org"] {
+        hub.create_user(email, PASSWORD).expect("an account");
+    }
+    hub.create_organization("default", "Default", "ana@example.org")
+        .expect("default");
+    hub.create_organization("other", "Other", "bo@example.org")
+        .expect("other");
+    router(Arc::new(hub))
+}
+
+async fn send(
+    app: &Router,
+    method: &str,
+    path: &str,
+    cookie: &str,
+    body: Option<&Value>,
+) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("cookie", cookie)
+        .header("content-type", "application/json")
+        .body(body.map_or_else(Body::empty, |body| Body::from(body.to_string())))
+        .expect("request");
+    let (status, text) = call(app, request).await;
+    (
+        status,
+        serde_json::from_str(&text).unwrap_or(Value::String(text)),
+    )
+}
+
+#[tokio::test]
+async fn sticks_and_heartbeats_of_one_organization_are_invisible_to_another() {
+    let app = two_organizations();
+    let ana = cookie_for(&app, "ana@example.org").await;
+    let bo = cookie_for(&app, "bo@example.org").await;
+    let mine = "/api/v1/orgs/default/sticks";
+    let theirs = "/api/v1/orgs/other/sticks";
+
+    let (status, answer) = send(&app, "POST", mine, &ana, Some(&stick("stick-1", TOKEN))).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["added"], 1);
+
+    // The other organization has none, and cannot take the same id, even with the same secret.
+    assert_eq!(
+        send(&app, "GET", theirs, &bo, None).await,
+        (StatusCode::OK, json!([]))
+    );
+    let (status, answer) = send(&app, "POST", theirs, &bo, Some(&stick("stick-1", TOKEN))).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+    assert_eq!(answer["conflicts"], json!(["stick-1"]));
+
+    // The stick reports once, and what it reports shows in its own organization only.
+    assert_eq!(
+        heartbeat_status(&app, "stick-1", TOKEN).await,
+        StatusCode::OK
+    );
+    let (_, list) = send(&app, "GET", mine, &ana, None).await;
+    assert_eq!(list.as_array().map(Vec::len), Some(1));
+    assert_eq!(list[0]["online"], true);
+    assert_eq!(
+        send(&app, "GET", theirs, &bo, None).await,
+        (StatusCode::OK, json!([]))
+    );
+
+    // A member of one organization is not a member of the other: there is nothing to find there.
+    for (cookie, path) in [(&ana, theirs), (&bo, mine)] {
+        assert_eq!(
+            send(&app, "GET", path, cookie, None).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            send(&app, "POST", path, cookie, Some(&stick("stick-2", TOKEN)))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+    assert_eq!(
+        send(&app, "GET", "/api/v1/orgs/nowhere/sticks", &ana, None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND,
+        "an unknown organization looks the same"
     );
 }

@@ -27,14 +27,15 @@ cargo run -p ck-hub -- --registry ck-registry.json --log hub.log
 
 | Route | What it does |
 |---|---|
-| `POST /api/v1/login` | An organizer logs in with `{"username", "password"}`. The answer sets the `ck_session` cookie (`HttpOnly; Secure; SameSite=Strict`, 12 hours). `401` for a wrong name or password, with the same answer for both, and `429` after 5 wrong passwords for one name (locked for 5 minutes) or 60 in a minute for all names. |
+| `POST /api/v1/login` | A person logs in with `{"email", "password"}` (`username` is still accepted for `email`). The answer sets the `ck_session` cookie (`HttpOnly; Secure; SameSite=Strict`, 12 hours). `401` for a wrong email or password, with the same answer for both, and `429` after 5 wrong passwords for one email (locked for 5 minutes) or 60 in a minute for all emails. |
 | `POST /api/v1/logout` | Ends the session on the server and clears the cookie. |
-| `GET /api/v1/me` | Who the session belongs to and their role. `401` without a valid session. |
-| `GET /` | The page organizers watch: every stick with its status, last heartbeat, computer name, uptime and recorder. It reads `/api/v1/sticks` every 5 seconds. It is one file with no outside resources, so it works with no internet. |
+| `GET /api/v1/me` | Who the session belongs to and the organizations they are in, each with their role there (`role` is also given when there is exactly one). `401` without a valid session. |
+| `GET /` | The page organizers watch: every stick with its status, last heartbeat, computer name, uptime and recorder. It reads the sticks of the chosen organization every 5 seconds, and shows a selector when the account is in several. It is one file with no outside resources, so it works with no internet. |
 | `POST /api/v1/heartbeat` | A stick sends a heartbeat. The body is signed with the stick's secret (HMAC-SHA256, hex) in `X-CK-Signature`, and the stick id is in `X-CK-Stick`. `400` for a malformed message, `401` for an unknown stick or a bad signature (the two look the same), `409` for a sequence number that is not newer within the same boot. |
 | `POST /api/v1/events` | A stick sends one event (a login, a submission), signed like a heartbeat. Events of one boot form a chain. A gap or a broken link does not refuse the event: it is kept with a note and shown as a warning. `409` for an event the Hub already has, which the stick counts as delivered. |
-| `POST /api/v1/sticks` | Admin only. Registers sticks: one stick object, or a whole registry file of the admin tool (`{"sticks": [...]}`, extra fields are ignored, up to 2 MB). Safe to send twice. A stick that is already known with a different secret is refused with `409` and left as it was; a secret is never replaced. Nothing is registered if any stick in the request is invalid. The answer says how many were added and never contains a secret. |
-| `GET /api/v1/sticks` | Needs a session (any role). Every stick the admin made, with its last heartbeat and whether it is online (a heartbeat in the last 60 seconds). |
+| `POST /api/v1/orgs/{slug}/sticks` | Admin or owner of the organization. Registers sticks: one stick object, or a whole registry file of the admin tool (`{"sticks": [...]}`, extra fields are ignored, up to 2 MB). Safe to send twice. A stick that is already known with a different secret is refused with `409` and left as it was; a secret is never replaced. Nothing is registered if any stick in the request is invalid. A stick id already used by another organization is refused like a different secret. The answer says how many were added and never contains a secret. |
+| `GET /api/v1/orgs/{slug}/sticks` | A member of the organization (any role). Every stick of the organization, with its last heartbeat and whether it is online (a heartbeat in the last 60 seconds). `404` for an unknown organization and for one the account is not in, with the same answer for both. |
+| `GET` and `POST /api/v1/sticks` | The same two routes for an account that is in exactly one organization. With several it answers `409`: use the address with the slug. |
 
 
 ## Tests with PostgreSQL
@@ -50,18 +51,30 @@ CK_TEST_DATABASE_URL=postgres://postgres:ck-test-only@127.0.0.1:54329/ckhub carg
 Events in the database are append-only: the database itself refuses to change or delete them, so
 every test uses ids no earlier run used.
 
-## Organizer accounts
+## Accounts and organizations
 
-The page and the stick list are only for organizers. Accounts need the database:
+People belong to organizations. The page and the stick list show one organization at a time.
+Accounts need the database. Staff make them from the command line:
 
 ```sh
-ck-hub create-user ana --database-url postgres://user:password@localhost/ckhub
+ck-hub create-user ana@example.org --database-url postgres://user:password@localhost/ckhub
+ck-hub create-org rcpc --name "RCPC" --owner ana@example.org --database-url postgres://...
+ck-hub add-member rcpc bo@example.org --role viewer --database-url postgres://...
 ```
 
 The password (at least 12 characters) is asked for at a prompt without echo, twice. It is never taken
-from an argument or the environment, so it is not left in a shell history or a process list. `--role`
-is `admin` (default) or `viewer`. Only an Argon2id hash of the password is stored, and only a hash of
-each session token, so a copy of the database cannot be used to log in.
+from an argument or the environment, so it is not left in a shell history or a process list. The
+roles are `owner`, `admin` and `viewer`; an owner may do everything an admin may. Only an Argon2id
+hash of the password is stored, and only a hash of each session token, so a copy of the database
+cannot be used to log in.
+
+Everything a stick reports belongs to one organization. Row-level security keeps organizations apart
+in the database, on top of the filters of every query. It does not apply to a superuser or a role
+with `BYPASSRLS`, so connect the Hub as a plain role; the Hub warns at start when it is not one.
+
+A database from before organizations is moved into an organization with the slug `default`: former
+admins become its owners, former viewers stay viewers, and they log in with the name they had. The
+sticks of a `--registry` file belong to `default` too.
 
 The cookie is `Secure`, so run the Hub behind HTTPS (the browser also accepts it on `localhost`).
 Sticks do not use accounts: their heartbeats and events are signed with their own secret.
@@ -71,11 +84,11 @@ A Hub started without a database has no accounts, so nobody can look at it.
 
 A stick is known to the Hub when its id and secret are in the database or in the `--registry` file
 (or both). The normal way is that the admin tool sends its registry over HTTPS with an admin
-account (`ck-forge registry push`, or the Hub page of the window; both use `POST /api/v1/sticks`).
+account (`ck-forge registry push`, or the Hub page of the window; both use `POST /api/v1/sticks`, which works for an account in one organization).
 The fallback, for an admin with no connection, is to bring the registry file to the Hub:
 
 ```sh
-ck-hub import-registry ck-registry.json --database-url postgres://...
+ck-hub import-registry ck-registry.json --org rcpc --database-url postgres://...
 ```
 
 or to send the file to the same endpoint as an admin. Both are safe to repeat.

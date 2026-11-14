@@ -63,6 +63,7 @@ try { if (localStorage.getItem("ck-theme") === "classic") document.documentEleme
   .live { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; }
   .live i { width: 8px; height: 8px; border-radius: 50%; background: var(--live); display: block; }
   #who { display: none; align-items: center; gap: 10px; font-size: 13px; }
+  #org { min-height: 36px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-size: 13px; }
 
   button { font: inherit; cursor: pointer; }
   .btn { display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-weight: 600; font-size: 13px; }
@@ -170,13 +171,13 @@ try { if (localStorage.getItem("ck-theme") === "classic") document.documentEleme
     <button type="button" id="theme-classic" aria-pressed="false">Classic</button>
     <button type="button" id="theme-modern" aria-pressed="true">Modern</button>
   </span>
-  <span id="who"><span id="who-name"></span><button class="btn" id="logout" type="button">Log out</button></span>
+  <span id="who"><select id="org" aria-label="Organization" hidden></select><span id="who-name"></span><button class="btn" id="logout" type="button">Log out</button></span>
 </div></header>
 <main>
   <form id="login" autocomplete="on">
     <h2>Log in to Keeper Hub</h2>
     <p class="intro">See which contest machines are online and which need attention.</p>
-    <div><label for="user">Name</label><input id="user" name="username" autocomplete="username" required></div>
+    <div><label for="user">Email</label><input id="user" name="email" type="email" autocomplete="username" required></div>
     <div><label for="pass">Password</label><input id="pass" name="password" type="password" autocomplete="current-password" required></div>
     <button class="btn pri" type="submit">Log in</button>
     <div id="login-error" role="alert"></div>
@@ -215,6 +216,7 @@ const REFRESH_MS = 5000;
 let sticks = [];
 let filter = "all";
 let query = "";
+let org = null;
 const opened = new Set();
 
 function ago(seconds) {
@@ -357,23 +359,44 @@ function showLogin(visible) {
 async function refresh() {
   const problem = document.getElementById("problem");
   try {
-    const response = await fetch("/api/v1/sticks", { cache: "no-store" });
-    if (response.status === 401) { showLogin(true); problem.style.display = "none"; return; }
-    if (!response.ok) throw new Error("HTTP " + response.status);
+    const me = await fetch("/api/v1/me", { cache: "no-store" });
+    if (me.status === 401) { showLogin(true); problem.style.display = "none"; return; }
+    if (!me.ok) throw new Error("HTTP " + me.status);
+    const account = await me.json();
+    const orgs = account.organizations;
+    const select = document.getElementById("org");
+    if (!orgs.some((o) => o.slug === org)) org = orgs.length ? orgs[0].slug : null;
+    if (select.options.length !== orgs.length) {
+      select.replaceChildren(...orgs.map((o) => new Option(o.name, o.slug)));
+    }
+    select.value = org || "";
+    select.hidden = orgs.length < 2;
+    const current = orgs.find((o) => o.slug === org);
+    document.getElementById("who-name").textContent = account.email + (current ? " (" + current.role + ")" : "");
     showLogin(false);
+    if (!org) {
+      sticks = [];
+      render();
+      problem.textContent = "You are not a member of any organization yet. Ask an owner to add you.";
+      problem.style.display = "block";
+      return;
+    }
+    const response = await fetch("/api/v1/orgs/" + encodeURIComponent(org) + "/sticks", { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
     sticks = await response.json();
     render();
     document.getElementById("live-text").textContent = "Live · updated " + new Date().toLocaleTimeString();
     problem.style.display = "none";
-    const me = await fetch("/api/v1/me", { cache: "no-store" });
-    if (me.ok) {
-      const account = await me.json();
-      document.getElementById("who-name").textContent = account.username + " (" + account.role + ")";
-    }
   } catch (error) {
+    problem.textContent = "The Hub cannot be reached. The list below is the last one received.";
     problem.style.display = "block";
   }
 }
+
+document.getElementById("org").addEventListener("change", (event) => {
+  org = event.target.value;
+  refresh();
+});
 
 function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
@@ -411,7 +434,7 @@ document.getElementById("login").addEventListener("submit", async (event) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        username: document.getElementById("user").value,
+        email: document.getElementById("user").value,
         password: document.getElementById("pass").value,
       }),
     });

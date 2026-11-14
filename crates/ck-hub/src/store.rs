@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 use ck_protocol::{Event, Heartbeat, StickId, Token};
@@ -16,10 +17,12 @@ use serde::Deserialize;
 #[error("the store failed: {0}")]
 pub struct StoreError(pub String);
 
-/// What an organizer may do.
+/// What a member of an organization may do. Each role may do everything the ones below it may.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
-    /// Manages contests, sticks and users, and sees everything a viewer sees.
+    /// Everything an admin may do, and invites admins.
+    Owner,
+    /// Manages sticks, and sees everything a viewer sees.
     Admin,
     /// Only looks at the dashboard.
     Viewer,
@@ -29,6 +32,7 @@ impl Role {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Owner => "owner",
             Self::Admin => "admin",
             Self::Viewer => "viewer",
         }
@@ -37,16 +41,25 @@ impl Role {
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
         match text {
+            "owner" => Some(Self::Owner),
             "admin" => Some(Self::Admin),
             "viewer" => Some(Self::Viewer),
             _ => None,
         }
     }
 
+    fn rank(self) -> u8 {
+        match self {
+            Self::Owner => 3,
+            Self::Admin => 2,
+            Self::Viewer => 1,
+        }
+    }
+
     /// Whether someone with this role may do what `needed` asks for.
     #[must_use]
     pub fn allows(self, needed: Role) -> bool {
-        self == Self::Admin || needed == Self::Viewer
+        self.rank() >= needed.rank()
     }
 }
 
@@ -66,11 +79,34 @@ pub struct Stick {
     pub machine_number: Option<u32>,
 }
 
-/// An organizer account. The password is only ever kept as an Argon2 hash.
+/// An account. The password is only ever kept as an Argon2 hash. `email` is what the person logs
+/// in with; accounts made before organizations existed keep their old name there.
 #[derive(Debug, Clone)]
 pub struct User {
-    pub name: String,
+    pub id: String,
+    pub email: String,
     pub password_hash: String,
+}
+
+/// What a store needs to make an account. The store picks the id.
+#[derive(Debug, Clone)]
+pub struct NewUser {
+    pub email: String,
+    pub password_hash: String,
+}
+
+/// A club or contest team. Everything sticks report belongs to one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Organization {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+}
+
+/// An organization a user belongs to, and the role they have in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Membership {
+    pub organization: Organization,
     pub role: Role,
 }
 
@@ -92,22 +128,32 @@ pub struct StoredEvent {
 
 /// Every method fails with [`StoreError`] when the data cannot be read or written.
 pub trait Store: Send + Sync {
-    /// Keeps `heartbeat` as the latest of its stick and counts it.
+    /// Keeps `heartbeat` as the latest of its stick in the organization and counts it.
     fn record_heartbeat(
         &self,
+        organization: &str,
         heartbeat: Heartbeat,
         received_at: DateTime<Utc>,
     ) -> Result<(), StoreError>;
 
-    fn last_heartbeat(&self, stick: &StickId) -> Result<Option<SeenHeartbeat>, StoreError>;
+    fn last_heartbeat(
+        &self,
+        organization: &str,
+        stick: &StickId,
+    ) -> Result<Option<SeenHeartbeat>, StoreError>;
 
     /// The highest heartbeat sequence ever accepted from `stick` in `boot`, if any.
-    fn heartbeat_seq_of_boot(&self, stick: &StickId, boot: &str)
-    -> Result<Option<u64>, StoreError>;
+    fn heartbeat_seq_of_boot(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        boot: &str,
+    ) -> Result<Option<u64>, StoreError>;
 
     /// Adds an event after the ones already kept for its stick.
     fn append_event(
         &self,
+        organization: &str,
         event: Event,
         received_at: DateTime<Utc>,
         integrity: Option<String>,
@@ -116,27 +162,57 @@ pub trait Store: Send + Sync {
     /// The newest event of `stick` in `boot`, if any.
     fn last_event_of_boot(
         &self,
+        organization: &str,
         stick: &StickId,
         boot: &str,
     ) -> Result<Option<StoredEvent>, StoreError>;
 
     /// Every event of the stick, in the order they were received.
-    fn events(&self, stick: &StickId) -> Result<Vec<StoredEvent>, StoreError>;
+    fn events(&self, organization: &str, stick: &StickId) -> Result<Vec<StoredEvent>, StoreError>;
 
-    /// Adds an account. Returns false, and changes nothing, when the name is taken.
-    fn create_user(&self, user: User) -> Result<bool, StoreError>;
+    /// Adds an account. Returns `None`, and changes nothing, when the email is taken. Capitals
+    /// do not matter.
+    fn create_user(&self, user: NewUser) -> Result<Option<User>, StoreError>;
 
-    fn user(&self, name: &str) -> Result<Option<User>, StoreError>;
+    /// The account with this email, whatever its capitals.
+    fn user_by_email(&self, email: &str) -> Result<Option<User>, StoreError>;
+
+    fn user(&self, id: &str) -> Result<Option<User>, StoreError>;
+
+    /// Adds an organization. Returns `None`, and changes nothing, when the slug is taken.
+    fn create_organization(
+        &self,
+        slug: &str,
+        name: &str,
+    ) -> Result<Option<Organization>, StoreError>;
+
+    /// The organization with this slug, made if there is none.
+    fn ensure_organization(&self, slug: &str, name: &str) -> Result<Organization, StoreError>;
+
+    fn organization_by_slug(&self, slug: &str) -> Result<Option<Organization>, StoreError>;
+
+    /// Makes `user_id` a member. Returns false, and changes nothing, for a member already.
+    fn add_member(
+        &self,
+        organization_id: &str,
+        user_id: &str,
+        role: Role,
+    ) -> Result<bool, StoreError>;
+
+    fn membership(&self, organization_id: &str, user_id: &str) -> Result<Option<Role>, StoreError>;
+
+    /// Every organization the user belongs to, ordered by slug.
+    fn memberships(&self, user_id: &str) -> Result<Vec<Membership>, StoreError>;
 
     /// Starts a session. `token_hash` is a hash of the token the browser holds, never the token.
     fn create_session(
         &self,
         token_hash: &str,
-        user: &str,
+        user_id: &str,
         expires_at: DateTime<Utc>,
     ) -> Result<(), StoreError>;
 
-    /// The user a session belongs to and when it ends, if there is such a session.
+    /// The user id a session belongs to and when it ends, if there is such a session.
     fn session(&self, token_hash: &str) -> Result<Option<(String, DateTime<Utc>)>, StoreError>;
 
     fn delete_session(&self, token_hash: &str) -> Result<(), StoreError>;
@@ -144,48 +220,62 @@ pub trait Store: Send + Sync {
     /// Removes every session that ended at or before `now`.
     fn delete_expired_sessions(&self, now: DateTime<Utc>) -> Result<(), StoreError>;
 
-    /// Adds a stick. Returns false, and changes nothing, when its id is already known: a stick's
-    /// secret is never replaced.
-    fn add_stick(&self, stick: Stick) -> Result<bool, StoreError>;
+    /// Adds a stick to an organization. Returns false, and changes nothing, when its id is
+    /// already known to any organization: a stick's secret is never replaced, and an id belongs
+    /// to one organization.
+    fn add_stick(&self, organization: &str, stick: Stick) -> Result<bool, StoreError>;
 
-    fn stick(&self, id: &StickId) -> Result<Option<Stick>, StoreError>;
+    /// The stick with this id and the organization it belongs to.
+    fn stick(&self, id: &StickId) -> Result<Option<(String, Stick)>, StoreError>;
 
-    /// Every registered stick.
-    fn sticks(&self) -> Result<Vec<Stick>, StoreError>;
+    /// Every stick of the organization.
+    fn sticks(&self, organization: &str) -> Result<Vec<Stick>, StoreError>;
 }
 
 /// Keeps everything in memory. Used by the tests, and by a Hub started without a database; the
 /// data is gone when the program stops.
 #[derive(Default)]
 pub struct MemoryStore {
-    heartbeats: Mutex<HashMap<StickId, SeenHeartbeat>>,
-    boot_seqs: Mutex<HashMap<(StickId, String), u64>>,
-    events: Mutex<HashMap<StickId, Vec<StoredEvent>>>,
-    users: Mutex<HashMap<String, User>>,
+    heartbeats: Mutex<HashMap<(String, StickId), SeenHeartbeat>>,
+    boot_seqs: Mutex<HashMap<(String, StickId, String), u64>>,
+    events: Mutex<HashMap<(String, StickId), Vec<StoredEvent>>>,
+    users: Mutex<Vec<User>>,
     sessions: Mutex<HashMap<String, (String, DateTime<Utc>)>>,
-    sticks: Mutex<HashMap<StickId, Stick>>,
+    organizations: Mutex<Vec<Organization>>,
+    members: Mutex<Vec<(String, String, Role)>>,
+    next_id: AtomicU64,
+    sticks: Mutex<HashMap<StickId, (String, Stick)>>,
+}
+
+impl MemoryStore {
+    fn id(&self, kind: &str) -> String {
+        format!("{kind}-{}", self.next_id.fetch_add(1, Ordering::Relaxed))
+    }
 }
 
 impl Store for MemoryStore {
     fn record_heartbeat(
         &self,
+        organization: &str,
         heartbeat: Heartbeat,
         received_at: DateTime<Utc>,
     ) -> Result<(), StoreError> {
         {
             let mut boots = self.boot_seqs.lock().expect("boots lock");
             let top = boots
-                .entry((heartbeat.stick_id.clone(), heartbeat.boot_id.clone()))
+                .entry((
+                    organization.to_owned(),
+                    heartbeat.stick_id.clone(),
+                    heartbeat.boot_id.clone(),
+                ))
                 .or_insert(0);
             *top = (*top).max(heartbeat.seq);
         }
+        let key = (organization.to_owned(), heartbeat.stick_id.clone());
         let mut heartbeats = self.heartbeats.lock().expect("heartbeats lock");
-        let count = heartbeats
-            .get(&heartbeat.stick_id)
-            .map_or(0, |seen| seen.count)
-            + 1;
+        let count = heartbeats.get(&key).map_or(0, |seen| seen.count) + 1;
         heartbeats.insert(
-            heartbeat.stick_id.clone(),
+            key,
             SeenHeartbeat {
                 heartbeat,
                 received_at,
@@ -195,17 +285,22 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    fn last_heartbeat(&self, stick: &StickId) -> Result<Option<SeenHeartbeat>, StoreError> {
+    fn last_heartbeat(
+        &self,
+        organization: &str,
+        stick: &StickId,
+    ) -> Result<Option<SeenHeartbeat>, StoreError> {
         Ok(self
             .heartbeats
             .lock()
             .expect("heartbeats lock")
-            .get(stick)
+            .get(&(organization.to_owned(), stick.clone()))
             .cloned())
     }
 
     fn heartbeat_seq_of_boot(
         &self,
+        organization: &str,
         stick: &StickId,
         boot: &str,
     ) -> Result<Option<u64>, StoreError> {
@@ -213,12 +308,13 @@ impl Store for MemoryStore {
             .boot_seqs
             .lock()
             .expect("boots lock")
-            .get(&(stick.clone(), boot.to_owned()))
+            .get(&(organization.to_owned(), stick.clone(), boot.to_owned()))
             .copied())
     }
 
     fn last_event_of_boot(
         &self,
+        organization: &str,
         stick: &StickId,
         boot: &str,
     ) -> Result<Option<StoredEvent>, StoreError> {
@@ -226,13 +322,14 @@ impl Store for MemoryStore {
             .events
             .lock()
             .expect("events lock")
-            .get(stick)
+            .get(&(organization.to_owned(), stick.clone()))
             .and_then(|all| all.iter().rev().find(|s| s.event.boot_id == boot))
             .cloned())
     }
 
     fn append_event(
         &self,
+        organization: &str,
         event: Event,
         received_at: DateTime<Utc>,
         integrity: Option<String>,
@@ -240,7 +337,7 @@ impl Store for MemoryStore {
         self.events
             .lock()
             .expect("events lock")
-            .entry(event.stick_id.clone())
+            .entry((organization.to_owned(), event.stick_id.clone()))
             .or_default()
             .push(StoredEvent {
                 received_at,
@@ -250,39 +347,137 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    fn events(&self, stick: &StickId) -> Result<Vec<StoredEvent>, StoreError> {
+    fn events(&self, organization: &str, stick: &StickId) -> Result<Vec<StoredEvent>, StoreError> {
         Ok(self
             .events
             .lock()
             .expect("events lock")
-            .get(stick)
+            .get(&(organization.to_owned(), stick.clone()))
             .cloned()
             .unwrap_or_default())
     }
 
-    fn create_user(&self, user: User) -> Result<bool, StoreError> {
+    fn create_user(&self, user: NewUser) -> Result<Option<User>, StoreError> {
         let mut users = self.users.lock().expect("users lock");
-        if users.contains_key(&user.name) {
+        if users
+            .iter()
+            .any(|known| known.email.eq_ignore_ascii_case(&user.email))
+        {
+            return Ok(None);
+        }
+        let user = User {
+            id: self.id("user"),
+            email: user.email,
+            password_hash: user.password_hash,
+        };
+        users.push(user.clone());
+        Ok(Some(user))
+    }
+
+    fn user_by_email(&self, email: &str) -> Result<Option<User>, StoreError> {
+        let users = self.users.lock().expect("users lock");
+        Ok(users
+            .iter()
+            .find(|user| user.email.eq_ignore_ascii_case(email))
+            .cloned())
+    }
+
+    fn user(&self, id: &str) -> Result<Option<User>, StoreError> {
+        let users = self.users.lock().expect("users lock");
+        Ok(users.iter().find(|user| user.id == id).cloned())
+    }
+
+    fn create_organization(
+        &self,
+        slug: &str,
+        name: &str,
+    ) -> Result<Option<Organization>, StoreError> {
+        let mut organizations = self.organizations.lock().expect("organizations lock");
+        if organizations.iter().any(|known| known.slug == slug) {
+            return Ok(None);
+        }
+        let organization = Organization {
+            id: self.id("org"),
+            slug: slug.to_owned(),
+            name: name.to_owned(),
+        };
+        organizations.push(organization.clone());
+        Ok(Some(organization))
+    }
+
+    fn ensure_organization(&self, slug: &str, name: &str) -> Result<Organization, StoreError> {
+        if let Some(found) = self.organization_by_slug(slug)? {
+            return Ok(found);
+        }
+        // Another thread may have made it between the two steps.
+        match self.create_organization(slug, name)? {
+            Some(made) => Ok(made),
+            None => self
+                .organization_by_slug(slug)?
+                .ok_or_else(|| StoreError("an organization vanished".to_owned())),
+        }
+    }
+
+    fn organization_by_slug(&self, slug: &str) -> Result<Option<Organization>, StoreError> {
+        let organizations = self.organizations.lock().expect("organizations lock");
+        Ok(organizations.iter().find(|o| o.slug == slug).cloned())
+    }
+
+    fn add_member(
+        &self,
+        organization_id: &str,
+        user_id: &str,
+        role: Role,
+    ) -> Result<bool, StoreError> {
+        let mut members = self.members.lock().expect("members lock");
+        if members
+            .iter()
+            .any(|(org, user, _)| org == organization_id && user == user_id)
+        {
             return Ok(false);
         }
-        users.insert(user.name.clone(), user);
+        members.push((organization_id.to_owned(), user_id.to_owned(), role));
         Ok(true)
     }
 
-    fn user(&self, name: &str) -> Result<Option<User>, StoreError> {
-        Ok(self.users.lock().expect("users lock").get(name).cloned())
+    fn membership(&self, organization_id: &str, user_id: &str) -> Result<Option<Role>, StoreError> {
+        let members = self.members.lock().expect("members lock");
+        Ok(members
+            .iter()
+            .find(|(org, user, _)| org == organization_id && user == user_id)
+            .map(|(_, _, role)| *role))
+    }
+
+    fn memberships(&self, user_id: &str) -> Result<Vec<Membership>, StoreError> {
+        let members = self.members.lock().expect("members lock");
+        let organizations = self.organizations.lock().expect("organizations lock");
+        let mut found: Vec<Membership> = members
+            .iter()
+            .filter(|(_, user, _)| user == user_id)
+            .filter_map(|(org, _, role)| {
+                organizations
+                    .iter()
+                    .find(|o| &o.id == org)
+                    .map(|organization| Membership {
+                        organization: organization.clone(),
+                        role: *role,
+                    })
+            })
+            .collect();
+        found.sort_by(|a, b| a.organization.slug.cmp(&b.organization.slug));
+        Ok(found)
     }
 
     fn create_session(
         &self,
         token_hash: &str,
-        user: &str,
+        user_id: &str,
         expires_at: DateTime<Utc>,
     ) -> Result<(), StoreError> {
         self.sessions
             .lock()
             .expect("sessions lock")
-            .insert(token_hash.to_owned(), (user.to_owned(), expires_at));
+            .insert(token_hash.to_owned(), (user_id.to_owned(), expires_at));
         Ok(())
     }
 
@@ -311,26 +506,27 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    fn add_stick(&self, stick: Stick) -> Result<bool, StoreError> {
+    fn add_stick(&self, organization: &str, stick: Stick) -> Result<bool, StoreError> {
         let mut sticks = self.sticks.lock().expect("sticks lock");
         if sticks.contains_key(&stick.stick_id) {
             return Ok(false);
         }
-        sticks.insert(stick.stick_id.clone(), stick);
+        sticks.insert(stick.stick_id.clone(), (organization.to_owned(), stick));
         Ok(true)
     }
 
-    fn stick(&self, id: &StickId) -> Result<Option<Stick>, StoreError> {
+    fn stick(&self, id: &StickId) -> Result<Option<(String, Stick)>, StoreError> {
         Ok(self.sticks.lock().expect("sticks lock").get(id).cloned())
     }
 
-    fn sticks(&self) -> Result<Vec<Stick>, StoreError> {
+    fn sticks(&self, organization: &str) -> Result<Vec<Stick>, StoreError> {
         Ok(self
             .sticks
             .lock()
             .expect("sticks lock")
             .values()
-            .cloned()
+            .filter(|(owner, _)| owner == organization)
+            .map(|(_, stick)| stick.clone())
             .collect())
     }
 }

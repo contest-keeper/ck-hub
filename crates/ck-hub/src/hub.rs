@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use chrono::{DateTime, Utc};
 use ck_protocol::{Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, StickId};
@@ -90,6 +90,7 @@ pub struct Hub {
     /// Per stick: when the current minute started and how many messages it has seen.
     rates: Mutex<HashMap<StickId, (DateTime<Utc>, u32)>>,
     log: Option<Mutex<File>>,
+    default_org: OnceLock<String>,
     pub(crate) download: Option<Download>,
     pub(crate) clock: Box<dyn Fn() -> DateTime<Utc> + Send + Sync>,
 }
@@ -116,6 +117,7 @@ impl Hub {
             write: Mutex::new(()),
             rates: Mutex::new(HashMap::new()),
             log: log.map(Mutex::new),
+            default_org: OnceLock::new(),
             download: None,
             clock,
         }
@@ -126,6 +128,15 @@ impl Hub {
     pub fn with_password_cost(mut self, cost: PasswordCost) -> Self {
         self.accounts = Accounts::new(cost);
         self
+    }
+
+    /// The organization the registry file's sticks belong to, made on first use.
+    pub(crate) fn default_org_id(&self) -> Result<String, StoreError> {
+        if let Some(id) = self.default_org.get() {
+            return Ok(id.clone());
+        }
+        let organization = self.store.ensure_organization("default", "Default")?;
+        Ok(self.default_org.get_or_init(|| organization.id).clone())
     }
 
     /// Checks a heartbeat and, when it is fine, remembers it. Returns its sequence number.
@@ -146,7 +157,7 @@ impl Hub {
         signature: Option<&str>,
         body: &[u8],
     ) -> Result<u64, Rejection> {
-        let id = self.authenticate(stick_header, signature, body)?;
+        let (organization, id) = self.authenticate(stick_header, signature, body)?;
         self.rate_limit(&id)?;
         let heartbeat: Heartbeat = serde_json::from_slice(body)
             .map_err(|_| Rejection::BadRequest("the heartbeat cannot be read"))?;
@@ -159,7 +170,9 @@ impl Hub {
         // The sequence starts again at every boot, so only a message of the same boot is compared.
         // The highest one of each boot is kept, so an old boot cannot be replayed after a newer
         // one.
-        if let Some(top) = self.store.heartbeat_seq_of_boot(&id, &heartbeat.boot_id)?
+        if let Some(top) =
+            self.store
+                .heartbeat_seq_of_boot(&organization, &id, &heartbeat.boot_id)?
             && heartbeat.seq <= top
         {
             return Err(Rejection::Conflict(format!(
@@ -168,7 +181,8 @@ impl Hub {
             )));
         }
         let seq = heartbeat.seq;
-        self.store.record_heartbeat(heartbeat, (self.clock)())?;
+        self.store
+            .record_heartbeat(&organization, heartbeat, (self.clock)())?;
         Ok(seq)
     }
 
@@ -188,13 +202,13 @@ impl Hub {
     }
 
     /// Who sent this: the stick named in the header, if the registry knows it and its secret
-    /// signed exactly these bytes.
+    /// signed exactly these bytes. Also the organization the stick belongs to.
     fn authenticate(
         &self,
         stick_header: Option<&str>,
         signature: Option<&str>,
         body: &[u8],
-    ) -> Result<StickId, Rejection> {
+    ) -> Result<(String, StickId), Rejection> {
         let (Some(stick_header), Some(signature)) = (stick_header, signature) else {
             return Err(Rejection::BadRequest("a header is missing"));
         };
@@ -205,18 +219,19 @@ impl Hub {
             registry.refresh();
             registry.find(&id).map(|entry| entry.token.clone())
         };
-        // A stick is known from the registry file or from the database, whichever has it.
-        let token = match from_file {
-            Some(token) => Some(token),
-            None => self.store.stick(&id)?.map(|stick| stick.token),
-        };
-        let Some(token) = token else {
-            return Err(Rejection::Unauthorized);
+        // A stick is known from the registry file or from the database, whichever has it. The
+        // registry file's sticks belong to the default organization.
+        let (organization, token) = match from_file {
+            Some(token) => (self.default_org_id()?, token),
+            None => match self.store.stick(&id)? {
+                Some((organization, stick)) => (organization, stick.token),
+                None => return Err(Rejection::Unauthorized),
+            },
         };
         if !ck_crypto::verify(&token, body, signature) {
             return Err(Rejection::Unauthorized);
         }
-        Ok(id)
+        Ok((organization, id))
     }
 
     /// Takes in an event. A problem with the chain never makes the Hub refuse it: the stick would
@@ -246,7 +261,7 @@ impl Hub {
         signature: Option<&str>,
         body: &[u8],
     ) -> Result<u64, Rejection> {
-        let id = self.authenticate(stick_header, signature, body)?;
+        let (organization, id) = self.authenticate(stick_header, signature, body)?;
         self.rate_limit(&id)?;
         let event: Event = serde_json::from_slice(body)
             .map_err(|_| Rejection::BadRequest("the event cannot be read"))?;
@@ -256,7 +271,9 @@ impl Hub {
         storable(body, event.seq)?;
 
         let _one_at_a_time = self.write.lock().expect("write lock");
-        let last_of_boot = self.store.last_event_of_boot(&id, &event.boot_id)?;
+        let last_of_boot = self
+            .store
+            .last_event_of_boot(&organization, &id, &event.boot_id)?;
         let last_of_boot = last_of_boot.as_ref();
         let integrity = match last_of_boot {
             Some(last) if event.seq <= last.event.seq => {
@@ -280,20 +297,27 @@ impl Hub {
             Some(_) => None,
         };
         let seq = event.seq;
-        self.store
-            .append_event(event, (self.clock)(), integrity.map(str::to_owned))?;
+        self.store.append_event(
+            &organization,
+            event,
+            (self.clock)(),
+            integrity.map(str::to_owned),
+        )?;
         Ok(seq)
     }
 
-    /// Every stick the admin made, with its last heartbeat when it has sent one.
-    pub fn sticks(&self) -> Result<Vec<StickView>, StoreError> {
+    /// Every stick of the organization, with its last heartbeat when it has sent one.
+    pub fn sticks(&self, organization: &str) -> Result<Vec<StickView>, StoreError> {
         let now = (self.clock)();
-        let mut entries: Vec<Stick> = {
+        // The registry file's sticks belong to the default organization.
+        let mut entries: Vec<Stick> = if organization == self.default_org_id()? {
             let mut registry = self.registry.lock().expect("registry lock");
             registry.refresh();
             registry.all().cloned().collect()
+        } else {
+            Vec::new()
         };
-        for stick in self.store.sticks()? {
+        for stick in self.store.sticks(organization)? {
             if !entries.iter().any(|e| e.stick_id == stick.stick_id) {
                 entries.push(stick);
             }
@@ -308,8 +332,8 @@ impl Hub {
         });
         let mut views = Vec::new();
         for entry in &entries {
-            let seen = self.store.last_heartbeat(&entry.stick_id)?;
-            let stored = self.store.events(&entry.stick_id)?;
+            let seen = self.store.last_heartbeat(organization, &entry.stick_id)?;
+            let stored = self.store.events(organization, &entry.stick_id)?;
             let boot = seen.as_ref().map(|s| s.heartbeat.boot_id.clone());
             let last = seen.map(|s| LastHeartbeat {
                 received_at: s.received_at,

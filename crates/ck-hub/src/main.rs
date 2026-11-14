@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use ck_hub::{
-    CreateUserError, Download, Hub, MIN_PASSWORD_LENGTH, MemoryStore, NewStick, PasswordCost,
-    PostgresStore, RegisterError, Registry, Role, Store, create_user, register_sticks, router,
+    CreateUserError, Download, Hub, MIN_PASSWORD_LENGTH, MemoryStore, NewStick, OrganizationError,
+    PasswordCost, PostgresStore, RegisterError, Registry, Role, Store, add_member,
+    create_organization, create_user, register_sticks, router,
 };
 use clap::{Args, Parser, Subcommand};
 
@@ -29,8 +30,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Make an organizer account. The password is asked for here and never taken from an argument
+    /// Make an account. The password is asked for here and never taken from an argument
     CreateUser(CreateUserArgs),
+    /// Make an organization and its first owner, who must have an account
+    CreateOrg(CreateOrgArgs),
+    /// Make an existing account a member of an organization
+    AddMember(AddMemberArgs),
     /// Register the sticks of an admin tool registry file in the database. Safe to run twice
     ImportRegistry(ImportRegistryArgs),
 }
@@ -83,10 +88,34 @@ struct DatabaseArgs {
 
 #[derive(Args)]
 struct CreateUserArgs {
-    /// The name the organizer logs in with
-    name: String,
-    /// What the organizer may do: `admin` manages everything, `viewer` only looks
-    #[arg(long, default_value = "admin")]
+    /// The email the person logs in with
+    email: String,
+    #[command(flatten)]
+    database: DatabaseArgs,
+}
+
+#[derive(Args)]
+struct CreateOrgArgs {
+    /// The short name used in addresses: lowercase letters, digits and hyphens
+    slug: String,
+    /// The name people see. Defaults to the slug
+    #[arg(long)]
+    name: Option<String>,
+    /// The email of the account that becomes the owner
+    #[arg(long)]
+    owner: String,
+    #[command(flatten)]
+    database: DatabaseArgs,
+}
+
+#[derive(Args)]
+struct AddMemberArgs {
+    /// The slug of the organization
+    slug: String,
+    /// The email of the account to add
+    email: String,
+    /// `owner`, `admin` or `viewer`
+    #[arg(long, default_value = "viewer")]
     role: String,
     #[command(flatten)]
     database: DatabaseArgs,
@@ -96,6 +125,9 @@ struct CreateUserArgs {
 struct ImportRegistryArgs {
     /// The registry file ck-forge wrote
     file: PathBuf,
+    /// The slug of the organization the sticks go to
+    #[arg(long)]
+    org: String,
     #[command(flatten)]
     database: DatabaseArgs,
 }
@@ -106,6 +138,8 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Some(Command::CreateUser(args)) => make_user(args).await,
+        Some(Command::CreateOrg(args)) => make_org(args).await,
+        Some(Command::AddMember(args)) => add_to_org(args).await,
         Some(Command::ImportRegistry(args)) => import_registry(args).await,
         None => run(cli.serve).await,
     };
@@ -128,7 +162,6 @@ async fn connect(url: String) -> Result<PostgresStore, String> {
 }
 
 async fn make_user(args: CreateUserArgs) -> Result<(), String> {
-    let role = Role::parse(&args.role).ok_or("the role must be admin or viewer")?;
     let url = args
         .database
         .database_url
@@ -138,7 +171,7 @@ async fn make_user(args: CreateUserArgs) -> Result<(), String> {
     // so it does not end up in a shell history or a process list.
     let password = rpassword::prompt_password(format!(
         "Password for {} (at least {MIN_PASSWORD_LENGTH} characters): ",
-        args.name
+        args.email
     ))
     .map_err(|e| e.to_string())?;
     let again = rpassword::prompt_password("Password again: ").map_err(|e| e.to_string())?;
@@ -147,9 +180,9 @@ async fn make_user(args: CreateUserArgs) -> Result<(), String> {
     }
 
     let store = connect(url).await?;
-    let name = args.name.clone();
+    let email = args.email.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let result = create_user(&store, PasswordCost::default(), &name, &password, role);
+        let result = create_user(&store, PasswordCost::default(), &email, &password);
         // The store is dropped on this blocking thread too, where closing the connection is safe.
         drop(store);
         result
@@ -157,21 +190,91 @@ async fn make_user(args: CreateUserArgs) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?;
     match result {
-        Ok(()) => {
+        Ok(_) => {
             // Said as a log line, like everything else this program says.
-            tracing::info!(role = %args.role, name = %args.name, "the account was made");
+            tracing::info!(email = %args.email, "the account was made");
             Ok(())
         }
-        Err(CreateUserError::BadName) => {
-            Err("that name is empty, too long or has control characters".to_owned())
-        }
+        Err(CreateUserError::BadEmail) => Err("that is not an email address".to_owned()),
         Err(CreateUserError::PasswordTooShort) => Err(format!(
             "the password must have at least {MIN_PASSWORD_LENGTH} characters"
         )),
-        Err(CreateUserError::NameTaken) => {
-            Err("an account with that name already exists".to_owned())
+        Err(CreateUserError::EmailTaken) => {
+            Err("an account with that email already exists".to_owned())
         }
         Err(CreateUserError::Unavailable) => Err("the database could not be written".to_owned()),
+    }
+}
+
+/// Runs `work` against the database on a thread where blocking is fine.
+async fn with_store<T: Send + 'static>(
+    database: DatabaseArgs,
+    work: impl FnOnce(&PostgresStore) -> T + Send + 'static,
+) -> Result<T, String> {
+    let url = database
+        .database_url
+        .ok_or("this needs a database: pass --database-url or set CK_DATABASE_URL")?;
+    let store = connect(url).await?;
+    tokio::task::spawn_blocking(move || {
+        let result = work(&store);
+        // Dropped on this blocking thread, where closing the connection is safe.
+        drop(store);
+        result
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+fn organization_problem(error: &OrganizationError) -> String {
+    match error {
+        OrganizationError::BadSlug => "the slug must be lowercase letters, digits and hyphens \
+             (not at the ends), at most 63 characters, and the name must not be empty"
+            .to_owned(),
+        OrganizationError::SlugTaken => "an organization with that slug exists".to_owned(),
+        OrganizationError::NoSuchOrganization => {
+            "there is no organization with that slug".to_owned()
+        }
+        OrganizationError::NoSuchUser => "there is no account with that email".to_owned(),
+        OrganizationError::AlreadyMember => "that account is already a member".to_owned(),
+        OrganizationError::Unavailable => "the database could not be written".to_owned(),
+    }
+}
+
+async fn make_org(args: CreateOrgArgs) -> Result<(), String> {
+    let name = args.name.unwrap_or_else(|| args.slug.clone());
+    let (slug, owner) = (args.slug, args.owner);
+    let made = {
+        let (slug, owner) = (slug.clone(), owner.clone());
+        with_store(args.database, move |store| {
+            create_organization(store, &slug, &name, &owner)
+        })
+        .await?
+    };
+    match made {
+        Ok(_) => {
+            tracing::info!(slug = %slug, owner = %owner, "the organization was made");
+            Ok(())
+        }
+        Err(error) => Err(organization_problem(&error)),
+    }
+}
+
+async fn add_to_org(args: AddMemberArgs) -> Result<(), String> {
+    let role = Role::parse(&args.role).ok_or("the role must be owner, admin or viewer")?;
+    let (slug, email) = (args.slug, args.email);
+    let added = {
+        let (slug, email) = (slug.clone(), email.clone());
+        with_store(args.database, move |store| {
+            add_member(store, &slug, &email, role)
+        })
+        .await?
+    };
+    match added {
+        Ok(()) => {
+            tracing::info!(slug = %slug, email = %email, role = %args.role, "the member was added");
+            Ok(())
+        }
+        Err(error) => Err(organization_problem(&error)),
     }
 }
 
@@ -192,13 +295,23 @@ async fn import_registry(args: ImportRegistryArgs) -> Result<(), String> {
         .map_err(|e| format!("{} is not a registry file: {e}", args.file.display()))?;
 
     let store = connect(url).await?;
+    let slug = args.org;
     let result = tokio::task::spawn_blocking(move || {
-        let result = register_sticks(&store, &|_| None, file.sticks);
+        let result = match store.organization_by_slug(&slug) {
+            Ok(Some(organization)) => Ok(register_sticks(
+                &store,
+                &organization.id,
+                &|_| None,
+                file.sticks,
+            )),
+            Ok(None) => Err("there is no organization with that slug".to_owned()),
+            Err(error) => Err(error.to_string()),
+        };
         drop(store);
         result
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())??;
     match result {
         Ok(done) => {
             tracing::info!(
@@ -239,7 +352,14 @@ async fn run(args: ServeArgs) -> Result<(), String> {
     };
     let has_database = args.database.database_url.is_some();
     let store: Arc<dyn Store> = if let Some(url) = args.database.database_url {
-        Arc::new(connect(url).await?)
+        let store = connect(url).await?;
+        if !store.row_security_applies().map_err(|e| e.to_string())? {
+            tracing::warn!(
+                "the database role is a superuser or bypasses row security: organizations are kept \
+                 apart only by the Hub's own queries. Connect as a plain role in production"
+            );
+        }
+        Arc::new(store)
     } else {
         tracing::warn!(
             "no database: everything is kept in memory, no organizer account exists, and the data \

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::header::{CACHE_CONTROL, COOKIE, LOCATION, SET_COOKIE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
@@ -14,10 +14,10 @@ use ck_protocol::{HEARTBEAT_PATH, SIGNATURE_HEADER, STICK_HEADER};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::accounts::{AccessError, Account, LoginError, SESSION_LIFETIME_HOURS};
+use crate::accounts::{Access, AccessError, Account, LoginError, SESSION_LIFETIME_HOURS};
 use crate::hub::{Hub, Rejection};
 use crate::register::{NewStick, RegisterError};
-use crate::store::Role;
+use crate::store::{Membership, Role};
 
 /// The page organizers watch. It is one file with no outside resources, so it works on a network
 /// with no internet.
@@ -49,6 +49,12 @@ pub fn router(hub: Arc<Hub>) -> Router {
             "/api/v1/sticks",
             get(sticks)
                 .post(register)
+                .layer(DefaultBodyLimit::max(MAX_REGISTRY_BYTES)),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/sticks",
+            get(sticks_of)
+                .post(register_in)
                 .layer(DefaultBodyLimit::max(MAX_REGISTRY_BYTES)),
         )
         .route("/api/v1/login", post(login))
@@ -130,11 +136,28 @@ async fn page() -> Html<&'static str> {
     Html(PAGE)
 }
 
+/// The sticks of the only organization the caller belongs to. The page and the admin tool used this
+/// before organizations had addresses.
 async fn sticks(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Response {
-    if let Err(reason) = require(&hub, &headers, Role::Viewer).await {
-        return denied(reason);
+    match require(&hub, &headers, Role::Viewer).await {
+        Ok(access) => list_sticks(hub, access).await,
+        Err(reason) => denied(reason),
     }
-    match tokio::task::spawn_blocking(move || hub.sticks()).await {
+}
+
+async fn sticks_of(
+    State(hub): State<Arc<Hub>>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    match require_in(&hub, &headers, slug, Role::Viewer).await {
+        Ok(access) => list_sticks(hub, access).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+async fn list_sticks(hub: Arc<Hub>, access: Access) -> Response {
+    match tokio::task::spawn_blocking(move || hub.sticks(&access.organization.id)).await {
         Ok(Ok(sticks)) => Json(sticks).into_response(),
         Ok(Err(error)) => {
             tracing::error!("{error}");
@@ -168,7 +191,9 @@ const SESSION_COOKIE: &str = "ck_session";
 
 #[derive(Deserialize)]
 struct LoginBody {
-    username: String,
+    // The page and the admin tool still send `username`.
+    #[serde(alias = "username")]
+    email: String,
     password: String,
 }
 
@@ -177,20 +202,19 @@ async fn login(State(hub): State<Arc<Hub>>, Json(body): Json<LoginBody>) -> Resp
         return unavailable();
     };
     // Hashing a password is slow on purpose, so it runs off the request threads.
-    let result =
-        tokio::task::spawn_blocking(move || hub.login(&body.username, &body.password)).await;
+    let result = tokio::task::spawn_blocking(move || hub.login(&body.email, &body.password)).await;
     match result {
         Ok(Ok((token, account))) => (
             [(
                 SET_COOKIE,
                 session_cookie(&token, SESSION_LIFETIME_HOURS * 3600),
             )],
-            Json(account_json(&account)),
+            Json(json!({ "username": account.email, "email": account.email })),
         )
             .into_response(),
         Ok(Err(LoginError::BadCredentials)) => (
             StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "wrong name or password" })),
+            Json(json!({ "error": "wrong email or password" })),
         )
             .into_response(),
         Ok(Err(LoginError::TooManyAttempts)) => (
@@ -215,14 +239,45 @@ async fn logout(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Response {
 }
 
 async fn me(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Response {
-    match require(&hub, &headers, Role::Viewer).await {
-        Ok(account) => Json(account_json(&account)).into_response(),
-        Err(reason) => denied(reason),
+    let Some(token) = session_token(&headers) else {
+        return denied(denied_for(&AccessError::Unauthorized));
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let account = hub.account(&token)?;
+        let memberships = hub.organizations_of(&account)?;
+        Ok::<_, AccessError>((account, memberships))
+    })
+    .await;
+    match result {
+        Ok(Ok((account, memberships))) => {
+            Json(account_json(&account, &memberships)).into_response()
+        }
+        Ok(Err(reason)) => denied(denied_for(&reason)),
+        Err(_) => denied(denied_for(&AccessError::Unavailable)),
     }
 }
 
-fn account_json(account: &Account) -> serde_json::Value {
-    json!({ "username": account.name, "role": account.role.as_str() })
+fn account_json(account: &Account, memberships: &[Membership]) -> serde_json::Value {
+    let organizations: Vec<_> = memberships
+        .iter()
+        .map(|m| {
+            json!({
+                "slug": m.organization.slug,
+                "name": m.organization.name,
+                "role": m.role.as_str(),
+            })
+        })
+        .collect();
+    let mut answer = json!({
+        "username": account.email,
+        "email": account.email,
+        "organizations": organizations,
+    });
+    // The role of an account with one organization, as the page and the admin tool read it today.
+    if let [only] = memberships {
+        answer["role"] = json!(only.role.as_str());
+    }
+    answer
 }
 
 /// The cookie that carries a session. `HttpOnly` keeps scripts from reading it, `SameSite=Strict`
@@ -254,23 +309,50 @@ fn denied(denied: Denied) -> Response {
     (denied.0, Json(json!({ "error": denied.1 }))).into_response()
 }
 
-/// The organizer behind the request, or why not: 401 when there is no valid session, 403 when the
-/// role is not enough, 503 when the data cannot be read.
-async fn require(hub: &Arc<Hub>, headers: &HeaderMap, needed: Role) -> Result<Account, Denied> {
-    let Some(token) = session_token(headers) else {
-        return Err((StatusCode::UNAUTHORIZED, "log in first"));
-    };
-    let hub = Arc::clone(hub);
-    match tokio::task::spawn_blocking(move || hub.access(&token, needed)).await {
-        Ok(Ok(account)) => Ok(account),
-        Ok(Err(AccessError::Unauthorized)) => Err((StatusCode::UNAUTHORIZED, "log in first")),
-        Ok(Err(AccessError::Forbidden)) => {
-            Err((StatusCode::FORBIDDEN, "this needs a different role"))
-        }
-        Ok(Err(AccessError::Unavailable)) | Err(_) => Err((
+fn denied_for(reason: &AccessError) -> Denied {
+    match reason {
+        AccessError::Unauthorized => (StatusCode::UNAUTHORIZED, "log in first"),
+        AccessError::NotFound => (StatusCode::NOT_FOUND, "no such organization"),
+        AccessError::Forbidden => (StatusCode::FORBIDDEN, "this needs a different role"),
+        AccessError::Ambiguous => (
+            StatusCode::CONFLICT,
+            "you belong to several organizations: use /api/v1/orgs/{slug}/...",
+        ),
+        AccessError::Unavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
             "the Hub cannot read its data right now",
-        )),
+        ),
+    }
+}
+
+/// The caller's access to the only organization they belong to: 401 when there is no valid
+/// session, 404 when there is none, 409 when there are several, 403 when the role is not enough,
+/// 503 when the data cannot be read.
+async fn require(hub: &Arc<Hub>, headers: &HeaderMap, needed: Role) -> Result<Access, Denied> {
+    let Some(token) = session_token(headers) else {
+        return Err(denied_for(&AccessError::Unauthorized));
+    };
+    let hub = Arc::clone(hub);
+    match tokio::task::spawn_blocking(move || hub.access_sole(&token, needed)).await {
+        Ok(result) => result.map_err(|reason| denied_for(&reason)),
+        Err(_) => Err(denied_for(&AccessError::Unavailable)),
+    }
+}
+
+/// The caller's access to the organization named in the address.
+async fn require_in(
+    hub: &Arc<Hub>,
+    headers: &HeaderMap,
+    slug: String,
+    needed: Role,
+) -> Result<Access, Denied> {
+    let Some(token) = session_token(headers) else {
+        return Err(denied_for(&AccessError::Unauthorized));
+    };
+    let hub = Arc::clone(hub);
+    match tokio::task::spawn_blocking(move || hub.access(&token, &slug, needed)).await {
+        Ok(result) => result.map_err(|reason| denied_for(&reason)),
+        Err(_) => Err(denied_for(&AccessError::Unavailable)),
     }
 }
 
@@ -289,16 +371,34 @@ fn read_sticks(body: &[u8]) -> Result<Vec<NewStick>, String> {
 }
 
 async fn register(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) -> Response {
-    if let Err(reason) = require(&hub, &headers, Role::Admin).await {
-        return denied(reason);
+    match require(&hub, &headers, Role::Admin).await {
+        Ok(access) => register_into(hub, access, body).await,
+        Err(reason) => denied(reason),
     }
+}
+
+async fn register_in(
+    State(hub): State<Arc<Hub>>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    match require_in(&hub, &headers, slug, Role::Admin).await {
+        Ok(access) => register_into(hub, access, body).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+async fn register_into(hub: Arc<Hub>, access: Access, body: Bytes) -> Response {
     let sticks = match read_sticks(&body) {
         Ok(sticks) => sticks,
         Err(why) => {
             return (StatusCode::BAD_REQUEST, Json(json!({ "error": why }))).into_response();
         }
     };
-    match tokio::task::spawn_blocking(move || hub.register_sticks(sticks)).await {
+    match tokio::task::spawn_blocking(move || hub.register_sticks(&access.organization.id, sticks))
+        .await
+    {
         Ok(Ok(done)) => {
             let answer = json!({
                 "added": done.added,

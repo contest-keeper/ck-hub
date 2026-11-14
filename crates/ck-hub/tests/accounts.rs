@@ -7,7 +7,8 @@ use axum::http::{Request, StatusCode};
 use chrono::{DateTime, Duration, Utc};
 use ck_hub::{
     AccessError, CreateUserError, Hub, LoginError, MAX_FAILED_LOGINS, MemoryStore,
-    NAME_LOCKOUT_SECONDS, PasswordCost, Registry, Role, SESSION_LIFETIME_HOURS, Store, router,
+    NAME_LOCKOUT_SECONDS, OrganizationError, PasswordCost, Registry, Role, SESSION_LIFETIME_HOURS,
+    Store, router,
 };
 use http_body_util::BodyExt;
 use tempfile::TempDir;
@@ -44,10 +45,14 @@ fn setup() -> Setup {
         memory_kib: 8,
         passes: 1,
     });
-    hub.create_user("ana", PASSWORD, Role::Admin)
-        .expect("admin");
-    hub.create_user("vera", PASSWORD, Role::Viewer)
-        .expect("viewer");
+    hub.create_user("ana@example.org", PASSWORD).expect("ana");
+    hub.create_user("vera@example.org", PASSWORD).expect("vera");
+    hub.create_organization("default", "Default", "ana@example.org")
+        .expect("organization");
+    hub.add_member("default", "vera@example.org", Role::Viewer)
+        .expect("vera is a viewer");
+    hub.create_organization("other", "Other", "ana@example.org")
+        .expect("another organization");
     let hub = Arc::new(hub);
     Setup {
         _dir: dir,
@@ -127,7 +132,7 @@ async fn the_page_is_public_but_the_data_and_the_session_need_a_login() {
 #[tokio::test]
 async fn logging_in_gives_a_locked_down_cookie_that_opens_the_data_until_logout() {
     let setup = setup();
-    let (status, cookie, body) = post_login(&setup.app, "vera", PASSWORD).await;
+    let (status, cookie, body) = post_login(&setup.app, "vera@example.org", PASSWORD).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let set = cookie.expect("a cookie");
     for flag in ["HttpOnly", "Secure", "SameSite=Strict", "Path=/"] {
@@ -164,8 +169,8 @@ async fn logging_in_gives_a_locked_down_cookie_that_opens_the_data_until_logout(
 #[tokio::test]
 async fn a_wrong_password_and_an_unknown_name_get_the_same_answer() {
     let setup = setup();
-    let wrong = post_login(&setup.app, "vera", "not the password at all").await;
-    let unknown = post_login(&setup.app, "nobody", "not the password at all").await;
+    let wrong = post_login(&setup.app, "vera@example.org", "not the password at all").await;
+    let unknown = post_login(&setup.app, "nobody@example.org", "not the password at all").await;
     assert_eq!(wrong.0, StatusCode::UNAUTHORIZED);
     assert_eq!(
         (wrong.0, &wrong.1, &wrong.2),
@@ -175,37 +180,108 @@ async fn a_wrong_password_and_an_unknown_name_get_the_same_answer() {
 }
 
 #[test]
-fn a_role_that_is_not_enough_is_forbidden() {
+fn access_is_checked_per_organization() {
     let setup = setup();
-    let (viewer, _) = setup.hub.login("vera", PASSWORD).expect("viewer");
-    let (admin, _) = setup.hub.login("ana", PASSWORD).expect("admin");
-    assert!(setup.hub.access(&viewer, Role::Viewer).is_ok());
+    let (viewer, _) = setup
+        .hub
+        .login("vera@example.org", PASSWORD)
+        .expect("log in");
+    assert!(setup.hub.access(&viewer, "default", Role::Viewer).is_ok());
     assert_eq!(
-        setup.hub.access(&viewer, Role::Admin),
-        Err(AccessError::Forbidden)
+        setup.hub.access(&viewer, "default", Role::Admin).err(),
+        Some(AccessError::Forbidden)
     );
-    assert!(setup.hub.access(&admin, Role::Admin).is_ok());
+    // Not a member of "other", and no such organization, look the same.
+    assert_eq!(
+        setup.hub.access(&viewer, "other", Role::Viewer).err(),
+        Some(AccessError::NotFound)
+    );
+    assert_eq!(
+        setup.hub.access(&viewer, "nowhere", Role::Viewer).err(),
+        Some(AccessError::NotFound)
+    );
+    assert_eq!(
+        setup.hub.access("made-up", "default", Role::Viewer).err(),
+        Some(AccessError::Unauthorized)
+    );
+}
+
+#[test]
+fn an_owner_may_do_everything_and_the_only_organization_is_found_without_a_slug() {
+    let setup = setup();
+    let (owner, _) = setup
+        .hub
+        .login("ana@example.org", PASSWORD)
+        .expect("log in");
+    assert!(setup.hub.access(&owner, "default", Role::Owner).is_ok());
     assert!(
-        setup.hub.access(&admin, Role::Viewer).is_ok(),
-        "an admin sees what a viewer sees"
+        setup.hub.access(&owner, "default", Role::Viewer).is_ok(),
+        "an owner sees what a viewer sees"
+    );
+    let (viewer, _) = setup
+        .hub
+        .login("vera@example.org", PASSWORD)
+        .expect("log in");
+    let access = setup.hub.access_sole(&viewer, Role::Viewer).expect("sole");
+    assert_eq!(access.organization.slug, "default");
+    // Ana belongs to two organizations, so there is no "the" organization.
+    assert_eq!(
+        setup.hub.access_sole(&owner, Role::Viewer).err(),
+        Some(AccessError::Ambiguous)
+    );
+}
+
+#[test]
+fn organizations_have_checked_slugs_and_owners() {
+    let setup = setup();
+    let make = |slug: &str, owner: &str| setup.hub.create_organization(slug, "Name", owner);
+    assert_eq!(
+        make("Bad Slug", "ana@example.org").err(),
+        Some(OrganizationError::BadSlug)
     );
     assert_eq!(
-        setup.hub.access("made-up", Role::Viewer),
-        Err(AccessError::Unauthorized)
+        make("-bad", "ana@example.org").err(),
+        Some(OrganizationError::BadSlug)
+    );
+    assert_eq!(
+        make("default", "ana@example.org").err(),
+        Some(OrganizationError::SlugTaken)
+    );
+    assert_eq!(
+        make("fresh", "nobody@example.org").err(),
+        Some(OrganizationError::NoSuchUser)
+    );
+    assert!(make("fresh", "ana@example.org").is_ok());
+    assert_eq!(
+        setup
+            .hub
+            .add_member("fresh", "ana@example.org", Role::Viewer)
+            .err(),
+        Some(OrganizationError::AlreadyMember)
+    );
+    assert_eq!(
+        setup
+            .hub
+            .add_member("nowhere", "ana@example.org", Role::Viewer)
+            .err(),
+        Some(OrganizationError::NoSuchOrganization)
     );
 }
 
 #[test]
 fn a_session_ends_after_its_lifetime() {
     let setup = setup();
-    let (token, _) = setup.hub.login("vera", PASSWORD).expect("login");
+    let (token, _) = setup
+        .hub
+        .login("vera@example.org", PASSWORD)
+        .expect("login");
     *setup.now.lock().expect("clock") +=
         Duration::hours(SESSION_LIFETIME_HOURS) - Duration::seconds(1);
-    assert!(setup.hub.access(&token, Role::Viewer).is_ok());
+    assert!(setup.hub.access(&token, "default", Role::Viewer).is_ok());
     *setup.now.lock().expect("clock") += Duration::seconds(1);
     assert_eq!(
-        setup.hub.access(&token, Role::Viewer),
-        Err(AccessError::Unauthorized)
+        setup.hub.access(&token, "default", Role::Viewer).err(),
+        Some(AccessError::Unauthorized)
     );
 }
 
@@ -214,29 +290,35 @@ fn too_many_wrong_passwords_lock_the_name_for_a_while_even_for_the_right_passwor
     let setup = setup();
     for _ in 0..MAX_FAILED_LOGINS {
         assert_eq!(
-            setup.hub.login("vera", "wrong wrong wrong").err(),
+            setup
+                .hub
+                .login("vera@example.org", "wrong wrong wrong")
+                .err(),
             Some(LoginError::BadCredentials)
         );
     }
     assert_eq!(
-        setup.hub.login("vera", PASSWORD).err(),
+        setup.hub.login("vera@example.org", PASSWORD).err(),
         Some(LoginError::TooManyAttempts)
     );
     // Another name is not affected.
-    assert!(setup.hub.login("ana", PASSWORD).is_ok());
+    assert!(setup.hub.login("ana@example.org", PASSWORD).is_ok());
 
     *setup.now.lock().expect("clock") += Duration::seconds(NAME_LOCKOUT_SECONDS);
-    assert!(setup.hub.login("vera", PASSWORD).is_ok(), "the lock ends");
+    assert!(
+        setup.hub.login("vera@example.org", PASSWORD).is_ok(),
+        "the lock ends"
+    );
 }
 
 #[tokio::test]
 async fn the_lock_is_a_429_over_http() {
     let setup = setup();
     for _ in 0..MAX_FAILED_LOGINS {
-        post_login(&setup.app, "vera", "wrong wrong wrong").await;
+        post_login(&setup.app, "vera@example.org", "wrong wrong wrong").await;
     }
     assert_eq!(
-        post_login(&setup.app, "vera", PASSWORD).await.0,
+        post_login(&setup.app, "vera@example.org", PASSWORD).await.0,
         StatusCode::TOO_MANY_REQUESTS
     );
 }
@@ -244,25 +326,30 @@ async fn the_lock_is_a_429_over_http() {
 #[test]
 fn accounts_are_checked_when_made_and_only_hashes_are_kept() {
     let setup = setup();
+    let make = |email: &str, password: &str| setup.hub.create_user(email, password).err();
     assert_eq!(
-        setup.hub.create_user("ana", PASSWORD, Role::Viewer),
-        Err(CreateUserError::NameTaken)
+        make("ana@example.org", PASSWORD),
+        Some(CreateUserError::EmailTaken)
     );
     assert_eq!(
-        setup.hub.create_user("bo", "short", Role::Viewer),
-        Err(CreateUserError::PasswordTooShort)
+        make("ANA@Example.org", PASSWORD),
+        Some(CreateUserError::EmailTaken),
+        "capitals do not make another account"
     );
     assert_eq!(
-        setup.hub.create_user("  ", PASSWORD, Role::Viewer),
-        Err(CreateUserError::BadName)
+        make("bo@example.org", "short"),
+        Some(CreateUserError::PasswordTooShort)
     );
-    assert_eq!(
-        setup.hub.create_user("a\nb", PASSWORD, Role::Viewer),
-        Err(CreateUserError::BadName)
-    );
+    for bad in ["  ", "a\nb", "no-at-sign", "@example.org", "ana@", "a@b@c"] {
+        assert_eq!(
+            make(bad, PASSWORD),
+            Some(CreateUserError::BadEmail),
+            "{bad:?}"
+        );
+    }
 
-    // The name taken stays what it was: the refused second account did not replace the first.
-    assert!(setup.hub.login("ana", PASSWORD).is_ok());
+    // The email taken stays what it was: the refused second account did not replace the first.
+    assert!(setup.hub.login("ana@example.org", PASSWORD).is_ok());
 }
 
 #[test]
@@ -280,11 +367,13 @@ fn neither_the_password_nor_the_session_token_is_what_the_store_holds() {
         memory_kib: 8,
         passes: 1,
     });
-    hub.create_user("vera", PASSWORD, Role::Viewer)
-        .expect("user");
-    let (token, _) = hub.login("vera", PASSWORD).expect("login");
+    hub.create_user("vera@example.org", PASSWORD).expect("user");
+    let (token, _) = hub.login("vera@example.org", PASSWORD).expect("login");
 
-    let user = store.user("vera").expect("read").expect("a user");
+    let user = store
+        .user_by_email("vera@example.org")
+        .expect("read")
+        .expect("a user");
     assert!(
         user.password_hash.starts_with("$argon2id$"),
         "{}",
@@ -298,5 +387,41 @@ fn neither_the_password_nor_the_session_token_is_what_the_store_holds() {
             .session(&ck_crypto::sha256_hex(token.as_bytes()))
             .expect("read")
             .is_some()
+    );
+}
+
+#[tokio::test]
+async fn an_account_in_several_organizations_must_name_one() {
+    let setup = setup();
+    let (status, cookie, body) = post_login(&setup.app, "ana@example.org", PASSWORD).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pair = cookie_pair(&cookie.expect("a cookie"));
+
+    // Ana owns two organizations, so the address without one is ambiguous.
+    assert_eq!(
+        get(&setup.app, "/api/v1/sticks", Some(&pair)).await.0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        get(&setup.app, "/api/v1/orgs/other/sticks", Some(&pair))
+            .await
+            .0,
+        StatusCode::OK
+    );
+
+    let (status, me) = get(&setup.app, "/api/v1/me", Some(&pair)).await;
+    assert_eq!(status, StatusCode::OK);
+    let me: serde_json::Value = serde_json::from_str(&me).expect("json");
+    let slugs: Vec<&str> = me["organizations"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|o| o["slug"].as_str().expect("a slug"))
+        .collect();
+    assert_eq!(slugs, ["default", "other"]);
+    assert_eq!(me["organizations"][0]["role"], "owner");
+    assert!(
+        me.get("role").is_none(),
+        "no single role when there are several organizations"
     );
 }
