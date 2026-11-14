@@ -150,6 +150,9 @@ try { if (localStorage.getItem("ck-theme") === "classic") document.documentEleme
   #login .btn { min-height: 46px; width: 100%; font-size: 15px; }
   :root[data-theme="classic"] #login .btn { min-height: 34px; font-size: 13px; }
   #login-error { min-height: 1.4em; color: var(--bad); font-size: 13.5px; }
+  #login-error.ok { color: var(--accent); }
+  #login-links { text-align: center; font-size: 14px; color: var(--muted); }
+  #login-links a { color: var(--accent); }
 </style>
 </head>
 <body>
@@ -175,12 +178,13 @@ try { if (localStorage.getItem("ck-theme") === "classic") document.documentEleme
 </div></header>
 <main>
   <form id="login" autocomplete="on">
-    <h2>Log in to Keeper Hub</h2>
-    <p class="intro">See which contest machines are online and which need attention.</p>
-    <div><label for="user">Email</label><input id="user" name="email" type="email" autocomplete="username" required></div>
-    <div><label for="pass">Password</label><input id="pass" name="password" type="password" autocomplete="current-password" required></div>
-    <button class="btn pri" type="submit">Log in</button>
+    <h2 id="login-title">Log in to Keeper Hub</h2>
+    <p class="intro" id="login-intro">See which contest machines are online and which need attention.</p>
+    <div id="email-row"><label for="user">Email</label><input id="user" name="email" type="email" autocomplete="username" required></div>
+    <div id="pass-row"><label for="pass" id="pass-label">Password</label><input id="pass" name="password" type="password" autocomplete="current-password" required></div>
+    <button class="btn pri" type="submit" id="login-submit">Log in</button>
     <div id="login-error" role="alert"></div>
+    <div id="login-links"><a href="#" id="to-register">Create an account</a> · <a href="#" id="to-forgot">Forgot password</a><a href="#" id="to-login" hidden>Back to log in</a></div>
   </form>
   <div id="problem" role="alert">The Hub cannot be reached. The list below is the last one received.</div>
   <div id="content">
@@ -424,28 +428,71 @@ for (const chip of document.querySelectorAll(".chip")) {
   });
 }
 
+const MODES = {
+  login: { title: "Log in to Keeper Hub", intro: "See which contest machines are online and which need attention.", email: true, pass: "Password", autocomplete: "current-password", button: "Log in", path: "/api/v1/login" },
+  register: { title: "Create an account", intro: "We mail you a link to confirm your address. After that, an owner of your organization adds you to it.", email: true, pass: "Choose a password (12 characters or more)", autocomplete: "new-password", button: "Create account", path: "/api/v1/register", done: "Check your email for the link." },
+  forgot: { title: "Reset your password", intro: "Enter your email and we mail you a link.", email: true, pass: null, button: "Send link", path: "/api/v1/password-reset", done: "If that address has an account, a link is on its way." },
+  reset: { title: "Choose a new password", intro: "At least 12 characters.", email: false, pass: "New password", autocomplete: "new-password", button: "Change password", path: "/api/v1/password-reset/confirm", done: "Password changed. Log in with it." },
+};
+let mode = "login";
+let resetToken = null;
+
+function say(text, good) {
+  const message = document.getElementById("login-error");
+  message.textContent = text;
+  message.className = good ? "ok" : "";
+}
+
+function setMode(next) {
+  mode = next;
+  const m = MODES[next];
+  document.getElementById("login-title").textContent = m.title;
+  document.getElementById("login-intro").textContent = m.intro;
+  document.getElementById("email-row").hidden = !m.email;
+  document.getElementById("user").required = m.email;
+  document.getElementById("pass-row").hidden = m.pass === null;
+  document.getElementById("pass").required = m.pass !== null;
+  if (m.pass) {
+    document.getElementById("pass-label").textContent = m.pass;
+    document.getElementById("pass").autocomplete = m.autocomplete;
+  }
+  document.getElementById("login-submit").textContent = m.button;
+  document.getElementById("to-register").hidden = next !== "login";
+  document.getElementById("to-forgot").hidden = next !== "login";
+  document.getElementById("to-login").hidden = next === "login";
+  say("", false);
+}
+
+for (const [id, target] of [["to-register", "register"], ["to-forgot", "forgot"], ["to-login", "login"]]) {
+  document.getElementById(id).addEventListener("click", (event) => { event.preventDefault(); setMode(target); });
+}
+
 document.getElementById("login").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const message = document.getElementById("login-error");
-  message.textContent = "";
+  const m = MODES[mode];
+  say("", false);
+  const email = document.getElementById("user").value;
+  const password = document.getElementById("pass").value;
+  const body = mode === "forgot" ? { email }
+    : mode === "reset" ? { token: resetToken, password }
+    : { email, password };
   let response;
   try {
-    response = await fetch("/api/v1/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        email: document.getElementById("user").value,
-        password: document.getElementById("pass").value,
-      }),
-    });
+    response = await fetch(m.path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   } catch (error) {
-    message.textContent = "Could not reach the Hub.";
+    say("Could not reach the Hub.", false);
     return;
   }
   document.getElementById("pass").value = "";
-  if (response.ok) { await refresh(); return; }
-  try { message.textContent = (await response.json()).error; }
-  catch (error) { message.textContent = "Could not log in."; }
+  if (mode === "login" && response.ok) { await refresh(); return; }
+  if (response.ok) {
+    const done = m.done;
+    if (mode === "reset") { resetToken = null; setMode("login"); }
+    say(done, true);
+    return;
+  }
+  try { say((await response.json()).error, false); }
+  catch (error) { say("That did not work.", false); }
 });
 
 document.getElementById("logout").addEventListener("click", async () => {
@@ -453,7 +500,28 @@ document.getElementById("logout").addEventListener("click", async () => {
   await refresh();
 });
 
-refresh();
+// A link from a mail carries its token after the #, so it never reaches a server log, and a mail
+// scanner that fetches the page does not use the link up.
+async function openedFromMail() {
+  const [kind, token] = location.hash.slice(1).split("=");
+  if (kind !== "verify" && kind !== "reset") return;
+  history.replaceState(null, "", location.pathname);
+  if (kind === "reset") {
+    // The form only shows to someone who is logged out, so end this browser's session first.
+    try { await fetch("/api/v1/logout", { method: "POST" }); } catch (error) { /* refresh shows it */ }
+    resetToken = token;
+    setMode("reset");
+    return;
+  }
+  try {
+    const response = await fetch("/api/v1/verify-email", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }) });
+    if (response.ok) say("Email confirmed. You can log in now.", true);
+    else say("That link is not valid any more.", false);
+  } catch (error) { say("Could not reach the Hub.", false); }
+}
+
+openedFromMail().then(refresh);
+window.addEventListener("hashchange", () => openedFromMail());
 setInterval(refresh, REFRESH_MS);
 </script>
 </body>

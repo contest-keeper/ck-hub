@@ -1119,7 +1119,7 @@ openedFromMail().then(refresh);
 
 - [ ] **Step 2b: Keep the two forms of `refresh` from wiping a message.** `refresh()` runs every `REFRESH_MS`; it must not clear `#login-error`. It does not touch it today, so nothing to change; confirm in the browser (Step 4).
 - [ ] **Step 3: Update the page assertions** in `tests/api.rs` and run `cargo test -p ck-hub --test api`.
-- [ ] **Step 4: Check it in a browser.** Start `cargo run -p ck-hub -- serve --listen 127.0.0.1:18088 --mail console --public-url http://127.0.0.1:18088` (flags arrive in Task 6, so do this step after it), register, copy the link from the terminal output, open it, log in (this account has no organization: the page must say so, see its existing message), then "Forgot password" and the reset link. Take screenshots of each mode in light and dark and in the classic theme.
+- [ ] **Step 4: Check it in a browser.** Start `cargo run -p ck-hub -- --listen 127.0.0.1:18088 --mail console --public-url http://127.0.0.1:18088` (flags arrive in Task 6, so do this step after it), register, copy the link from the terminal output, open it, log in (this account has no organization: the page must say so, see its existing message), then "Forgot password" and the reset link. Take screenshots of each mode in light and dark and in the classic theme.
 - [ ] **Step 5: Commit** `feat: add sign-up, confirmation and reset to the login page`
 
 ---
