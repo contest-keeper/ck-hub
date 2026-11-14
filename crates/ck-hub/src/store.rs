@@ -86,6 +86,9 @@ pub struct User {
     pub id: String,
     pub email: String,
     pub password_hash: String,
+    /// When the owner of the address confirmed it. `None` until then.
+    pub email_verified_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
 }
 
 /// What a store needs to make an account. The store picks the id.
@@ -93,6 +96,25 @@ pub struct User {
 pub struct NewUser {
     pub email: String,
     pub password_hash: String,
+    pub email_verified_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// What a mailed one-time token may be used for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenPurpose {
+    Verify,
+    Reset,
+}
+
+impl TokenPurpose {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Verify => "verify",
+            Self::Reset => "reset",
+        }
+    }
 }
 
 /// A club or contest team. Everything sticks report belongs to one.
@@ -220,6 +242,38 @@ pub trait Store: Send + Sync {
     /// Removes every session that ended at or before `now`.
     fn delete_expired_sessions(&self, now: DateTime<Utc>) -> Result<(), StoreError>;
 
+    fn mark_email_verified(&self, user_id: &str, at: DateTime<Utc>) -> Result<(), StoreError>;
+
+    fn set_password_hash(&self, user_id: &str, password_hash: &str) -> Result<(), StoreError>;
+
+    /// Ends every session of the account.
+    fn delete_sessions_of(&self, user_id: &str) -> Result<(), StoreError>;
+
+    /// Keeps a hash of a mailed token. It replaces the account's earlier token of the same purpose.
+    fn put_email_token(
+        &self,
+        token_hash: &str,
+        user_id: &str,
+        purpose: TokenPurpose,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), StoreError>;
+
+    /// Uses up a token: the account it was made for, if it exists, has this purpose and has not
+    /// ended by `now`. A token of another purpose is left alone; an ended one is removed.
+    fn take_email_token(
+        &self,
+        token_hash: &str,
+        purpose: TokenPurpose,
+        now: DateTime<Utc>,
+    ) -> Result<Option<String>, StoreError>;
+
+    /// Removes every token that ended at or before `now`.
+    fn delete_expired_email_tokens(&self, now: DateTime<Utc>) -> Result<(), StoreError>;
+
+    /// Removes accounts nobody confirmed that were made before `before`, with their tokens and
+    /// sessions.
+    fn delete_unverified_users_before(&self, before: DateTime<Utc>) -> Result<(), StoreError>;
+
     /// Adds a stick to an organization. Returns false, and changes nothing, when its id is
     /// already known to any organization: a stick's secret is never replaced, and an id belongs
     /// to one organization.
@@ -232,6 +286,9 @@ pub trait Store: Send + Sync {
     fn sticks(&self, organization: &str) -> Result<Vec<Stick>, StoreError>;
 }
 
+/// A token's hash, the account it is for, what it is for, and when it ends.
+type MailedToken = (String, String, TokenPurpose, DateTime<Utc>);
+
 /// Keeps everything in memory. Used by the tests, and by a Hub started without a database; the
 /// data is gone when the program stops.
 #[derive(Default)]
@@ -241,6 +298,7 @@ pub struct MemoryStore {
     events: Mutex<HashMap<(String, StickId), Vec<StoredEvent>>>,
     users: Mutex<Vec<User>>,
     sessions: Mutex<HashMap<String, (String, DateTime<Utc>)>>,
+    email_tokens: Mutex<Vec<MailedToken>>,
     organizations: Mutex<Vec<Organization>>,
     members: Mutex<Vec<(String, String, Role)>>,
     next_id: AtomicU64,
@@ -369,6 +427,8 @@ impl Store for MemoryStore {
             id: self.id("user"),
             email: user.email,
             password_hash: user.password_hash,
+            email_verified_at: user.email_verified_at,
+            created_at: user.created_at,
         };
         users.push(user.clone());
         Ok(Some(user))
@@ -503,6 +563,93 @@ impl Store for MemoryStore {
             .lock()
             .expect("sessions lock")
             .retain(|_, (_, ends)| *ends > now);
+        Ok(())
+    }
+
+    fn mark_email_verified(&self, user_id: &str, at: DateTime<Utc>) -> Result<(), StoreError> {
+        let mut users = self.users.lock().expect("users lock");
+        if let Some(user) = users.iter_mut().find(|user| user.id == user_id) {
+            user.email_verified_at.get_or_insert(at);
+        }
+        Ok(())
+    }
+
+    fn set_password_hash(&self, user_id: &str, password_hash: &str) -> Result<(), StoreError> {
+        let mut users = self.users.lock().expect("users lock");
+        if let Some(user) = users.iter_mut().find(|user| user.id == user_id) {
+            password_hash.clone_into(&mut user.password_hash);
+        }
+        Ok(())
+    }
+
+    fn delete_sessions_of(&self, user_id: &str) -> Result<(), StoreError> {
+        self.sessions
+            .lock()
+            .expect("sessions lock")
+            .retain(|_, (owner, _)| owner != user_id);
+        Ok(())
+    }
+
+    fn put_email_token(
+        &self,
+        token_hash: &str,
+        user_id: &str,
+        purpose: TokenPurpose,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        let mut tokens = self.email_tokens.lock().expect("tokens lock");
+        tokens.retain(|(_, owner, kind, _)| !(owner == user_id && *kind == purpose));
+        tokens.push((
+            token_hash.to_owned(),
+            user_id.to_owned(),
+            purpose,
+            expires_at,
+        ));
+        Ok(())
+    }
+
+    fn take_email_token(
+        &self,
+        token_hash: &str,
+        purpose: TokenPurpose,
+        now: DateTime<Utc>,
+    ) -> Result<Option<String>, StoreError> {
+        let mut tokens = self.email_tokens.lock().expect("tokens lock");
+        // A token of another purpose is left alone, as in PostgreSQL.
+        let Some(at) = tokens
+            .iter()
+            .position(|(hash, _, kind, _)| hash == token_hash && *kind == purpose)
+        else {
+            return Ok(None);
+        };
+        let (_, owner, _, ends) = tokens.remove(at);
+        Ok((ends > now).then_some(owner))
+    }
+
+    fn delete_expired_email_tokens(&self, now: DateTime<Utc>) -> Result<(), StoreError> {
+        self.email_tokens
+            .lock()
+            .expect("tokens lock")
+            .retain(|(_, _, _, ends)| *ends > now);
+        Ok(())
+    }
+
+    fn delete_unverified_users_before(&self, before: DateTime<Utc>) -> Result<(), StoreError> {
+        let mut users = self.users.lock().expect("users lock");
+        let gone: Vec<String> = users
+            .iter()
+            .filter(|user| user.email_verified_at.is_none() && user.created_at < before)
+            .map(|user| user.id.clone())
+            .collect();
+        users.retain(|user| !gone.contains(&user.id));
+        self.email_tokens
+            .lock()
+            .expect("tokens lock")
+            .retain(|(_, owner, _, _)| !gone.contains(owner));
+        self.sessions
+            .lock()
+            .expect("sessions lock")
+            .retain(|_, (owner, _)| !gone.contains(owner));
         Ok(())
     }
 

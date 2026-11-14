@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, Utc};
 use ck_hub::{
     Hub, MemoryStore, NewUser, PasswordCost, PostgresStore, Registry, Rejection, Role, Store,
+    TokenPurpose,
 };
 use ck_protocol::{
     Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, RecorderStatus, RecordingMode,
@@ -205,6 +206,8 @@ fn identity_contract(store: &dyn Store) {
     let new = |email: &str, hash: &str| NewUser {
         email: email.to_owned(),
         password_hash: hash.to_owned(),
+        email_verified_at: Some(time(0)),
+        created_at: time(0),
     };
 
     // Accounts: an email is taken once, capitals do not make another one, and it reads back whole.
@@ -293,6 +296,165 @@ fn identity_contract(store: &dyn Store) {
     );
 
     sessions_contract(store, &id, &user.id);
+    verification_contract(store);
+}
+
+fn verification_contract(store: &dyn Store) {
+    let id = unique();
+    let made = |email: &str, verified: Option<DateTime<Utc>>| {
+        store
+            .create_user(NewUser {
+                email: email.to_owned(),
+                password_hash: "hash".to_owned(),
+                email_verified_at: verified,
+                created_at: time(10),
+            })
+            .expect("write")
+            .expect("a new account")
+    };
+    let fresh = made(&format!("{id}-fresh@example.org"), None);
+    let vouched = made(&format!("{id}-vouched@example.org"), Some(time(5)));
+    assert_eq!(fresh.email_verified_at, None);
+    assert_eq!(vouched.email_verified_at, Some(time(5)));
+
+    store
+        .mark_email_verified(&fresh.id, time(20))
+        .expect("write");
+    assert_eq!(
+        store
+            .user(&fresh.id)
+            .expect("read")
+            .expect("user")
+            .email_verified_at,
+        Some(time(20))
+    );
+
+    email_tokens_contract(store, &id, &fresh.id);
+    passwords_and_cleanup_contract(store, &id, &fresh, &vouched.id);
+}
+
+fn email_tokens_contract(store: &dyn Store, id: &str, user: &str) {
+    let token = |name: &str| format!("{id}-{name}");
+    let fresh = &user;
+    // A token is used once, only for its purpose, and not after it ended.
+    store
+        .put_email_token(&token("verify"), fresh, TokenPurpose::Verify, time(100))
+        .expect("write");
+    assert_eq!(
+        store
+            .take_email_token(&token("verify"), TokenPurpose::Reset, time(50))
+            .expect("read"),
+        None
+    );
+    assert_eq!(
+        store
+            .take_email_token(&token("verify"), TokenPurpose::Verify, time(50))
+            .expect("read"),
+        Some((*fresh).to_owned())
+    );
+    assert_eq!(
+        store
+            .take_email_token(&token("verify"), TokenPurpose::Verify, time(50))
+            .expect("read"),
+        None
+    );
+    store
+        .put_email_token(&token("late"), fresh, TokenPurpose::Reset, time(100))
+        .expect("write");
+    assert_eq!(
+        store
+            .take_email_token(&token("late"), TokenPurpose::Reset, time(100))
+            .expect("read"),
+        None
+    );
+
+    // A new token of a purpose replaces the account's earlier one.
+    store
+        .put_email_token(&token("one"), fresh, TokenPurpose::Reset, time(500))
+        .expect("write");
+    store
+        .put_email_token(&token("two"), fresh, TokenPurpose::Reset, time(500))
+        .expect("write");
+    assert_eq!(
+        store
+            .take_email_token(&token("one"), TokenPurpose::Reset, time(1))
+            .expect("read"),
+        None
+    );
+    assert_eq!(
+        store
+            .take_email_token(&token("two"), TokenPurpose::Reset, time(1))
+            .expect("read"),
+        Some((*fresh).to_owned())
+    );
+}
+
+fn passwords_and_cleanup_contract(
+    store: &dyn Store,
+    id: &str,
+    fresh: &ck_hub::User,
+    vouched: &str,
+) {
+    let token = |name: &str| format!("{id}-{name}");
+    let made = |email: &str| {
+        store
+            .create_user(NewUser {
+                email: email.to_owned(),
+                password_hash: "hash".to_owned(),
+                email_verified_at: None,
+                created_at: time(10),
+            })
+            .expect("write")
+            .expect("a new account")
+    };
+    // Passwords change, and every session of the account can be ended at once.
+    store
+        .set_password_hash(&fresh.id, "new-hash")
+        .expect("write");
+    assert_eq!(
+        store
+            .user(&fresh.id)
+            .expect("read")
+            .expect("user")
+            .password_hash,
+        "new-hash"
+    );
+    for (name, owner) in [
+        ("s1", &fresh.id),
+        ("s2", &fresh.id),
+        ("s3", &vouched.to_owned()),
+    ] {
+        store
+            .create_session(&token(name), owner, time(900))
+            .expect("write");
+    }
+    store.delete_sessions_of(&fresh.id).expect("write");
+    assert!(store.session(&token("s1")).expect("read").is_none());
+    assert!(store.session(&token("s2")).expect("read").is_none());
+    assert!(store.session(&token("s3")).expect("read").is_some());
+
+    // Expired tokens are removed. Unconfirmed accounts older than the limit are removed with their
+    // tokens; confirmed ones stay.
+    let stale = made(&format!("{id}-stale@example.org"));
+    store
+        .put_email_token(&token("old"), &stale.id, TokenPurpose::Verify, time(30))
+        .expect("write");
+    store.delete_expired_email_tokens(time(40)).expect("write");
+    assert_eq!(
+        store
+            .take_email_token(&token("old"), TokenPurpose::Verify, time(1))
+            .expect("read"),
+        None
+    );
+    store
+        .delete_unverified_users_before(time(11))
+        .expect("write");
+    assert!(store.user(&stale.id).expect("read").is_none());
+    assert!(store.user(vouched).expect("read").is_some());
+    assert!(
+        store.user(&fresh.id).expect("read").is_some(),
+        "confirmed in the meantime"
+    );
 }
 
 fn sessions_contract(store: &dyn Store, id: &str, user_id: &str) {

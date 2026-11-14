@@ -23,6 +23,12 @@ pub const MAX_FAILED_LOGINS_ALL: u32 = 60;
 pub const ALL_LOCKOUT_SECONDS: i64 = 60;
 pub const MIN_PASSWORD_LENGTH: usize = 12;
 pub const MAX_EMAIL_LENGTH: usize = 254;
+/// Mails sent to one address in [`MAIL_WINDOW_SECONDS`], and to all addresses in
+/// [`MAIL_ALL_WINDOW_SECONDS`]. Over the limit nothing is sent, and nothing says so.
+pub const MAX_MAILS_PER_ADDRESS: u32 = 3;
+pub const MAIL_WINDOW_SECONDS: i64 = 300;
+pub const MAX_MAILS_ALL: u32 = 120;
+pub const MAIL_ALL_WINDOW_SECONDS: i64 = 60;
 
 /// How much work hashing a password takes. The default is the minimum OWASP recommends for
 /// Argon2id; a slower machine can afford more.
@@ -45,6 +51,9 @@ impl Default for PasswordCost {
 pub enum LoginError {
     /// The same answer for an unknown name and a wrong password.
     BadCredentials,
+    /// The password was right but the email was never confirmed. Said only after the password
+    /// matched, so a guesser learns nothing from it.
+    NotVerified,
     TooManyAttempts,
     Unavailable,
 }
@@ -101,7 +110,7 @@ struct Failures {
 
 /// What the Hub keeps for accounts besides the database.
 pub struct Accounts {
-    cost: PasswordCost,
+    pub(crate) cost: PasswordCost,
     /// A hash nobody can match, checked when the name is unknown so that an unknown name takes as
     /// long to refuse as a wrong password.
     dummy_hash: String,
@@ -143,12 +152,25 @@ impl Accounts {
         entry.count += 1;
     }
 
-    fn clear(&self, key: &str) {
+    pub(crate) fn clear(&self, key: &str) {
         self.failures.lock().expect("failures lock").remove(key);
+    }
+
+    /// Whether one more mail may go to `email`. Counts the mail when it may.
+    pub(crate) fn mail_allowed(&self, email: &str, now: DateTime<Utc>) -> bool {
+        let key = format!("mail:{}", email.to_lowercase());
+        if self.blocked(&key, now, MAX_MAILS_PER_ADDRESS, MAIL_WINDOW_SECONDS)
+            || self.blocked("mail:*", now, MAX_MAILS_ALL, MAIL_ALL_WINDOW_SECONDS)
+        {
+            return false;
+        }
+        self.fail(&key, now, MAIL_WINDOW_SECONDS);
+        self.fail("mail:*", now, MAIL_ALL_WINDOW_SECONDS);
+        true
     }
 }
 
-fn hash(cost: PasswordCost, password: &str) -> Result<String, String> {
+pub(crate) fn hash(cost: PasswordCost, password: &str) -> Result<String, String> {
     let params = Params::new(cost.memory_kib, cost.passes, 1, None).map_err(|e| e.to_string())?;
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
         .hash_password(password.as_bytes())
@@ -156,17 +178,23 @@ fn hash(cost: PasswordCost, password: &str) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
-fn token_hash(token: &str) -> String {
+pub(crate) fn token_hash(token: &str) -> String {
     ck_crypto::sha256_hex(token.as_bytes())
 }
 
-fn unavailable(error: &StoreError) {
+pub(crate) fn unavailable(error: &StoreError) {
     tracing::error!("{error}");
 }
 
 impl Hub {
     pub fn create_user(&self, email: &str, password: &str) -> Result<User, CreateUserError> {
-        create_user(self.store.as_ref(), self.accounts.cost, email, password)
+        create_user(
+            self.store.as_ref(),
+            self.accounts.cost,
+            (self.clock)(),
+            email,
+            password,
+        )
     }
 
     pub fn create_organization(
@@ -217,6 +245,9 @@ impl Hub {
         };
         if let Some(key) = &key {
             accounts.clear(key);
+        }
+        if user.email_verified_at.is_none() {
+            return Err(LoginError::NotVerified);
         }
 
         // Expired sessions are only ever deleted here, so the table does not grow for ever.
@@ -336,7 +367,7 @@ impl Hub {
     }
 }
 
-fn valid_email(email: &str) -> bool {
+pub(crate) fn valid_email(email: &str) -> bool {
     let Some((local, domain)) = email.split_once('@') else {
         return false;
     };
@@ -361,6 +392,7 @@ fn valid_slug(slug: &str) -> bool {
 pub fn create_user(
     store: &dyn Store,
     cost: PasswordCost,
+    now: DateTime<Utc>,
     email: &str,
     password: &str,
 ) -> Result<User, CreateUserError> {
@@ -378,6 +410,8 @@ pub fn create_user(
         .create_user(NewUser {
             email: email.to_owned(),
             password_hash,
+            email_verified_at: Some(now),
+            created_at: now,
         })
         .map_err(|error| {
             unavailable(&error);

@@ -9,12 +9,12 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::store::{
     Membership, NewUser, Organization, Role, SeenHeartbeat, Stick, Store, StoreError, StoredEvent,
-    User,
+    TokenPurpose, User,
 };
 
 /// The schema, in the order it is applied. A migration that was applied is never run again and
 /// never edited: a change is a new file.
-const MIGRATIONS: [(&str, &str); 6] = [
+const MIGRATIONS: [(&str, &str); 7] = [
     (
         "0001_heartbeats_and_events",
         include_str!("../migrations/0001_heartbeats_and_events.sql"),
@@ -35,6 +35,10 @@ const MIGRATIONS: [(&str, &str); 6] = [
     (
         "0006_organization_scoping",
         include_str!("../migrations/0006_organization_scoping.sql"),
+    ),
+    (
+        "0007_email_verification",
+        include_str!("../migrations/0007_email_verification.sql"),
     ),
 ];
 
@@ -335,9 +339,16 @@ impl Store for PostgresStore {
     fn create_user(&self, user: NewUser) -> Result<Option<User>, StoreError> {
         let row = self.run(|client| {
             client.query_opt(
-                "INSERT INTO users (email, password_hash) VALUES ($1, $2)
-                 ON CONFLICT DO NOTHING RETURNING id, email, password_hash",
-                &[&user.email, &user.password_hash],
+                "INSERT INTO users (email, password_hash, email_verified_at, created_at)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT DO NOTHING
+                 RETURNING id, email, password_hash, email_verified_at, created_at",
+                &[
+                    &user.email,
+                    &user.password_hash,
+                    &user.email_verified_at,
+                    &user.created_at,
+                ],
             )
         })?;
         Ok(row.as_ref().map(user_from))
@@ -346,7 +357,8 @@ impl Store for PostgresStore {
     fn user_by_email(&self, email: &str) -> Result<Option<User>, StoreError> {
         let row = self.run(|client| {
             client.query_opt(
-                "SELECT id, email, password_hash FROM users WHERE lower(email) = lower($1)",
+                "SELECT id, email, password_hash, email_verified_at, created_at
+                 FROM users WHERE lower(email) = lower($1)",
                 &[&email],
             )
         })?;
@@ -356,7 +368,8 @@ impl Store for PostgresStore {
     fn user(&self, id: &str) -> Result<Option<User>, StoreError> {
         let row = self.run(|client| {
             client.query_opt(
-                "SELECT id, email, password_hash FROM users WHERE id = $1",
+                "SELECT id, email, password_hash, email_verified_at, created_at
+                 FROM users WHERE id = $1",
                 &[&id],
             )
         })?;
@@ -487,6 +500,90 @@ impl Store for PostgresStore {
         Ok(())
     }
 
+    fn mark_email_verified(&self, user_id: &str, at: DateTime<Utc>) -> Result<(), StoreError> {
+        self.run(|client| {
+            client.execute(
+                "UPDATE users SET email_verified_at = $2 WHERE id = $1 AND email_verified_at IS NULL",
+                &[&user_id, &at],
+            )
+        })?;
+        Ok(())
+    }
+
+    fn set_password_hash(&self, user_id: &str, password_hash: &str) -> Result<(), StoreError> {
+        self.run(|client| {
+            client.execute(
+                "UPDATE users SET password_hash = $2 WHERE id = $1",
+                &[&user_id, &password_hash],
+            )
+        })?;
+        Ok(())
+    }
+
+    fn delete_sessions_of(&self, user_id: &str) -> Result<(), StoreError> {
+        self.run(|client| client.execute("DELETE FROM sessions WHERE user_id = $1", &[&user_id]))?;
+        Ok(())
+    }
+
+    fn put_email_token(
+        &self,
+        token_hash: &str,
+        user_id: &str,
+        purpose: TokenPurpose,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        self.run(|client| {
+            let mut transaction = client.transaction()?;
+            transaction.execute(
+                "DELETE FROM email_tokens WHERE user_id = $1 AND purpose = $2",
+                &[&user_id, &purpose.as_str()],
+            )?;
+            transaction.execute(
+                "INSERT INTO email_tokens (token_hash, user_id, purpose, expires_at)
+                 VALUES ($1, $2, $3, $4)",
+                &[&token_hash, &user_id, &purpose.as_str(), &expires_at],
+            )?;
+            transaction.commit()
+        })
+    }
+
+    fn take_email_token(
+        &self,
+        token_hash: &str,
+        purpose: TokenPurpose,
+        now: DateTime<Utc>,
+    ) -> Result<Option<String>, StoreError> {
+        let row = self.run(|client| {
+            client.query_opt(
+                "DELETE FROM email_tokens WHERE token_hash = $1 AND purpose = $2
+                 RETURNING user_id, expires_at",
+                &[&token_hash, &purpose.as_str()],
+            )
+        })?;
+        Ok(row.and_then(|row| {
+            let ends: DateTime<Utc> = row.get(1);
+            (ends > now).then(|| row.get(0))
+        }))
+    }
+
+    fn delete_expired_email_tokens(&self, now: DateTime<Utc>) -> Result<(), StoreError> {
+        self.run(|client| {
+            client.execute("DELETE FROM email_tokens WHERE expires_at <= $1", &[&now])
+        })?;
+        Ok(())
+    }
+
+    fn delete_unverified_users_before(&self, before: DateTime<Utc>) -> Result<(), StoreError> {
+        // Sessions and tokens of these accounts go with them (ON DELETE CASCADE).
+        self.run(|client| {
+            client.execute(
+                "DELETE FROM users WHERE email_verified_at IS NULL AND created_at < $1",
+                &[&before],
+            )
+        })?;
+        Ok(())
+    }
+
     fn add_stick(&self, organization: &str, stick: Stick) -> Result<bool, StoreError> {
         let machine = stick
             .machine_number
@@ -567,6 +664,8 @@ fn user_from(row: &postgres::Row) -> User {
         id: row.get(0),
         email: row.get(1),
         password_hash: row.get(2),
+        email_verified_at: row.get(3),
+        created_at: row.get(4),
     }
 }
 

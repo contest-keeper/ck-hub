@@ -397,6 +397,13 @@ async fn the_page_is_served_and_needs_nothing_from_outside() {
         page.contains("/api/v1/orgs/") && page.contains("/sticks"),
         "the page reads the stick list of an organization"
     );
+    assert!(
+        page.contains("/api/v1/register")
+            && page.contains("/api/v1/verify-email")
+            && page.contains("/api/v1/password-reset/confirm")
+            && page.contains("location.hash"),
+        "the page signs people up and handles the links in their mail"
+    );
     // Everything is in the one file: no scripts, styles or images from another address.
     assert!(
         !page.contains("http://") && !page.contains("https://"),

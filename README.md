@@ -23,11 +23,19 @@ cargo run -p ck-hub -- --registry ck-registry.json --log hub.log
   is encrypted when the database offers TLS and always with `?sslmode=require` (the certificate is
   checked against the public web roots, which covers Azure Database for PostgreSQL). Add
   `?sslmode=disable` for a database on the same machine that has no TLS.
+- `--mail console --public-url http://127.0.0.1:8088` (or `CK_MAIL` and `CK_PUBLIC_URL`) lets the Hub
+  send mail, which sign-up and password reset need. `console` prints each mail, links included, to the
+  terminal: use it on a developer's machine only. A real mail provider is not built in yet. Without
+  mail the two routes answer `503`.
 - `--log` adds one line per heartbeat, accepted or refused. It never holds a secret or a signature.
 
 | Route | What it does |
 |---|---|
 | `POST /api/v1/login` | A person logs in with `{"email", "password"}` (`username` is still accepted for `email`). The answer sets the `ck_session` cookie (`HttpOnly; Secure; SameSite=Strict`, 12 hours). `401` for a wrong email or password, with the same answer for both, and `429` after 5 wrong passwords for one email (locked for 5 minutes) or 60 in a minute for all emails. |
+| `POST /api/v1/register` | Makes an account from `{"email", "password"}` and mails a link to confirm the address. `202` with the same answer whether or not the address already has an account (an existing one is told by mail instead), `400` for a bad email or a password under 12 characters, `503` when the Hub cannot send mail. Logging in before the link is used answers `403`. |
+| `POST /api/v1/verify-email` | Confirms an address with `{"token"}` from the link. `204`, or `400` for a link that was used, ended (24 hours) or never existed. |
+| `POST /api/v1/password-reset` | Mails a reset link to `{"email"}` when it has an account. Always `202`, so it does not tell who has one. |
+| `POST /api/v1/password-reset/confirm` | Sets a new password with `{"token", "password"}`. `204`, or `400` for a bad link (1 hour, once) or a short password, which leaves the link usable. It ends every session of the account and confirms the address. |
 | `POST /api/v1/logout` | Ends the session on the server and clears the cookie. |
 | `GET /api/v1/me` | Who the session belongs to and the organizations they are in, each with their role there (`role` is also given when there is exactly one). `401` without a valid session. |
 | `GET /` | The page organizers watch: every stick with its status, last heartbeat, computer name, uptime and recorder. It reads the sticks of the chosen organization every 5 seconds, and shows a selector when the account is in several. It is one file with no outside resources, so it works with no internet. |
@@ -71,6 +79,14 @@ cannot be used to log in.
 Everything a stick reports belongs to one organization. Row-level security keeps organizations apart
 in the database, on top of the filters of every query. It does not apply to a superuser or a role
 with `BYPASSRLS`, so connect the Hub as a plain role; the Hub warns at start when it is not one.
+
+Anyone can sign up on the page when the Hub can send mail, but an account has no access until an
+owner or staff add it to an organization (`ck-hub add-member`); the page says so. Links in the mail
+carry their token after the `#`, so it never reaches a server log and a mail scanner that opens the
+link does not use it up. A link works once. At most 3 mails go to one address in 5 minutes and 120
+in a minute from the whole Hub; over that, nothing is sent and the answer stays the same. Accounts
+nobody confirmed are removed after 48 hours. Accounts made from the command line, and every account
+that existed before sign-up, count as confirmed.
 
 A database from before organizations is moved into an organization with the slug `default`: former
 admins become its owners, former viewers stay viewers, and they log in with the name they had. The

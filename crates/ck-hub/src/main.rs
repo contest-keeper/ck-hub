@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use ck_hub::{
-    CreateUserError, Download, Hub, MIN_PASSWORD_LENGTH, MemoryStore, NewStick, OrganizationError,
-    PasswordCost, PostgresStore, RegisterError, Registry, Role, Store, add_member,
-    create_organization, create_user, register_sticks, router,
+    ConsoleMailer, CreateUserError, Download, Hub, MIN_PASSWORD_LENGTH, MemoryStore, NewStick,
+    OrganizationError, PasswordCost, PostgresStore, RegisterError, Registry, Role, Store,
+    add_member, create_organization, create_user, register_sticks, router,
 };
 use clap::{Args, Parser, Subcommand};
 
@@ -56,6 +56,19 @@ struct ServeArgs {
     log: Option<PathBuf>,
     #[command(flatten)]
     download: DownloadArgs,
+    /// How the Hub sends mail. `console` prints it, links included, and is for a developer's
+    /// machine only. Without this, sign-up and password reset answer 503
+    #[arg(long, env = "CK_MAIL", value_enum, requires = "public_url")]
+    mail: Option<MailKind>,
+    /// The address people reach this Hub at, for the links in mail, such as
+    /// <https://hub.contest-keeper.com>
+    #[arg(long, env = "CK_PUBLIC_URL")]
+    public_url: Option<String>,
+}
+
+#[derive(Clone, clap::ValueEnum)]
+enum MailKind {
+    Console,
 }
 
 // The field names make the flags `--download-account` and so on, so the shared prefix stays.
@@ -182,7 +195,13 @@ async fn make_user(args: CreateUserArgs) -> Result<(), String> {
     let store = connect(url).await?;
     let email = args.email.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let result = create_user(&store, PasswordCost::default(), &email, &password);
+        let result = create_user(
+            &store,
+            PasswordCost::default(),
+            Utc::now(),
+            &email,
+            &password,
+        );
         // The store is dropped on this blocking thread too, where closing the connection is safe.
         drop(store);
         result
@@ -379,6 +398,10 @@ async fn run(args: ServeArgs) -> Result<(), String> {
         let download = Download::new(account, &args.download.download_container, key)
             .map_err(|e| e.to_string())?;
         hub = hub.with_download(download);
+    }
+    if let (Some(MailKind::Console), Some(url)) = (&args.mail, &args.public_url) {
+        tracing::warn!("mail goes to the console: do not use this on a shared Hub");
+        hub = hub.with_mail(Arc::new(ConsoleMailer), url);
     }
     let hub = Arc::new(hub);
 
