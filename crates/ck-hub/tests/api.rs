@@ -5,7 +5,9 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{DateTime, Duration, Utc};
-use ck_hub::{Hub, MemoryStore, ONLINE_WINDOW_SECONDS, PasswordCost, Registry, Role, router};
+use ck_hub::{
+    Download, Hub, MemoryStore, ONLINE_WINDOW_SECONDS, PasswordCost, Registry, Role, router,
+};
 use ck_protocol::{
     Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, RecorderStatus, RecordingMode,
     SIGNATURE_HEADER, STICK_HEADER, StickId, Token,
@@ -643,4 +645,49 @@ async fn every_answer_forbids_framing_and_outside_resources() {
         .to_str()
         .expect("text");
     assert!(policy.contains("frame-ancestors 'none'") && policy.contains("default-src 'none'"));
+}
+
+#[tokio::test]
+async fn the_forge_download_is_not_found_until_a_container_is_set() {
+    let setup = setup();
+    let response = setup
+        .app
+        .oneshot(
+            Request::get("/download/forge")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn the_forge_download_sends_the_visitor_to_a_short_lived_link() {
+    let dir = TempDir::new().expect("temp dir");
+    fs::write(dir.path().join("registry.json"), registry_json(&[])).expect("registry");
+    let registry = Registry::open(dir.path().join("registry.json")).expect("open");
+    let download = Download::new("ckdlabc12", "downloads", "a2V5LWZvci10ZXN0cw==").expect("valid");
+    let hub = Hub::new(
+        registry,
+        Arc::new(MemoryStore::default()),
+        None,
+        Box::new(|| "2026-11-14T12:00:00Z".parse().expect("a time")),
+    )
+    .with_download(download);
+    let response = router(Arc::new(hub))
+        .oneshot(
+            Request::get("/download/forge")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::FOUND);
+    let location = response.headers()["location"].to_str().expect("text");
+    assert!(location.starts_with(
+        "https://ckdlabc12.blob.core.windows.net/downloads/forge/keeper-forge-setup-x64.exe?sv="
+    ));
+    assert!(location.contains("&se=2026-11-14T12%3A05%3A00Z&"));
+    assert_eq!(response.headers()["cache-control"], "no-store");
 }
