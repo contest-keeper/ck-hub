@@ -2,6 +2,7 @@
 //! shows organizers the state of every stick.
 
 mod accounts;
+mod acs_mail;
 mod download;
 mod hub;
 mod mail;
@@ -18,6 +19,7 @@ pub use accounts::{
     MIN_PASSWORD_LENGTH, NAME_LOCKOUT_SECONDS, OrganizationError, PasswordCost,
     SESSION_LIFETIME_HOURS, add_member, create_organization, create_user,
 };
+pub use acs_mail::AcsMailer;
 pub use download::{Download, DownloadError, LINK_LIFETIME_MINUTES};
 pub use hub::{Hub, LastHeartbeat, ONLINE_WINDOW_SECONDS, Rejection, StickView};
 pub use mail::{ConsoleMailer, Mail, MailError, Mailer, MemoryMailer, token_after};
