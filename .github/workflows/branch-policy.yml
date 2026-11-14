@@ -27,8 +27,10 @@ jobs:
           base = os.environ["BASE_BRANCH"]
           head = os.environ["HEAD_BRANCH"]
           same_repository = os.environ["BASE_REPOSITORY"] == os.environ["HEAD_REPOSITORY"]
-          if base == "main" and (head != "develop" or not same_repository):
-              print("::error::Only this repository's develop branch may be promoted to main.")
+          # The release PR that release-please opens against main is the only other branch allowed.
+          allowed = head == "develop" or head.startswith("release-please--branches--main")
+          if base == "main" and (not allowed or not same_repository):
+              print("::error::Only this repository's develop branch or its release PR may go into main.")
               sys.exit(1)
           print("Branch policy passed.")
           PY
