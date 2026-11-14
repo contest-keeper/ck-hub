@@ -1,0 +1,20 @@
+name: Warm caches
+
+# Pull requests restore the build caches saved on their base branch. Building develop here keeps those
+# caches fresh, so a new pull request does not start from a cold Rust build.
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: warm-cache
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    uses: contest-keeper/.github/.github/workflows/rust-ci.yml@main

@@ -28,4 +28,5 @@ jobs:
       registry_token: ${{ secrets.GHCR_PULL_TOKEN }}
     with:
       environment: develop
+      infra_ref: develop
       image_tag: ${{ needs.image.outputs.image_tag }}

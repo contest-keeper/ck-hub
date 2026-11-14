@@ -6,7 +6,7 @@ use axum::Json;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::header::{COOKIE, SET_COOKIE};
+use axum::http::header::{CACHE_CONTROL, COOKIE, LOCATION, SET_COOKIE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -27,6 +27,9 @@ const PAGE: &str = include_str!("page.html");
 /// wait here instead of allocating memory.
 static HASHING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
+/// The installer's place in the private container. The forge pipeline keeps the name the same.
+const FORGE_INSTALLER: &str = "forge/keeper-forge-setup-x64.exe";
+
 /// Where sticks send events. The stick's agent uses the same address.
 const EVENTS_PATH: &str = "/api/v1/events";
 
@@ -39,6 +42,7 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 pub fn router(hub: Arc<Hub>) -> Router {
     Router::new()
         .route("/", get(page))
+        .route("/download/forge", get(download_forge))
         .route(HEARTBEAT_PATH, post(heartbeat))
         .route(EVENTS_PATH, post(event))
         .route(
@@ -75,6 +79,20 @@ async fn security_headers(mut response: Response) -> Response {
     headers.insert("x-content-type-options", "nosniff".parse().expect("valid"));
     headers.insert("x-frame-options", "DENY".parse().expect("valid"));
     response
+}
+
+/// The Keeper Forge installer. The visitor is sent to a read-only link that works for a few
+/// minutes, so the storage address is never published and a copied link soon stops working.
+async fn download_forge(State(hub): State<Arc<Hub>>) -> Response {
+    let Some(download) = hub.download.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let link = download.link(FORGE_INSTALLER, (hub.clock)());
+    (
+        StatusCode::FOUND,
+        [(LOCATION, link), (CACHE_CONTROL, "no-store".to_owned())],
+    )
+        .into_response()
 }
 
 async fn heartbeat(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) -> Response {
