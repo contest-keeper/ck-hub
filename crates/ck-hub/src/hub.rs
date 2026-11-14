@@ -11,6 +11,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::accounts::{Accounts, PasswordCost};
+use crate::download::Download;
 use crate::registry::Registry;
 use crate::store::{Stick, Store, StoreError, StoredEvent};
 
@@ -89,10 +90,18 @@ pub struct Hub {
     /// Per stick: when the current minute started and how many messages it has seen.
     rates: Mutex<HashMap<StickId, (DateTime<Utc>, u32)>>,
     log: Option<Mutex<File>>,
+    pub(crate) download: Option<Download>,
     pub(crate) clock: Box<dyn Fn() -> DateTime<Utc> + Send + Sync>,
 }
 
 impl Hub {
+    /// Lets the Hub hand out files from a private container through `/download/...` links.
+    #[must_use]
+    pub fn with_download(mut self, download: Download) -> Self {
+        self.download = Some(download);
+        self
+    }
+
     #[must_use]
     pub fn new(
         registry: Registry,
@@ -107,6 +116,7 @@ impl Hub {
             write: Mutex::new(()),
             rates: Mutex::new(HashMap::new()),
             log: log.map(Mutex::new),
+            download: None,
             clock,
         }
     }

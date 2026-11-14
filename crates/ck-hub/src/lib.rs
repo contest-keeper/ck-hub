@@ -2,6 +2,7 @@
 //! shows organizers the state of every stick.
 
 mod accounts;
+mod download;
 mod hub;
 mod postgres_store;
 mod register;
@@ -13,6 +14,7 @@ pub use accounts::{
     AccessError, Account, CreateUserError, LoginError, MAX_FAILED_LOGINS, MIN_PASSWORD_LENGTH,
     NAME_LOCKOUT_SECONDS, PasswordCost, SESSION_LIFETIME_HOURS, create_user,
 };
+pub use download::{Download, DownloadError, LINK_LIFETIME_MINUTES};
 pub use hub::{Hub, LastHeartbeat, ONLINE_WINDOW_SECONDS, Rejection, StickView};
 pub use postgres_store::PostgresStore;
 pub use register::{NewStick, RegisterError, Registered, register_sticks};

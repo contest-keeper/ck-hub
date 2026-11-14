@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use ck_hub::{
-    CreateUserError, Hub, MIN_PASSWORD_LENGTH, MemoryStore, NewStick, PasswordCost, PostgresStore,
-    RegisterError, Registry, Role, Store, create_user, register_sticks, router,
+    CreateUserError, Download, Hub, MIN_PASSWORD_LENGTH, MemoryStore, NewStick, PasswordCost,
+    PostgresStore, RegisterError, Registry, Role, Store, create_user, register_sticks, router,
 };
 use clap::{Args, Parser, Subcommand};
 
@@ -49,6 +49,26 @@ struct ServeArgs {
     /// A file to add one line to for every heartbeat, accepted or not. No secrets go in it
     #[arg(long)]
     log: Option<PathBuf>,
+    #[command(flatten)]
+    download: DownloadArgs,
+}
+
+#[derive(Args)]
+struct DownloadArgs {
+    /// The Azure Storage account that holds the downloads. Without it `/download/...` answers 404
+    #[arg(long, env = "CK_DOWNLOAD_ACCOUNT", requires = "download_key")]
+    download_account: Option<String>,
+    /// The private container inside that account
+    #[arg(long, env = "CK_DOWNLOAD_CONTAINER", default_value = "downloads")]
+    download_container: String,
+    /// The account key the short-lived download links are signed with
+    #[arg(
+        long,
+        env = "CK_DOWNLOAD_KEY",
+        hide_env_values = true,
+        requires = "download_account"
+    )]
+    download_key: Option<String>,
 }
 
 #[derive(Args)]
@@ -230,7 +250,15 @@ async fn run(args: ServeArgs) -> Result<(), String> {
             "no database and no --registry: the Hub knows no stick and refuses every heartbeat"
         );
     }
-    let hub = Arc::new(Hub::new(registry, store, log, Box::new(Utc::now)));
+    let mut hub = Hub::new(registry, store, log, Box::new(Utc::now));
+    if let (Some(account), Some(key)) =
+        (&args.download.download_account, &args.download.download_key)
+    {
+        let download = Download::new(account, &args.download.download_container, key)
+            .map_err(|e| e.to_string())?;
+        hub = hub.with_download(download);
+    }
+    let hub = Arc::new(hub);
 
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
