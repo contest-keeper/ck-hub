@@ -23,7 +23,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: contest-keeper/ck-hub-setup/.github/workflows/deploy.yml@develop
+    uses: contest-keeper/ck-infra/.github/workflows/deploy.yml@develop
     with:
       environment: develop
       image_tag: ${{ needs.image.outputs.image_tag }}
