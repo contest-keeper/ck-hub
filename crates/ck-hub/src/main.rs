@@ -53,6 +53,8 @@ struct ServeArgs {
     download: DownloadArgs,
 }
 
+// The field names make the flags `--download-account` and so on, so the shared prefix stays.
+#[allow(clippy::struct_field_names)]
 #[derive(Args)]
 struct DownloadArgs {
     /// The Azure Storage account that holds the downloads. Without it `/download/...` answers 404
