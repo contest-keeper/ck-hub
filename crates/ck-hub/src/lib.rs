@@ -23,5 +23,5 @@ pub use registry::{Registry, RegistryError};
 pub use routes::router;
 pub use store::{
     Membership, MemoryStore, NewUser, Organization, Role, SeenHeartbeat, Stick, Store, StoreError,
-    StoredEvent, User,
+    StoredEvent, TokenPurpose, User,
 };

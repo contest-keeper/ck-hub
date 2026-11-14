@@ -378,6 +378,8 @@ pub fn create_user(
         .create_user(NewUser {
             email: email.to_owned(),
             password_hash,
+            email_verified_at: Some(Utc::now()),
+            created_at: Utc::now(),
         })
         .map_err(|error| {
             unavailable(&error);
