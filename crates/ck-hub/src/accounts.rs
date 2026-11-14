@@ -1,4 +1,4 @@
-//! Organizer accounts: logging in, sessions and roles.
+//! Accounts: logging in, sessions, organizations and roles.
 //!
 //! Sticks do not use this. They sign their messages with their own secret.
 
@@ -10,11 +10,11 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use chrono::{DateTime, Duration, Utc};
 
 use crate::hub::Hub;
-use crate::store::{Role, Store, StoreError, User};
+use crate::store::{Membership, NewUser, Organization, Role, Store, StoreError, User};
 
 /// A session ends this long after the login, used or not.
 pub const SESSION_LIFETIME_HOURS: i64 = 12;
-/// Wrong passwords tried for one name before it is locked for [`NAME_LOCKOUT_SECONDS`].
+/// Wrong passwords tried for one email before it is locked for [`NAME_LOCKOUT_SECONDS`].
 pub const MAX_FAILED_LOGINS: u32 = 5;
 pub const NAME_LOCKOUT_SECONDS: i64 = 300;
 /// Wrong passwords tried for any names in [`ALL_LOCKOUT_SECONDS`], which stops guessing across
@@ -22,7 +22,7 @@ pub const NAME_LOCKOUT_SECONDS: i64 = 300;
 pub const MAX_FAILED_LOGINS_ALL: u32 = 60;
 pub const ALL_LOCKOUT_SECONDS: i64 = 60;
 pub const MIN_PASSWORD_LENGTH: usize = 12;
-pub const MAX_NAME_LENGTH: usize = 64;
+pub const MAX_EMAIL_LENGTH: usize = 254;
 
 /// How much work hashing a password takes. The default is the minimum OWASP recommends for
 /// Argon2id; a slower machine can afford more.
@@ -53,22 +53,44 @@ pub enum LoginError {
 pub enum AccessError {
     /// No session, or one that ended.
     Unauthorized,
-    /// A session whose role is not allowed to do this.
+    /// No such organization, or the user is not a member. The two look the same.
+    NotFound,
+    /// A member whose role is not allowed to do this.
     Forbidden,
+    /// No organization was named and the user belongs to several.
+    Ambiguous,
     Unavailable,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CreateUserError {
-    BadName,
+    BadEmail,
     PasswordTooShort,
-    NameTaken,
+    EmailTaken,
+    Unavailable,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum OrganizationError {
+    BadSlug,
+    SlugTaken,
+    NoSuchOrganization,
+    NoSuchUser,
+    AlreadyMember,
     Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Account {
-    pub name: String,
+    pub id: String,
+    pub email: String,
+}
+
+/// Who is asking, in which organization, and with what role.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Access {
+    pub account: Account,
+    pub organization: Organization,
     pub role: Role,
 }
 
@@ -143,29 +165,31 @@ fn unavailable(error: &StoreError) {
 }
 
 impl Hub {
-    pub fn create_user(
-        &self,
-        name: &str,
-        password: &str,
-        role: Role,
-    ) -> Result<(), CreateUserError> {
-        create_user(
-            self.store.as_ref(),
-            self.accounts.cost,
-            name,
-            password,
-            role,
-        )
+    pub fn create_user(&self, email: &str, password: &str) -> Result<User, CreateUserError> {
+        create_user(self.store.as_ref(), self.accounts.cost, email, password)
     }
 
-    /// Checks a name and password. On success returns the session token for the browser's cookie.
-    pub fn login(&self, name: &str, password: &str) -> Result<(String, Account), LoginError> {
+    pub fn create_organization(
+        &self,
+        slug: &str,
+        name: &str,
+        owner_email: &str,
+    ) -> Result<Organization, OrganizationError> {
+        create_organization(self.store.as_ref(), slug, name, owner_email)
+    }
+
+    pub fn add_member(&self, slug: &str, email: &str, role: Role) -> Result<(), OrganizationError> {
+        add_member(self.store.as_ref(), slug, email, role)
+    }
+
+    /// Checks an email and password. On success returns the session token for the browser's cookie.
+    pub fn login(&self, email: &str, password: &str) -> Result<(String, Account), LoginError> {
         let now = (self.clock)();
-        // No account has a longer name, so such a name is only counted with all the others: it
+        // No account has a longer email, so such a text is only counted with all the others: it
         // must not make the Hub remember text of any size a stranger sends.
-        let key = (name.chars().count() <= MAX_NAME_LENGTH).then(|| name.to_lowercase());
+        let key = (email.chars().count() <= MAX_EMAIL_LENGTH).then(|| email.to_lowercase());
         let accounts = &self.accounts;
-        // A locked name or a flood of guesses is refused before any hashing is done.
+        // A locked email or a flood of guesses is refused before any hashing is done.
         if key
             .as_deref()
             .is_some_and(|key| accounts.blocked(key, now, MAX_FAILED_LOGINS, NAME_LOCKOUT_SECONDS))
@@ -174,7 +198,7 @@ impl Hub {
             return Err(LoginError::TooManyAttempts);
         }
 
-        let user = self.store.user(name).map_err(|error| {
+        let user = self.store.user_by_email(email).map_err(|error| {
             unavailable(&error);
             LoginError::Unavailable
         })?;
@@ -205,7 +229,7 @@ impl Hub {
         self.store
             .create_session(
                 &token_hash(&token),
-                &user.name,
+                &user.id,
                 now + Duration::hours(SESSION_LIFETIME_HOURS),
             )
             .map_err(|error| {
@@ -215,20 +239,20 @@ impl Hub {
         Ok((
             token,
             Account {
-                name: user.name,
-                role: user.role,
+                id: user.id,
+                email: user.email,
             },
         ))
     }
 
-    /// Who the session token belongs to, if its role may do what `needed` asks.
-    pub fn access(&self, token: &str, needed: Role) -> Result<Account, AccessError> {
+    /// The account a session token belongs to.
+    pub fn account(&self, token: &str) -> Result<Account, AccessError> {
         let hash = token_hash(token);
         let store_failed = |error: StoreError| {
             unavailable(&error);
             AccessError::Unavailable
         };
-        let (name, ends) = self
+        let (user_id, ends) = self
             .store
             .session(&hash)
             .map_err(store_failed)?
@@ -237,18 +261,70 @@ impl Hub {
             self.store.delete_session(&hash).map_err(store_failed)?;
             return Err(AccessError::Unauthorized);
         }
-        // The role is read now, so a changed role applies to a session that is already open.
         let user = self
             .store
-            .user(&name)
+            .user(&user_id)
             .map_err(store_failed)?
             .ok_or(AccessError::Unauthorized)?;
-        if !user.role.allows(needed) {
+        Ok(Account {
+            id: user.id,
+            email: user.email,
+        })
+    }
+
+    /// The organizations the account belongs to.
+    pub fn organizations_of(&self, account: &Account) -> Result<Vec<Membership>, AccessError> {
+        self.store.memberships(&account.id).map_err(|error| {
+            unavailable(&error);
+            AccessError::Unavailable
+        })
+    }
+
+    /// The account, if it is a member of the organization with this slug and its role may do what
+    /// `needed` asks for.
+    pub fn access(&self, token: &str, slug: &str, needed: Role) -> Result<Access, AccessError> {
+        let account = self.account(token)?;
+        let store_failed = |error: StoreError| {
+            unavailable(&error);
+            AccessError::Unavailable
+        };
+        let organization = self
+            .store
+            .organization_by_slug(slug)
+            .map_err(store_failed)?
+            .ok_or(AccessError::NotFound)?;
+        // The role is read now, so a changed role applies to a session that is already open.
+        let role = self
+            .store
+            .membership(&organization.id, &account.id)
+            .map_err(store_failed)?
+            .ok_or(AccessError::NotFound)?;
+        if !role.allows(needed) {
             return Err(AccessError::Forbidden);
         }
-        Ok(Account {
-            name: user.name,
-            role: user.role,
+        Ok(Access {
+            account,
+            organization,
+            role,
+        })
+    }
+
+    /// For the routes without an organization in the address: the one the account belongs to.
+    pub fn access_sole(&self, token: &str, needed: Role) -> Result<Access, AccessError> {
+        let account = self.account(token)?;
+        let mut memberships = self.organizations_of(&account)?;
+        let membership = match memberships.len() {
+            0 => return Err(AccessError::NotFound),
+            1 => memberships.remove(0),
+            _ => return Err(AccessError::Ambiguous),
+        };
+        if !membership.role.allows(needed) {
+            return Err(AccessError::Forbidden);
+        }
+        Ok(Access {
+            account,
+            organization: membership.organization,
+            role: membership.role,
         })
     }
 
@@ -260,20 +336,36 @@ impl Hub {
     }
 }
 
-/// Adds an organizer account to `store`: checks the name and the password, and keeps only a hash of
-/// the password. `ck-hub create-user` uses this without starting a Hub.
+fn valid_email(email: &str) -> bool {
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+    email.chars().count() <= MAX_EMAIL_LENGTH
+        && !local.is_empty()
+        && !domain.is_empty()
+        && !domain.contains('@')
+        && !email.chars().any(|c| c.is_control() || c.is_whitespace())
+}
+
+fn valid_slug(slug: &str) -> bool {
+    (1..=63).contains(&slug.len())
+        && slug
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !slug.starts_with('-')
+        && !slug.ends_with('-')
+}
+
+/// Adds an account to `store`: checks the email and the password, and keeps only a hash of the
+/// password. `ck-hub create-user` uses this without starting a Hub.
 pub fn create_user(
     store: &dyn Store,
     cost: PasswordCost,
-    name: &str,
+    email: &str,
     password: &str,
-    role: Role,
-) -> Result<(), CreateUserError> {
-    let valid_name = !name.trim().is_empty()
-        && name.chars().count() <= MAX_NAME_LENGTH
-        && !name.chars().any(char::is_control);
-    if !valid_name {
-        return Err(CreateUserError::BadName);
+) -> Result<User, CreateUserError> {
+    if !valid_email(email) {
+        return Err(CreateUserError::BadEmail);
     }
     if password.chars().count() < MIN_PASSWORD_LENGTH {
         return Err(CreateUserError::PasswordTooShort);
@@ -283,19 +375,71 @@ pub fn create_user(
         CreateUserError::Unavailable
     })?;
     let created = store
-        .create_user(User {
-            name: name.to_owned(),
+        .create_user(NewUser {
+            email: email.to_owned(),
             password_hash,
-            role,
         })
         .map_err(|error| {
             unavailable(&error);
             CreateUserError::Unavailable
         })?;
-    if created {
+    created.ok_or(CreateUserError::EmailTaken)
+}
+
+/// Makes an organization whose first owner is the account with `owner_email`.
+pub fn create_organization(
+    store: &dyn Store,
+    slug: &str,
+    name: &str,
+    owner_email: &str,
+) -> Result<Organization, OrganizationError> {
+    let store_failed = |error: StoreError| {
+        unavailable(&error);
+        OrganizationError::Unavailable
+    };
+    if !valid_slug(slug) || name.trim().is_empty() || name.chars().any(char::is_control) {
+        return Err(OrganizationError::BadSlug);
+    }
+    let owner = store
+        .user_by_email(owner_email)
+        .map_err(store_failed)?
+        .ok_or(OrganizationError::NoSuchUser)?;
+    let organization = store
+        .create_organization(slug, name)
+        .map_err(store_failed)?
+        .ok_or(OrganizationError::SlugTaken)?;
+    store
+        .add_member(&organization.id, &owner.id, Role::Owner)
+        .map_err(store_failed)?;
+    Ok(organization)
+}
+
+/// Makes the account with `email` a member of the organization with this slug.
+pub fn add_member(
+    store: &dyn Store,
+    slug: &str,
+    email: &str,
+    role: Role,
+) -> Result<(), OrganizationError> {
+    let store_failed = |error: StoreError| {
+        unavailable(&error);
+        OrganizationError::Unavailable
+    };
+    let organization = store
+        .organization_by_slug(slug)
+        .map_err(store_failed)?
+        .ok_or(OrganizationError::NoSuchOrganization)?;
+    let user = store
+        .user_by_email(email)
+        .map_err(store_failed)?
+        .ok_or(OrganizationError::NoSuchUser)?;
+    if store
+        .add_member(&organization.id, &user.id, role)
+        .map_err(store_failed)?
+    {
         Ok(())
     } else {
-        Err(CreateUserError::NameTaken)
+        Err(OrganizationError::AlreadyMember)
     }
 }
 

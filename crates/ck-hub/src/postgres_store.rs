@@ -7,11 +7,14 @@ use ck_protocol::{Event, Heartbeat, StickId, Token};
 use postgres::Client;
 use tokio_postgres_rustls::MakeRustlsConnect;
 
-use crate::store::{Role, SeenHeartbeat, Stick, Store, StoreError, StoredEvent, User};
+use crate::store::{
+    Membership, NewUser, Organization, Role, SeenHeartbeat, Stick, Store, StoreError, StoredEvent,
+    User,
+};
 
 /// The schema, in the order it is applied. A migration that was applied is never run again and
 /// never edited: a change is a new file.
-const MIGRATIONS: [(&str, &str); 4] = [
+const MIGRATIONS: [(&str, &str); 6] = [
     (
         "0001_heartbeats_and_events",
         include_str!("../migrations/0001_heartbeats_and_events.sql"),
@@ -24,6 +27,14 @@ const MIGRATIONS: [(&str, &str); 4] = [
     (
         "0004_heartbeat_boots",
         include_str!("../migrations/0004_heartbeat_boots.sql"),
+    ),
+    (
+        "0005_organizations_and_memberships",
+        include_str!("../migrations/0005_organizations_and_memberships.sql"),
+    ),
+    (
+        "0006_organization_scoping",
+        include_str!("../migrations/0006_organization_scoping.sql"),
     ),
 ];
 
@@ -84,6 +95,37 @@ impl PostgresStore {
     }
 }
 
+impl PostgresStore {
+    /// Whether row-level security binds the role the Hub connects as. It does not for a superuser
+    /// or a role with `BYPASSRLS`: then only the store's own filters keep organizations apart.
+    pub fn row_security_applies(&self) -> Result<bool, StoreError> {
+        let row = self.run(|client| {
+            client.query_one(
+                "SELECT NOT (rolsuper OR rolbypassrls) FROM pg_roles WHERE rolname = current_user",
+                &[],
+            )
+        })?;
+        Ok(row.get(0))
+    }
+
+    /// Like [`run`](Self::run), inside a transaction that names the organization, so row-level
+    /// security shows only its rows. Every query also names the organization itself: that is the
+    /// rule, and row security is the second guard for a query that forgets it.
+    fn in_org<T>(
+        &self,
+        organization: &str,
+        query: impl FnOnce(&mut postgres::Transaction<'_>) -> Result<T, postgres::Error>,
+    ) -> Result<T, StoreError> {
+        self.run(|client| {
+            let mut transaction = client.transaction()?;
+            transaction.execute("SELECT set_config('ck.org_id', $1, true)", &[&organization])?;
+            let result = query(&mut transaction)?;
+            transaction.commit()?;
+            Ok(result)
+        })
+    }
+}
+
 impl Drop for PostgresStore {
     /// Closing the connection blocks and starts a runtime of its own, which panics on a thread that
     /// already runs async tasks, such as the Hub's at shutdown. A plain thread does it safely.
@@ -138,26 +180,37 @@ fn apply_migrations(client: &mut Client) -> Result<(), StoreError> {
 impl Store for PostgresStore {
     fn record_heartbeat(
         &self,
+        organization: &str,
         heartbeat: Heartbeat,
         received_at: DateTime<Utc>,
     ) -> Result<(), StoreError> {
         let json = serde_json::to_value(&heartbeat).map_err(failed)?;
         let seq = i64::try_from(heartbeat.seq).map_err(failed)?;
-        self.run(|client| {
-            client.execute(
-                "INSERT INTO heartbeat_boots (stick_id, boot_id, seq) VALUES ($1, $2, $3)
+        self.in_org(organization, |transaction| {
+            transaction.execute(
+                "INSERT INTO heartbeat_boots (organization_id, stick_id, boot_id, seq)
+                 VALUES ($1, $2, $3, $4)
                  ON CONFLICT (stick_id, boot_id)
-                 DO UPDATE SET seq = GREATEST(heartbeat_boots.seq, EXCLUDED.seq)",
-                &[&heartbeat.stick_id.as_str(), &heartbeat.boot_id, &seq],
+                 DO UPDATE SET seq = GREATEST(heartbeat_boots.seq, EXCLUDED.seq)
+                 WHERE heartbeat_boots.organization_id = EXCLUDED.organization_id",
+                &[
+                    &organization,
+                    &heartbeat.stick_id.as_str(),
+                    &heartbeat.boot_id,
+                    &seq,
+                ],
             )?;
-            client.execute(
-                "INSERT INTO heartbeats (stick_id, boot_id, seq, received_at, count, heartbeat)
-                 VALUES ($1, $2, $3, $4, 1, $5)
+            transaction.execute(
+                "INSERT INTO heartbeats
+                     (organization_id, stick_id, boot_id, seq, received_at, count, heartbeat)
+                 VALUES ($1, $2, $3, $4, $5, 1, $6)
                  ON CONFLICT (stick_id) DO UPDATE SET
                      boot_id = EXCLUDED.boot_id, seq = EXCLUDED.seq,
                      received_at = EXCLUDED.received_at, heartbeat = EXCLUDED.heartbeat,
-                     count = heartbeats.count + 1",
+                     count = heartbeats.count + 1
+                 WHERE heartbeats.organization_id = EXCLUDED.organization_id",
                 &[
+                    &organization,
                     &heartbeat.stick_id.as_str(),
                     &heartbeat.boot_id,
                     &seq,
@@ -169,11 +222,16 @@ impl Store for PostgresStore {
         Ok(())
     }
 
-    fn last_heartbeat(&self, stick: &StickId) -> Result<Option<SeenHeartbeat>, StoreError> {
-        let row = self.run(|client| {
-            client.query_opt(
-                "SELECT heartbeat, received_at, count FROM heartbeats WHERE stick_id = $1",
-                &[&stick.as_str()],
+    fn last_heartbeat(
+        &self,
+        organization: &str,
+        stick: &StickId,
+    ) -> Result<Option<SeenHeartbeat>, StoreError> {
+        let row = self.in_org(organization, |transaction| {
+            transaction.query_opt(
+                "SELECT heartbeat, received_at, count FROM heartbeats
+                 WHERE organization_id = $1 AND stick_id = $2",
+                &[&organization, &stick.as_str()],
             )
         })?;
         let Some(row) = row else { return Ok(None) };
@@ -188,13 +246,15 @@ impl Store for PostgresStore {
 
     fn heartbeat_seq_of_boot(
         &self,
+        organization: &str,
         stick: &StickId,
         boot: &str,
     ) -> Result<Option<u64>, StoreError> {
-        let row = self.run(|client| {
-            client.query_opt(
-                "SELECT seq FROM heartbeat_boots WHERE stick_id = $1 AND boot_id = $2",
-                &[&stick.as_str(), &boot],
+        let row = self.in_org(organization, |transaction| {
+            transaction.query_opt(
+                "SELECT seq FROM heartbeat_boots
+                 WHERE organization_id = $1 AND stick_id = $2 AND boot_id = $3",
+                &[&organization, &stick.as_str(), &boot],
             )
         })?;
         row.map(|row| u64::try_from(row.get::<_, i64>(0)).map_err(failed))
@@ -203,14 +263,16 @@ impl Store for PostgresStore {
 
     fn last_event_of_boot(
         &self,
+        organization: &str,
         stick: &StickId,
         boot: &str,
     ) -> Result<Option<StoredEvent>, StoreError> {
-        let row = self.run(|client| {
-            client.query_opt(
+        let row = self.in_org(organization, |transaction| {
+            transaction.query_opt(
                 "SELECT event, received_at, integrity FROM events
-                 WHERE stick_id = $1 AND boot_id = $2 ORDER BY id DESC LIMIT 1",
-                &[&stick.as_str(), &boot],
+                 WHERE organization_id = $1 AND stick_id = $2 AND boot_id = $3
+                 ORDER BY id DESC LIMIT 1",
+                &[&organization, &stick.as_str(), &boot],
             )
         })?;
         let Some(row) = row else { return Ok(None) };
@@ -224,17 +286,20 @@ impl Store for PostgresStore {
 
     fn append_event(
         &self,
+        organization: &str,
         event: Event,
         received_at: DateTime<Utc>,
         integrity: Option<String>,
     ) -> Result<(), StoreError> {
         let json = serde_json::to_value(&event).map_err(failed)?;
         let seq = i64::try_from(event.seq).map_err(failed)?;
-        self.run(|client| {
-            client.execute(
-                "INSERT INTO events (stick_id, boot_id, seq, received_at, integrity, event)
-                 VALUES ($1, $2, $3, $4, $5, $6)",
+        self.in_org(organization, |transaction| {
+            transaction.execute(
+                "INSERT INTO events
+                     (organization_id, stick_id, boot_id, seq, received_at, integrity, event)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
                 &[
+                    &organization,
                     &event.stick_id.as_str(),
                     &event.boot_id,
                     &seq,
@@ -247,11 +312,12 @@ impl Store for PostgresStore {
         Ok(())
     }
 
-    fn events(&self, stick: &StickId) -> Result<Vec<StoredEvent>, StoreError> {
-        let rows = self.run(|client| {
-            client.query(
-                "SELECT event, received_at, integrity FROM events WHERE stick_id = $1 ORDER BY id",
-                &[&stick.as_str()],
+    fn events(&self, organization: &str, stick: &StickId) -> Result<Vec<StoredEvent>, StoreError> {
+        let rows = self.in_org(organization, |transaction| {
+            transaction.query(
+                "SELECT event, received_at, integrity FROM events
+                 WHERE organization_id = $1 AND stick_id = $2 ORDER BY id",
+                &[&organization, &stick.as_str()],
             )
         })?;
         let mut events = Vec::with_capacity(rows.len());
@@ -266,43 +332,134 @@ impl Store for PostgresStore {
         Ok(events)
     }
 
-    fn create_user(&self, user: User) -> Result<bool, StoreError> {
-        let created = self.run(|client| {
-            client.execute(
-                "INSERT INTO users (name, password_hash, role) VALUES ($1, $2, $3)
-                 ON CONFLICT (name) DO NOTHING",
-                &[&user.name, &user.password_hash, &user.role.as_str()],
-            )
-        })?;
-        Ok(created == 1)
-    }
-
-    fn user(&self, name: &str) -> Result<Option<User>, StoreError> {
+    fn create_user(&self, user: NewUser) -> Result<Option<User>, StoreError> {
         let row = self.run(|client| {
             client.query_opt(
-                "SELECT name, password_hash, role FROM users WHERE name = $1",
-                &[&name],
+                "INSERT INTO users (email, password_hash) VALUES ($1, $2)
+                 ON CONFLICT DO NOTHING RETURNING id, email, password_hash",
+                &[&user.email, &user.password_hash],
             )
         })?;
-        let Some(row) = row else { return Ok(None) };
-        let role: String = row.get(2);
-        Ok(Some(User {
-            name: row.get(0),
-            password_hash: row.get(1),
-            role: Role::parse(&role).ok_or_else(|| failed(format!("unknown role {role}")))?,
-        }))
+        Ok(row.as_ref().map(user_from))
+    }
+
+    fn user_by_email(&self, email: &str) -> Result<Option<User>, StoreError> {
+        let row = self.run(|client| {
+            client.query_opt(
+                "SELECT id, email, password_hash FROM users WHERE lower(email) = lower($1)",
+                &[&email],
+            )
+        })?;
+        Ok(row.as_ref().map(user_from))
+    }
+
+    fn user(&self, id: &str) -> Result<Option<User>, StoreError> {
+        let row = self.run(|client| {
+            client.query_opt(
+                "SELECT id, email, password_hash FROM users WHERE id = $1",
+                &[&id],
+            )
+        })?;
+        Ok(row.as_ref().map(user_from))
+    }
+
+    fn create_organization(
+        &self,
+        slug: &str,
+        name: &str,
+    ) -> Result<Option<Organization>, StoreError> {
+        let row = self.run(|client| {
+            client.query_opt(
+                "INSERT INTO organizations (slug, name) VALUES ($1, $2)
+                 ON CONFLICT (slug) DO NOTHING RETURNING id, slug, name",
+                &[&slug, &name],
+            )
+        })?;
+        Ok(row.as_ref().map(organization_from))
+    }
+
+    fn ensure_organization(&self, slug: &str, name: &str) -> Result<Organization, StoreError> {
+        let row = self.run(|client| {
+            client.execute(
+                "INSERT INTO organizations (slug, name) VALUES ($1, $2)
+                 ON CONFLICT (slug) DO NOTHING",
+                &[&slug, &name],
+            )?;
+            client.query_one(
+                "SELECT id, slug, name FROM organizations WHERE slug = $1",
+                &[&slug],
+            )
+        })?;
+        Ok(organization_from(&row))
+    }
+
+    fn organization_by_slug(&self, slug: &str) -> Result<Option<Organization>, StoreError> {
+        let row = self.run(|client| {
+            client.query_opt(
+                "SELECT id, slug, name FROM organizations WHERE slug = $1",
+                &[&slug],
+            )
+        })?;
+        Ok(row.as_ref().map(organization_from))
+    }
+
+    fn add_member(
+        &self,
+        organization_id: &str,
+        user_id: &str,
+        role: Role,
+    ) -> Result<bool, StoreError> {
+        let added = self.run(|client| {
+            client.execute(
+                "INSERT INTO memberships (organization_id, user_id, role) VALUES ($1, $2, $3)
+                 ON CONFLICT DO NOTHING",
+                &[&organization_id, &user_id, &role.as_str()],
+            )
+        })?;
+        Ok(added == 1)
+    }
+
+    fn membership(&self, organization_id: &str, user_id: &str) -> Result<Option<Role>, StoreError> {
+        let row = self.run(|client| {
+            client.query_opt(
+                "SELECT role FROM memberships WHERE organization_id = $1 AND user_id = $2",
+                &[&organization_id, &user_id],
+            )
+        })?;
+        row.map(|row| role_from(&row.get::<_, String>(0)))
+            .transpose()
+    }
+
+    fn memberships(&self, user_id: &str) -> Result<Vec<Membership>, StoreError> {
+        let rows = self.run(|client| {
+            client.query(
+                "SELECT organizations.id, organizations.slug, organizations.name, memberships.role
+                 FROM memberships
+                 JOIN organizations ON organizations.id = memberships.organization_id
+                 WHERE memberships.user_id = $1 ORDER BY organizations.slug",
+                &[&user_id],
+            )
+        })?;
+        rows.iter()
+            .map(|row| {
+                Ok(Membership {
+                    organization: organization_from(row),
+                    role: role_from(&row.get::<_, String>(3))?,
+                })
+            })
+            .collect()
     }
 
     fn create_session(
         &self,
         token_hash: &str,
-        user: &str,
+        user_id: &str,
         expires_at: DateTime<Utc>,
     ) -> Result<(), StoreError> {
         self.run(|client| {
             client.execute(
-                "INSERT INTO sessions (token_hash, user_name, expires_at) VALUES ($1, $2, $3)",
-                &[&token_hash, &user, &expires_at],
+                "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)",
+                &[&token_hash, &user_id, &expires_at],
             )
         })?;
         Ok(())
@@ -311,7 +468,7 @@ impl Store for PostgresStore {
     fn session(&self, token_hash: &str) -> Result<Option<(String, DateTime<Utc>)>, StoreError> {
         let row = self.run(|client| {
             client.query_opt(
-                "SELECT user_name, expires_at FROM sessions WHERE token_hash = $1",
+                "SELECT user_id, expires_at FROM sessions WHERE token_hash = $1",
                 &[&token_hash],
             )
         })?;
@@ -330,17 +487,21 @@ impl Store for PostgresStore {
         Ok(())
     }
 
-    fn add_stick(&self, stick: Stick) -> Result<bool, StoreError> {
+    fn add_stick(&self, organization: &str, stick: Stick) -> Result<bool, StoreError> {
         let machine = stick
             .machine_number
             .map(i32::try_from)
             .transpose()
             .map_err(failed)?;
-        let added = self.run(|client| {
-            client.execute(
-                "INSERT INTO sticks (stick_id, token, team, site, contest, machine_number)
-                 VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (stick_id) DO NOTHING",
+        // The conflict is on the stick id alone, so an id that belongs to another organization is
+        // refused too.
+        let added = self.in_org(organization, |transaction| {
+            transaction.execute(
+                "INSERT INTO sticks
+                     (organization_id, stick_id, token, team, site, contest, machine_number)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (stick_id) DO NOTHING",
                 &[
+                    &organization,
                     &stick.stick_id.as_str(),
                     &stick.token.expose(),
                     &stick.team,
@@ -353,22 +514,34 @@ impl Store for PostgresStore {
         Ok(added == 1)
     }
 
-    fn stick(&self, id: &StickId) -> Result<Option<Stick>, StoreError> {
+    /// The one lookup that runs without an organization: a stick does not say which one it is in.
+    /// Row-level security lets it read exactly the stick it names.
+    fn stick(&self, id: &StickId) -> Result<Option<(String, Stick)>, StoreError> {
         let row = self.run(|client| {
-            client.query_opt(
-                "SELECT stick_id, token, team, site, contest, machine_number
+            let mut transaction = client.transaction()?;
+            transaction.execute(
+                "SELECT set_config('ck.stick_id', $1, true)",
+                &[&id.as_str()],
+            )?;
+            let row = transaction.query_opt(
+                "SELECT stick_id, token, team, site, contest, machine_number, organization_id
                  FROM sticks WHERE stick_id = $1",
                 &[&id.as_str()],
-            )
+            )?;
+            transaction.commit()?;
+            Ok(row)
         })?;
-        row.as_ref().map(stick_from).transpose()
+        row.as_ref()
+            .map(|row| Ok((row.get::<_, String>(6), stick_from(row)?)))
+            .transpose()
     }
 
-    fn sticks(&self) -> Result<Vec<Stick>, StoreError> {
-        let rows = self.run(|client| {
-            client.query(
-                "SELECT stick_id, token, team, site, contest, machine_number FROM sticks",
-                &[],
+    fn sticks(&self, organization: &str) -> Result<Vec<Stick>, StoreError> {
+        let rows = self.in_org(organization, |transaction| {
+            transaction.query(
+                "SELECT stick_id, token, team, site, contest, machine_number FROM sticks
+                 WHERE organization_id = $1",
+                &[&organization],
             )
         })?;
         rows.iter().map(stick_from).collect()
@@ -387,4 +560,24 @@ fn stick_from(row: &postgres::Row) -> Result<Stick, StoreError> {
         contest: row.get(4),
         machine_number: machine.map(u32::try_from).transpose().map_err(failed)?,
     })
+}
+
+fn user_from(row: &postgres::Row) -> User {
+    User {
+        id: row.get(0),
+        email: row.get(1),
+        password_hash: row.get(2),
+    }
+}
+
+fn organization_from(row: &postgres::Row) -> Organization {
+    Organization {
+        id: row.get(0),
+        slug: row.get(1),
+        name: row.get(2),
+    }
+}
+
+fn role_from(text: &str) -> Result<Role, StoreError> {
+    Role::parse(text).ok_or_else(|| failed(format!("unknown role {text}")))
 }

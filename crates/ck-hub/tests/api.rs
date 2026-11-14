@@ -69,8 +69,14 @@ fn setup() -> Setup {
             memory_kib: 8,
             passes: 1,
         });
-    hub.create_user("organizer", ORGANIZER_PASSWORD, Role::Viewer)
+    hub.create_user("owner@example.org", ORGANIZER_PASSWORD)
+        .expect("an owner");
+    hub.create_user("organizer@example.org", ORGANIZER_PASSWORD)
         .expect("an organizer");
+    hub.create_organization("default", "Default", "owner@example.org")
+        .expect("an organization");
+    hub.add_member("default", "organizer@example.org", Role::Viewer)
+        .expect("a viewer");
     let app = router(Arc::new(hub));
     Setup { dir, app, now }
 }
@@ -139,7 +145,7 @@ async fn organizer_cookie(app: &Router) -> String {
     let request = Request::post("/api/v1/login")
         .header("content-type", "application/json")
         .body(Body::from(
-            serde_json::json!({ "username": "organizer", "password": ORGANIZER_PASSWORD })
+            serde_json::json!({ "email": "organizer@example.org", "password": ORGANIZER_PASSWORD })
                 .to_string(),
         ))
         .expect("request");
@@ -386,8 +392,8 @@ async fn the_page_is_served_and_needs_nothing_from_outside() {
         .to_bytes();
     let page = String::from_utf8_lossy(&bytes);
     assert!(
-        page.contains("/api/v1/sticks"),
-        "the page reads the stick list"
+        page.contains("/api/v1/orgs/") && page.contains("/sticks"),
+        "the page reads the stick list of an organization"
     );
     // Everything is in the one file: no scripts, styles or images from another address.
     assert!(

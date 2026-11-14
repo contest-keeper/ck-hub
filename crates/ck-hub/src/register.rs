@@ -78,14 +78,16 @@ fn check(stick: &NewStick) -> Result<(), String> {
     Ok(())
 }
 
-/// Registers `sticks` in `store`. `in_file` is the secret of a stick the registry file already has.
+/// Registers `sticks` in the organization. `in_file` names the organization and the secret of a
+/// stick the registry file already has.
 ///
 /// Every stick is checked before any is written. A stick that is already known with the same
 /// secret is left alone, so sending the same registry twice is safe; one known with a different
 /// secret is reported and left alone, never overwritten.
 pub fn register_sticks(
     store: &dyn Store,
-    in_file: &dyn Fn(&StickId) -> Option<Token>,
+    organization: &str,
+    in_file: &dyn Fn(&StickId) -> Option<(String, Token)>,
     sticks: Vec<NewStick>,
 ) -> Result<Registered, RegisterError> {
     for stick in &sticks {
@@ -103,10 +105,12 @@ pub fn register_sticks(
             None => store
                 .stick(&new.stick_id)
                 .map_err(unavailable)?
-                .map(|stick| stick.token),
+                .map(|(owner, stick)| (owner, stick.token)),
         };
-        if let Some(known) = known {
-            if known == token {
+        if let Some((owner, known)) = known {
+            // An id that belongs to another organization is reported like a different secret, so
+            // nothing tells this organization which ids exist elsewhere.
+            if owner == organization && known == token {
                 result.already_known += 1;
             } else {
                 result.conflicts.push(new.stick_id.to_string());
@@ -121,7 +125,7 @@ pub fn register_sticks(
             contest: new.contest,
             machine_number: new.machine_number,
         };
-        if store.add_stick(stick).map_err(unavailable)? {
+        if store.add_stick(organization, stick).map_err(unavailable)? {
             result.added += 1;
         } else {
             // Another request registered it between the check and the write.
@@ -133,11 +137,24 @@ pub fn register_sticks(
 
 impl Hub {
     /// See [`register_sticks`].
-    pub fn register_sticks(&self, sticks: Vec<NewStick>) -> Result<Registered, RegisterError> {
+    pub fn register_sticks(
+        &self,
+        organization: &str,
+        sticks: Vec<NewStick>,
+    ) -> Result<Registered, RegisterError> {
+        let file_organization = self.default_org_id().map_err(|error| {
+            tracing::error!("{error}");
+            RegisterError::Unavailable
+        })?;
         let registry = self.registry.lock().expect("registry lock");
         register_sticks(
             self.store.as_ref(),
-            &|id| registry.find(id).map(|stick| stick.token.clone()),
+            organization,
+            &|id| {
+                registry
+                    .find(id)
+                    .map(|stick| (file_organization.clone(), stick.token.clone()))
+            },
             sticks,
         )
     }
