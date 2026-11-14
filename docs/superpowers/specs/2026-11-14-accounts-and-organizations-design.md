@@ -5,10 +5,10 @@ Date: 2026-11-14. Status: draft, waiting for review.
 ## Goal
 
 Move Keeper Hub from "each organizer runs their own Hub, accounts made by CLI" to a cloud Hub
-(`hub.contest-keeper.com`) that many organizations share. Users register and log in, belong to
+(`hub.contestkeeper.com`) that many organizations share. Users register and log in, belong to
 organizations, and all sticks, heartbeats and events are stored in the cloud, separated by organization.
 
-An organization that wants more privacy gets a dedicated Hub (for example `rcpc.contest-keeper.com`):
+An organization that wants more privacy gets a dedicated Hub (for example `rcpc.contestkeeper.com`):
 a separate deployment with its own database. It runs the same image and the same schema as the shared
 Hub, with one organization in it. There is no separate dedicated mode in the code.
 

@@ -1137,7 +1137,7 @@ openedFromMail().then(refresh);
     #[arg(long, env = "CK_MAIL", value_enum, requires = "public_url")]
     mail: Option<MailKind>,
     /// The address people reach this Hub at, for the links in mail, such as
-    /// https://hub.contest-keeper.com
+    /// https://hub.contestkeeper.com
     #[arg(long, env = "CK_PUBLIC_URL")]
     public_url: Option<String>,
 ```
