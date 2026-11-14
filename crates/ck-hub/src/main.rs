@@ -371,14 +371,20 @@ async fn run(args: ServeArgs) -> Result<(), String> {
     };
     let has_database = args.database.database_url.is_some();
     let store: Arc<dyn Store> = if let Some(url) = args.database.database_url {
-        let store = connect(url).await?;
-        if !store.row_security_applies().map_err(|e| e.to_string())? {
+        let store = Arc::new(connect(url).await?);
+        // The database client blocks, so it must not run on the threads that serve requests.
+        let probe = Arc::clone(&store);
+        let applies = tokio::task::spawn_blocking(move || probe.row_security_applies())
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        if !applies {
             tracing::warn!(
                 "the database role is a superuser or bypasses row security: organizations are kept \
                  apart only by the Hub's own queries. Connect as a plain role in production"
             );
         }
-        Arc::new(store)
+        store
     } else {
         tracing::warn!(
             "no database: everything is kept in memory, no organizer account exists, and the data \
