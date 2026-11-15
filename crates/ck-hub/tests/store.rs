@@ -551,9 +551,106 @@ fn organizations_are_kept_apart(store: &dyn Store) {
     );
 }
 
+/// Judge submissions are kept once, per organization, and the stick side of the matching can be
+/// read back.
+fn judge_contract(store: &dyn Store) {
+    let id = unique();
+    let make = |tag: &str| {
+        store
+            .create_organization(&format!("{id}-{tag}"), tag)
+            .expect("write")
+            .expect("a new organization")
+            .id
+    };
+    let (org, other) = (make("judge"), make("elsewhere"));
+    let first = ck_hub::JudgeSubmission {
+        submission_id: 10,
+        contest_id: 1900,
+        handles: vec!["tourist".to_owned()],
+        problem_index: "A".to_owned(),
+        submitted_at: time(0),
+    };
+    let second = ck_hub::JudgeSubmission {
+        submission_id: 20,
+        submitted_at: time(60),
+        ..first.clone()
+    };
+
+    let added = store
+        .add_judge_submissions(
+            &org,
+            "codeforces",
+            &[second.clone(), first.clone()],
+            time(5),
+        )
+        .expect("write");
+    assert_eq!(added, 2);
+    let again = store
+        .add_judge_submissions(&org, "codeforces", &[first.clone()], time(9))
+        .expect("write");
+    assert_eq!(again, 0, "a submission seen again changes nothing");
+
+    let kept = store
+        .judge_submissions(&org, "codeforces", 1900)
+        .expect("read");
+    assert_eq!(kept, vec![first.clone(), second]);
+    assert!(
+        store
+            .judge_submissions(&org, "codeforces", 1)
+            .expect("read")
+            .is_empty()
+    );
+    assert!(
+        store
+            .judge_submissions(&org, "kilonova", 1900)
+            .expect("read")
+            .is_empty()
+    );
+    assert!(
+        store
+            .judge_submissions(&other, "codeforces", 1900)
+            .expect("read")
+            .is_empty()
+    );
+
+    // What sticks said: two sticks' Codeforces submits come back in the order received; a login,
+    // another judge's submit and another organization's submit do not.
+    let submit = |stick: &str, seq: u64, judge: &str| Event {
+        kind: EventKind::Submission,
+        payload: serde_json::json!({
+            "judge": judge, "handle": "tourist", "contest_id": 1900,
+            "problem_index": "A", "submission_id": 10,
+        }),
+        ..event(stick, seq, "x")
+    };
+    let (a, b) = (format!("{id}-ja"), format!("{id}-jb"));
+    store
+        .append_event(&org, submit(&a, 1, "codeforces"), time(20), None)
+        .expect("write");
+    store
+        .append_event(&org, event(&a, 2, "login"), time(21), None)
+        .expect("write");
+    store
+        .append_event(&org, submit(&b, 1, "kilonova"), time(22), None)
+        .expect("write");
+    store
+        .append_event(&org, submit(&b, 2, "codeforces"), time(23), None)
+        .expect("write");
+    let elsewhere = format!("{id}-jc");
+    store
+        .append_event(&other, submit(&elsewhere, 1, "codeforces"), time(24), None)
+        .expect("write");
+
+    let seen = store.submission_events(&org).expect("read");
+    let keys: Vec<(String, u64)> = seen.iter().map(|e| (e.key.0.clone(), e.key.2)).collect();
+    assert_eq!(keys, vec![(a, 1), (b, 2)]);
+    assert_eq!(seen[0].submission_id, Some(10));
+}
+
 #[test]
 fn the_memory_store_keeps_its_contract() {
     the_store_contract(&MemoryStore::default());
+    judge_contract(&MemoryStore::default());
     organizations_are_kept_apart(&MemoryStore::default());
 }
 
@@ -565,6 +662,7 @@ fn the_postgres_store_keeps_its_contract() {
     };
     let store = PostgresStore::connect(&url).expect("connect");
     the_store_contract(&store);
+    judge_contract(&store);
     organizations_are_kept_apart(&store);
 }
 

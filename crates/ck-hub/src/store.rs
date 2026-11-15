@@ -13,6 +13,8 @@ use chrono::{DateTime, Utc};
 use ck_protocol::{Event, Heartbeat, StickId, Token};
 use serde::Deserialize;
 
+use crate::judge::{JudgeSubmission, SubmitEvent, submit_event};
+
 #[derive(Debug, thiserror::Error)]
 #[error("the store failed: {0}")]
 pub struct StoreError(pub String);
@@ -192,6 +194,27 @@ pub trait Store: Send + Sync {
     /// Every event of the stick, in the order they were received.
     fn events(&self, organization: &str, stick: &StickId) -> Result<Vec<StoredEvent>, StoreError>;
 
+    /// Keeps the submissions the judge reported that are not kept yet. Returns how many were new.
+    fn add_judge_submissions(
+        &self,
+        organization: &str,
+        judge: &str,
+        submissions: &[JudgeSubmission],
+        received_at: DateTime<Utc>,
+    ) -> Result<usize, StoreError>;
+
+    /// Every kept submission of one contest, oldest first.
+    fn judge_submissions(
+        &self,
+        organization: &str,
+        judge: &str,
+        contest_id: u64,
+    ) -> Result<Vec<JudgeSubmission>, StoreError>;
+
+    /// What every stick of the organization reported as submitted to Codeforces, in the order
+    /// the Hub received it. Events that are not well-formed Codeforces submits are left out.
+    fn submission_events(&self, organization: &str) -> Result<Vec<SubmitEvent>, StoreError>;
+
     /// Adds an account. Returns `None`, and changes nothing, when the email is taken. Capitals
     /// do not matter.
     fn create_user(&self, user: NewUser) -> Result<Option<User>, StoreError>;
@@ -296,6 +319,7 @@ pub struct MemoryStore {
     heartbeats: Mutex<HashMap<(String, StickId), SeenHeartbeat>>,
     boot_seqs: Mutex<HashMap<(String, StickId, String), u64>>,
     events: Mutex<HashMap<(String, StickId), Vec<StoredEvent>>>,
+    judge_submissions: Mutex<Vec<(String, String, JudgeSubmission)>>,
     users: Mutex<Vec<User>>,
     sessions: Mutex<HashMap<String, (String, DateTime<Utc>)>>,
     email_tokens: Mutex<Vec<MailedToken>>,
@@ -413,6 +437,63 @@ impl Store for MemoryStore {
             .get(&(organization.to_owned(), stick.clone()))
             .cloned()
             .unwrap_or_default())
+    }
+
+    fn add_judge_submissions(
+        &self,
+        organization: &str,
+        judge: &str,
+        submissions: &[JudgeSubmission],
+        _received_at: DateTime<Utc>,
+    ) -> Result<usize, StoreError> {
+        let mut kept = self.judge_submissions.lock().expect("judge lock");
+        let mut added = 0;
+        for submission in submissions {
+            let known = kept.iter().any(|(org, kind, old)| {
+                org == organization
+                    && kind == judge
+                    && old.contest_id == submission.contest_id
+                    && old.submission_id == submission.submission_id
+            });
+            if !known {
+                kept.push((
+                    organization.to_owned(),
+                    judge.to_owned(),
+                    submission.clone(),
+                ));
+                added += 1;
+            }
+        }
+        Ok(added)
+    }
+
+    fn judge_submissions(
+        &self,
+        organization: &str,
+        judge: &str,
+        contest_id: u64,
+    ) -> Result<Vec<JudgeSubmission>, StoreError> {
+        let kept = self.judge_submissions.lock().expect("judge lock");
+        let mut found: Vec<JudgeSubmission> = kept
+            .iter()
+            .filter(|(org, kind, s)| {
+                org == organization && kind == judge && s.contest_id == contest_id
+            })
+            .map(|(_, _, s)| s.clone())
+            .collect();
+        found.sort_by_key(|s| s.submitted_at);
+        Ok(found)
+    }
+
+    fn submission_events(&self, organization: &str) -> Result<Vec<SubmitEvent>, StoreError> {
+        let events = self.events.lock().expect("events lock");
+        let mut all: Vec<&StoredEvent> = events
+            .iter()
+            .filter(|((org, _), _)| org == organization)
+            .flat_map(|(_, list)| list.iter())
+            .collect();
+        all.sort_by_key(|stored| stored.received_at);
+        Ok(all.into_iter().filter_map(submit_event).collect())
     }
 
     fn create_user(&self, user: NewUser) -> Result<Option<User>, StoreError> {

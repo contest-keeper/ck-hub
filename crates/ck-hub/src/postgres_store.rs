@@ -7,6 +7,8 @@ use ck_protocol::{Event, Heartbeat, StickId, Token};
 use postgres::Client;
 use tokio_postgres_rustls::MakeRustlsConnect;
 
+use crate::judge::{JudgeSubmission, SubmitEvent, submit_event};
+
 use crate::store::{
     Membership, NewUser, Organization, Role, SeenHeartbeat, Stick, Store, StoreError, StoredEvent,
     TokenPurpose, User,
@@ -14,7 +16,7 @@ use crate::store::{
 
 /// The schema, in the order it is applied. A migration that was applied is never run again and
 /// never edited: a change is a new file.
-const MIGRATIONS: [(&str, &str); 8] = [
+const MIGRATIONS: [(&str, &str); 9] = [
     (
         "0001_heartbeats_and_events",
         include_str!("../migrations/0001_heartbeats_and_events.sql"),
@@ -43,6 +45,10 @@ const MIGRATIONS: [(&str, &str); 8] = [
     (
         "0008_hub_role",
         include_str!("../migrations/0008_hub_role.sql"),
+    ),
+    (
+        "0010_judge_submissions",
+        include_str!("../migrations/0010_judge_submissions.sql"),
     ),
 ];
 
@@ -353,6 +359,96 @@ impl Store for PostgresStore {
             });
         }
         Ok(events)
+    }
+
+    fn add_judge_submissions(
+        &self,
+        organization: &str,
+        judge: &str,
+        submissions: &[JudgeSubmission],
+        received_at: DateTime<Utc>,
+    ) -> Result<usize, StoreError> {
+        let mut numbers = Vec::with_capacity(submissions.len());
+        for submission in submissions {
+            numbers.push((
+                i64::try_from(submission.contest_id).map_err(failed)?,
+                i64::try_from(submission.submission_id).map_err(failed)?,
+            ));
+        }
+        self.in_org(organization, |transaction| {
+            let mut added = 0;
+            for (submission, (contest, id)) in submissions.iter().zip(&numbers) {
+                added += transaction.execute(
+                    "INSERT INTO judge_submissions
+                         (organization_id, judge, contest_id, submission_id, handles,
+                          problem_index, submitted_at, received_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                     ON CONFLICT (organization_id, judge, contest_id, submission_id) DO NOTHING",
+                    &[
+                        &organization,
+                        &judge,
+                        contest,
+                        id,
+                        &submission.handles,
+                        &submission.problem_index,
+                        &submission.submitted_at,
+                        &received_at,
+                    ],
+                )?;
+            }
+            Ok(added)
+        })
+        .map(|added| usize::try_from(added).unwrap_or(0))
+    }
+
+    fn judge_submissions(
+        &self,
+        organization: &str,
+        judge: &str,
+        contest_id: u64,
+    ) -> Result<Vec<JudgeSubmission>, StoreError> {
+        let contest = i64::try_from(contest_id).map_err(failed)?;
+        let rows = self.in_org(organization, |transaction| {
+            transaction.query(
+                "SELECT submission_id, handles, problem_index, submitted_at FROM judge_submissions
+                 WHERE organization_id = $1 AND judge = $2 AND contest_id = $3
+                 ORDER BY submitted_at, id",
+                &[&organization, &judge, &contest],
+            )
+        })?;
+        let mut found = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: i64 = row.get(0);
+            found.push(JudgeSubmission {
+                submission_id: u64::try_from(id).map_err(failed)?,
+                contest_id,
+                handles: row.get(1),
+                problem_index: row.get(2),
+                submitted_at: row.get(3),
+            });
+        }
+        Ok(found)
+    }
+
+    fn submission_events(&self, organization: &str) -> Result<Vec<SubmitEvent>, StoreError> {
+        let rows = self.in_org(organization, |transaction| {
+            transaction.query(
+                "SELECT event, received_at, integrity FROM events
+                 WHERE organization_id = $1 AND event->>'kind' = 'submission' ORDER BY id",
+                &[&organization],
+            )
+        })?;
+        let mut found = Vec::new();
+        for row in rows {
+            let json: serde_json::Value = row.get(0);
+            let stored = StoredEvent {
+                event: serde_json::from_value(json).map_err(failed)?,
+                received_at: row.get(1),
+                integrity: row.get(2),
+            };
+            found.extend(submit_event(&stored));
+        }
+        Ok(found)
     }
 
     fn create_user(&self, user: NewUser) -> Result<Option<User>, StoreError> {
