@@ -14,7 +14,7 @@ use crate::store::{
 
 /// The schema, in the order it is applied. A migration that was applied is never run again and
 /// never edited: a change is a new file.
-const MIGRATIONS: [(&str, &str); 7] = [
+const MIGRATIONS: [(&str, &str); 8] = [
     (
         "0001_heartbeats_and_events",
         include_str!("../migrations/0001_heartbeats_and_events.sql"),
@@ -40,7 +40,21 @@ const MIGRATIONS: [(&str, &str); 7] = [
         "0007_email_verification",
         include_str!("../migrations/0007_email_verification.sql"),
     ),
+    (
+        "0008_hub_role",
+        include_str!("../migrations/0008_hub_role.sql"),
+    ),
 ];
+
+/// The role the Hub works as once the schema is up to date. See migration 0008.
+const HUB_ROLE: &str = "ck_hub_app";
+
+/// Makes a connection work as the plain Hub role. Row-level security then binds it, whoever logged in.
+fn limit_to_hub_role(client: &mut Client) -> Result<(), StoreError> {
+    client
+        .batch_execute(&format!("SET ROLE {HUB_ROLE}"))
+        .map_err(failed)
+}
 
 pub struct PostgresStore {
     url: String,
@@ -77,7 +91,9 @@ impl PostgresStore {
     /// `sslmode=disable` keeps the connection plain for a database on the same machine.
     pub fn connect(url: &str) -> Result<Self, StoreError> {
         let mut client = Client::connect(url, tls()).map_err(failed)?;
+        // Migrations need the account that logged in; everything after them runs as the Hub role.
         migrate(&mut client)?;
+        limit_to_hub_role(&mut client)?;
         Ok(Self {
             url: url.to_owned(),
             client: Mutex::new(Some(client)),
@@ -92,7 +108,9 @@ impl PostgresStore {
         // After the database restarted the old connection is closed for good, so open a new one
         // instead of failing every request until the Hub restarts.
         if slot.as_ref().is_none_or(Client::is_closed) {
-            *slot = Some(Client::connect(&self.url, tls()).map_err(failed)?);
+            let mut client = Client::connect(&self.url, tls()).map_err(failed)?;
+            limit_to_hub_role(&mut client)?;
+            *slot = Some(client);
         }
         let client = slot.as_mut().expect("the connection was just opened");
         query(client).map_err(failed)
@@ -100,8 +118,9 @@ impl PostgresStore {
 }
 
 impl PostgresStore {
-    /// Whether row-level security binds the role the Hub connects as. It does not for a superuser
-    /// or a role with `BYPASSRLS`: then only the store's own filters keep organizations apart.
+    /// Whether row-level security binds the role the Hub works as. It always should, because the Hub
+    /// switches to a plain role (migration 0008); `false` means that did not work, and then only the
+    /// store's own filters keep organizations apart.
     pub fn row_security_applies(&self) -> Result<bool, StoreError> {
         let row = self.run(|client| {
             client.query_one(

@@ -875,10 +875,66 @@ async fn a_hub_on_postgres_answers_real_http_requests() {
     assert_eq!(ours["last"]["seq"], 1);
 }
 
+/// The Hub switches to a plain role after it migrated, so row security binds it even when it logs in as
+/// the server's admin (a superuser here, the server admin in Azure), and again after a reconnect.
 #[test]
-fn postgres_says_whether_row_security_applies_to_the_hub_role() {
+fn postgres_hub_runs_as_a_role_row_security_applies_to_also_after_a_reconnect() {
     let Some(url) = database_url() else { return };
-    let store = PostgresStore::connect(&url).expect("connect");
-    // The test database user is a superuser, so row security does not apply to it.
-    assert!(!store.row_security_applies().expect("read"));
+    let tag = format!("ck-reconnect-{}", unique());
+    let joiner = if url.contains('?') { '&' } else { '?' };
+    let tagged = format!("{url}{joiner}application_name={tag}");
+    let store = PostgresStore::connect(&tagged).expect("connect");
+    assert!(store.row_security_applies().expect("read"));
+
+    // End only this store's own connection, so other tests are left alone.
+    let mut admin = postgres::Client::connect(&url, postgres::NoTls).expect("connect");
+    let ended = admin
+        .query_one(
+            "SELECT count(*) FROM (SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+                                   WHERE application_name = $1) ended",
+            &[&tag],
+        )
+        .expect("end the connection")
+        .get::<_, i64>(0);
+    assert_eq!(ended, 1, "one connection of this store");
+    // The client only learns the connection is gone when it uses it, so the first call fails (as it
+    // always did) and the next one opens a new connection.
+    let _ = store.row_security_applies();
+    assert!(
+        store
+            .row_security_applies()
+            .expect("read after a reconnect"),
+        "the new connection is limited too"
+    );
+}
+
+#[test]
+fn postgres_hub_role_cannot_change_the_schema_or_the_event_log() {
+    let Some(url) = database_url() else { return };
+    let tagged = format!(
+        "{url}{}application_name=ck-limits",
+        if url.contains('?') { '&' } else { '?' }
+    );
+    let _store = PostgresStore::connect(&tagged).expect("connect");
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).expect("connect");
+    let mut transaction = client.transaction().expect("transaction");
+    transaction
+        .batch_execute("SET LOCAL ROLE ck_hub_app")
+        .expect("the hub role exists");
+    for statement in [
+        "CREATE TABLE ck_must_not_exist (x int)",
+        "DROP TABLE schema_migrations",
+        "UPDATE events SET stick_id = stick_id",
+        "DELETE FROM events",
+        "UPDATE schema_migrations SET name = name",
+    ] {
+        transaction.batch_execute("SAVEPOINT s").expect("savepoint");
+        assert!(
+            transaction.batch_execute(statement).is_err(),
+            "the hub role may not run: {statement}"
+        );
+        transaction
+            .batch_execute("ROLLBACK TO SAVEPOINT s")
+            .expect("rollback");
+    }
 }
