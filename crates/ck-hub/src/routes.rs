@@ -629,7 +629,7 @@ async fn staff_create_organization(
 }
 
 async fn staff_organizations(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Response {
-    let result = with_session(hub, &headers, |hub, token| hub.staff_organizations(token)).await;
+    let result = with_session(hub, &headers, Hub::staff_organizations).await;
     match result {
         Err(response) => response,
         Ok(Ok(list)) => Json(

@@ -153,6 +153,19 @@ try { if (localStorage.getItem("ck-theme") === "classic") document.documentEleme
   #login-error.ok { color: var(--accent); }
   #login-links { text-align: center; font-size: 14px; color: var(--muted); }
   #login-links a { color: var(--accent); }
+
+  #notice { display: none; margin-bottom: 14px; padding: 10px 14px; border-radius: var(--radius); background: var(--ok-bg); color: var(--ok); }
+  #notice.bad { background: var(--bad-bg); color: var(--bad); border: 1px solid var(--bad-line); }
+  #people, #staff { margin-top: 32px; }
+  #people h2, #staff h2 { font-size: 20px; font-weight: 700; margin-bottom: 12px; }
+  #people h3 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); font-weight: 600; }
+  .small table { min-width: 0; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+  .row input, .row select { height: 40px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--input-bg); color: var(--text); font: inherit; min-width: 180px; }
+  :root[data-theme="modern"] .row input, :root[data-theme="modern"] .row select { border-color: transparent; }
+  :root[data-theme="classic"] .row input, :root[data-theme="classic"] .row select { height: 30px; border: 0; box-shadow: var(--sunken); background: #fff; }
+  .form-msg { min-height: 1.4em; margin-top: 8px; font-size: 13.5px; color: var(--muted); }
+  .form-msg.bad { color: var(--bad); }
 </style>
 </head>
 <body>
@@ -177,6 +190,7 @@ try { if (localStorage.getItem("ck-theme") === "classic") document.documentEleme
   <span id="who"><select id="org" aria-label="Organization" hidden></select><span id="who-name"></span><button class="btn" id="logout" type="button">Log out</button></span>
 </div></header>
 <main>
+  <div id="notice" role="status"></div>
   <form id="login" autocomplete="on">
     <h2 id="login-title">Log in to Keeper Hub</h2>
     <p class="intro" id="login-intro">See which contest machines are online and which need attention.</p>
@@ -213,6 +227,50 @@ try { if (localStorage.getItem("ck-theme") === "classic") document.documentEleme
       <div id="empty">No sticks yet. Make one with ck-forge and it appears here.</div>
     </div>
     <p class="hint">Problems are listed first. Open a row for the computer name, uptime, recorder, heartbeats and image version.</p>
+    <section id="people" hidden>
+      <h2>People</h2>
+      <div class="wrap small">
+        <table>
+          <thead><tr><th>Email</th><th>Role</th><th><span class="sr">Actions</span></th></tr></thead>
+          <tbody id="members"></tbody>
+        </table>
+      </div>
+      <h3>Waiting for an answer</h3>
+      <div class="wrap small">
+        <table>
+          <thead><tr><th>Email</th><th>Role</th><th>Link works until</th><th><span class="sr">Actions</span></th></tr></thead>
+          <tbody id="invitations"></tbody>
+        </table>
+        <div id="no-invitations" class="hint">No open invitations.</div>
+      </div>
+      <form id="invite-form" class="row">
+        <label for="invite-email" class="sr">Email to invite</label>
+        <input id="invite-email" type="email" placeholder="Email to invite" required autocomplete="off">
+        <label for="invite-role" class="sr">Role</label>
+        <select id="invite-role"></select>
+        <button class="btn pri" type="submit">Send invitation</button>
+      </form>
+      <div id="invite-msg" class="form-msg" role="status"></div>
+    </section>
+    <section id="staff" hidden>
+      <h2>Platform</h2>
+      <div class="wrap small">
+        <table>
+          <thead><tr><th>Organization</th><th>Short name</th></tr></thead>
+          <tbody id="all-orgs"></tbody>
+        </table>
+      </div>
+      <form id="staff-form" class="row">
+        <label for="staff-slug" class="sr">Short name</label>
+        <input id="staff-slug" placeholder="short-name" required autocomplete="off">
+        <label for="staff-name" class="sr">Name</label>
+        <input id="staff-name" placeholder="Name people see" required autocomplete="off">
+        <label for="staff-owner" class="sr">Owner email</label>
+        <input id="staff-owner" type="email" placeholder="First owner's email" required autocomplete="off">
+        <button class="btn pri" type="submit">Make organization and invite its owner</button>
+      </form>
+      <div id="staff-msg" class="form-msg" role="status"></div>
+    </section>
   </div>
 </main>
 <script>
@@ -360,11 +418,133 @@ function showLogin(visible) {
   document.getElementById("live").hidden = visible;
 }
 
+const RANK = { owner: 3, admin: 2, viewer: 1 };
+const rolesBelow = (role) => Object.keys(RANK).filter((r) => RANK[r] < RANK[role]);
+let inviteToken = null;
+let myRole = null;
+let myEmail = null;
+let noticeTimer = null;
+
+async function call(method, path, body) {
+  const response = await fetch(path, {
+    method,
+    cache: "no-store",
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let data = null;
+  try { data = await response.json(); } catch (error) { /* no body, or not JSON */ }
+  return { ok: response.ok, status: response.status, data };
+}
+
+function notice(text, good) {
+  const box = document.getElementById("notice");
+  box.textContent = text;
+  box.className = good ? "" : "bad";
+  box.style.display = "block";
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => { box.style.display = "none"; }, 20000);
+}
+
+function say2(id, text, good) {
+  const box = document.getElementById(id);
+  box.textContent = text;
+  box.className = "form-msg" + (good ? "" : " bad");
+}
+
+function actionButton(label, what, onClick) {
+  const button = el("button", "btn", label);
+  button.type = "button";
+  button.setAttribute("aria-label", label + " " + what);
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+async function loadPeople() {
+  const panel = document.getElementById("people");
+  panel.hidden = !(myRole === "owner" || myRole === "admin");
+  if (panel.hidden) return;
+  const roles = rolesBelow(myRole);
+  const select = document.getElementById("invite-role");
+  if (Array.from(select.options).map((o) => o.value).join() !== roles.join()) {
+    select.replaceChildren(...roles.map((r) => new Option(r, r)));
+  }
+  const base = "/api/v1/orgs/" + encodeURIComponent(org);
+  const [members, invitations] = await Promise.all([call("GET", base + "/members"), call("GET", base + "/invitations")]);
+  if (!members.ok || !invitations.ok) return;
+
+  const memberRows = document.getElementById("members");
+  memberRows.replaceChildren();
+  for (const member of members.data) {
+    const row = el("tr");
+    cell(row, member.email);
+    cell(row, member.role);
+    const own = member.email === myEmail;
+    const actions = cell(row, "");
+    if (own || RANK[myRole] > RANK[member.role]) {
+      actions.appendChild(actionButton(own ? "Leave" : "Remove", member.email, async () => {
+        if (!confirm((own ? "Leave this organization?" : "Remove " + member.email + "?"))) return;
+        const result = await call("DELETE", base + "/members/" + encodeURIComponent(member.user_id));
+        if (!result.ok) say2("invite-msg", (result.data && result.data.error) || "That did not work.", false);
+        await refresh();
+      }));
+    }
+    memberRows.appendChild(row);
+  }
+
+  const inviteRows = document.getElementById("invitations");
+  inviteRows.replaceChildren();
+  for (const invitation of invitations.data) {
+    const row = el("tr");
+    cell(row, invitation.email);
+    cell(row, invitation.role);
+    cell(row, new Date(invitation.expires_at).toLocaleString());
+    const actions = cell(row, "");
+    if (RANK[myRole] > RANK[invitation.role]) {
+      actions.appendChild(actionButton("Revoke", invitation.email, async () => {
+        const result = await call("DELETE", base + "/invitations/" + encodeURIComponent(invitation.id));
+        if (!result.ok) say2("invite-msg", (result.data && result.data.error) || "That did not work.", false);
+        await loadPeople();
+      }));
+    }
+    inviteRows.appendChild(row);
+  }
+  document.getElementById("no-invitations").style.display = invitations.data.length ? "none" : "block";
+}
+
+async function loadStaff(isStaff) {
+  const panel = document.getElementById("staff");
+  panel.hidden = !isStaff;
+  if (!isStaff) return;
+  const result = await call("GET", "/api/v1/staff/organizations");
+  if (!result.ok) return;
+  const rows = document.getElementById("all-orgs");
+  rows.replaceChildren();
+  for (const entry of result.data) {
+    const row = el("tr");
+    cell(row, entry.name);
+    cell(row, entry.slug, "mono");
+    rows.appendChild(row);
+  }
+}
+
 async function refresh() {
   const problem = document.getElementById("problem");
   try {
-    const me = await fetch("/api/v1/me", { cache: "no-store" });
+    let me = await fetch("/api/v1/me", { cache: "no-store" });
     if (me.status === 401) { showLogin(true); problem.style.display = "none"; return; }
+    if (me.ok && inviteToken) {
+      const token = inviteToken;
+      inviteToken = null;
+      const result = await call("POST", "/api/v1/invitations/accept", { token });
+      if (result.ok) {
+        org = result.data.organization.slug;
+        notice("You joined " + result.data.organization.name + " as " + result.data.role + ".", true);
+      } else {
+        notice((result.data && result.data.error) || "That invitation did not work.", false);
+      }
+      me = await fetch("/api/v1/me", { cache: "no-store" });
+    }
     if (!me.ok) throw new Error("HTTP " + me.status);
     const account = await me.json();
     const orgs = account.organizations;
@@ -376,11 +556,15 @@ async function refresh() {
     select.value = org || "";
     select.hidden = orgs.length < 2;
     const current = orgs.find((o) => o.slug === org);
+    myRole = current ? current.role : null;
+    myEmail = account.email;
     document.getElementById("who-name").textContent = account.email + (current ? " (" + current.role + ")" : "");
     showLogin(false);
+    await loadStaff(account.staff === true);
     if (!org) {
       sticks = [];
       render();
+      await loadPeople();
       problem.textContent = "You are not a member of any organization yet. Ask an owner to add you.";
       problem.style.display = "block";
       return;
@@ -389,6 +573,7 @@ async function refresh() {
     if (!response.ok) throw new Error("HTTP " + response.status);
     sticks = await response.json();
     render();
+    await loadPeople();
     document.getElementById("live-text").textContent = "Live · updated " + new Date().toLocaleTimeString();
     problem.style.display = "none";
   } catch (error) {
@@ -495,6 +680,43 @@ document.getElementById("login").addEventListener("submit", async (event) => {
   catch (error) { say("That did not work.", false); }
 });
 
+document.getElementById("invite-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const email = document.getElementById("invite-email").value;
+  const role = document.getElementById("invite-role").value;
+  say2("invite-msg", "", true);
+  try {
+    const result = await call("POST", "/api/v1/orgs/" + encodeURIComponent(org) + "/invitations", { email, role });
+    if (result.ok) {
+      document.getElementById("invite-email").value = "";
+      say2("invite-msg", "If that address can join, a link is on its way to " + email + ".", true);
+      await loadPeople();
+    } else {
+      say2("invite-msg", (result.data && result.data.error) || "That did not work.", false);
+    }
+  } catch (error) { say2("invite-msg", "Could not reach the Hub.", false); }
+});
+
+document.getElementById("staff-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const body = {
+    slug: document.getElementById("staff-slug").value,
+    name: document.getElementById("staff-name").value,
+    owner_email: document.getElementById("staff-owner").value,
+  };
+  say2("staff-msg", "", true);
+  try {
+    const result = await call("POST", "/api/v1/staff/organizations", body);
+    if (result.ok) {
+      for (const id of ["staff-slug", "staff-name", "staff-owner"]) document.getElementById(id).value = "";
+      say2("staff-msg", "Made. The owner got a link by mail.", true);
+      await loadStaff(true);
+    } else {
+      say2("staff-msg", (result.data && result.data.error) || "That did not work.", false);
+    }
+  } catch (error) { say2("staff-msg", "Could not reach the Hub.", false); }
+});
+
 document.getElementById("logout").addEventListener("click", async () => {
   try { await fetch("/api/v1/logout", { method: "POST" }); } catch (error) { /* refresh shows it */ }
   await refresh();
@@ -504,8 +726,15 @@ document.getElementById("logout").addEventListener("click", async () => {
 // scanner that fetches the page does not use the link up.
 async function openedFromMail() {
   const [kind, token] = location.hash.slice(1).split("=");
-  if (kind !== "verify" && kind !== "reset") return;
+  if (kind !== "verify" && kind !== "reset" && kind !== "invite") return;
   history.replaceState(null, "", location.pathname);
+  if (kind === "invite") {
+    // Used once the browser has a session: right away if there is one, otherwise after the login.
+    inviteToken = token;
+    setMode("login");
+    say("Log in, or create an account, with the address the invitation was sent to.", true);
+    return;
+  }
   if (kind === "reset") {
     // The form only shows to someone who is logged out, so end this browser's session first.
     try { await fetch("/api/v1/logout", { method: "POST" }); } catch (error) { /* refresh shows it */ }
