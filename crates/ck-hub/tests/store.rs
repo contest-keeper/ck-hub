@@ -1063,7 +1063,7 @@ fn invitations_contract(store: &dyn Store) {
         .put_invitation(&org, &cy.email, Role::Viewer, &hash("old"), None, time(10))
         .expect("write");
     store.delete_expired_invitations(time(50)).expect("write");
-    assert!(store.invitations_of(&org).expect("read").is_empty());
+    assert_eq!(store.invitations_of(&org).expect("read"), []);
 
     // Members: listed by email, removed once, owners counted.
     assert!(store.add_member(&org, &ana.id, Role::Owner).expect("write"));
