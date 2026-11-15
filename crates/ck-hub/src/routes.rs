@@ -6,7 +6,7 @@ use axum::Json;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::header::{CACHE_CONTROL, COOKIE, LOCATION, SET_COOKIE};
+use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, COOKIE, LOCATION, SET_COOKIE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -17,6 +17,7 @@ use serde_json::json;
 use crate::accounts::{
     Access, AccessError, Account, LoginError, MIN_PASSWORD_LENGTH, SESSION_LIFETIME_HOURS,
 };
+use crate::forge::ForgeError;
 use crate::hub::{Hub, Rejection};
 use crate::invite::{AcceptError, InviteError, MemberError, StaffError};
 use crate::register::{NewStick, RegisterError};
@@ -46,6 +47,7 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 pub fn router(hub: Arc<Hub>) -> Router {
     Router::new()
         .route("/", get(page))
+        .route("/forge/connect", get(page))
         .route("/download/forge", get(download_forge))
         .route(HEARTBEAT_PATH, post(heartbeat))
         .route(EVENTS_PATH, post(event))
@@ -82,6 +84,8 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/login", post(login))
         .route("/api/v1/logout", post(logout))
         .route("/api/v1/me", get(me))
+        .route("/api/v1/forge/connect", post(forge_connect))
+        .route("/api/v1/forge/token", post(forge_token))
         .route("/api/v1/register", post(sign_up))
         .route("/api/v1/verify-email", post(verify_email))
         .route("/api/v1/password-reset", post(password_reset))
@@ -389,6 +393,56 @@ async fn me(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Response {
     }
 }
 
+#[derive(Deserialize)]
+struct ForgeConnectBody {
+    port: u16,
+    state: String,
+}
+
+/// The signed-in admin agrees to connect Keeper Forge. The answer is the address on this PC that
+/// the browser goes to next. The browser's cookie is the proof, so this is only reachable from
+/// the Hub's own page.
+async fn forge_connect(
+    State(hub): State<Arc<Hub>>,
+    headers: HeaderMap,
+    Json(body): Json<ForgeConnectBody>,
+) -> Response {
+    let Some(token) = session_token(&headers) else {
+        return denied(denied_for(&AccessError::Unauthorized));
+    };
+    let result =
+        tokio::task::spawn_blocking(move || hub.forge_redirect(&token, body.port, &body.state))
+            .await;
+    match result {
+        Ok(Ok(redirect)) => Json(json!({ "redirect": redirect })).into_response(),
+        Ok(Err(ForgeError::Unauthorized)) => denied(denied_for(&AccessError::Unauthorized)),
+        Ok(Err(ForgeError::BadRequest)) => bad_request("that is not a request from Keeper Forge"),
+        Ok(Err(ForgeError::Unavailable)) | Err(_) => unavailable(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ForgeTokenBody {
+    code: String,
+}
+
+/// Keeper Forge trades its code for a session. It answers with a token the forge keeps in memory
+/// and sends as `Authorization: Bearer`.
+async fn forge_token(State(hub): State<Arc<Hub>>, Json(body): Json<ForgeTokenBody>) -> Response {
+    match tokio::task::spawn_blocking(move || hub.forge_session(&body.code)).await {
+        Ok(Ok((token, account))) => Json(json!({
+            "token": token,
+            "email": account.email,
+            "expires_in": SESSION_LIFETIME_HOURS * 3600,
+        }))
+        .into_response(),
+        Ok(Err(TokenError::Invalid | TokenError::PasswordTooShort)) => {
+            bad_request("this code is not valid any more")
+        }
+        Ok(Err(TokenError::Unavailable)) | Err(_) => unavailable(),
+    }
+}
+
 fn account_json(account: &Account, memberships: &[Membership]) -> serde_json::Value {
     let organizations: Vec<_> = memberships
         .iter()
@@ -650,7 +704,16 @@ fn session_cookie(token: &str, max_age_seconds: i64) -> String {
     )
 }
 
+/// The session of the request: the browser's cookie, or the bearer token Keeper Forge sends.
 fn session_token(headers: &HeaderMap) -> Option<String> {
+    if let Some(bearer) = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|token| !token.is_empty())
+    {
+        return Some(bearer.to_owned());
+    }
     let cookies = headers.get(COOKIE)?.to_str().ok()?;
     cookies
         .split(';')

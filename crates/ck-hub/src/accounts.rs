@@ -117,6 +117,8 @@ pub struct Accounts {
     /// long to refuse as a wrong password.
     dummy_hash: String,
     failures: Mutex<HashMap<String, Failures>>,
+    /// Codes the forge may trade for a session, see `forge.rs`.
+    pub(crate) forge_codes: Mutex<crate::forge::OpenCodes>,
 }
 
 impl Accounts {
@@ -125,6 +127,7 @@ impl Accounts {
             cost,
             dummy_hash: hash(cost, "a password nobody uses").expect("the dummy hash"),
             failures: Mutex::new(HashMap::new()),
+            forge_codes: Mutex::new(HashMap::new()),
         }
     }
 

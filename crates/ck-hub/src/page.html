@@ -149,6 +149,8 @@ try { if (localStorage.getItem("ck-theme") === "classic") document.documentEleme
   :root[data-theme="classic"] #login input { height: 30px; border: 0; box-shadow: var(--sunken); }
   #login .btn { min-height: 46px; width: 100%; font-size: 15px; }
   :root[data-theme="classic"] #login .btn { min-height: 34px; font-size: 13px; }
+  #forge { max-width: 460px; margin: 48px auto; padding: 26px 28px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-lg); display: flex; flex-direction: column; gap: 14px; }
+  #forge[hidden] { display: none; }
   #login-error { min-height: 1.4em; color: var(--bad); font-size: 13.5px; }
   #login-error.ok { color: var(--accent); }
   #login-links { text-align: center; font-size: 14px; color: var(--muted); }
@@ -200,6 +202,12 @@ try { if (localStorage.getItem("ck-theme") === "classic") document.documentEleme
     <div id="login-error" role="alert"></div>
     <div id="login-links"><a href="#" id="to-register">Create an account</a> · <a href="#" id="to-forgot">Forgot password</a><a href="#" id="to-login" hidden>Back to log in</a></div>
   </form>
+  <div id="forge" hidden>
+    <h2>Connect Keeper Forge</h2>
+    <p>Keeper Forge on your PC asks to register the sticks it makes under <b id="forge-who"></b>. It stays connected for 12 hours.</p>
+    <p><button class="btn pri" type="button" id="forge-yes">Connect</button></p>
+    <p id="forge-result" role="alert"></p>
+  </div>
   <div id="problem" role="alert">The Hub cannot be reached. The list below is the last one received.</div>
   <div id="content">
     <h1>Sticks</h1>
@@ -411,6 +419,30 @@ function render() {
     : "No sticks yet. Make one with ck-forge and it appears here.";
 }
 
+// Keeper Forge opens /forge/connect?port=..&state=.. . The port and the state are only passed on:
+// the Hub checks them and builds the address the browser goes back to.
+const forgeAsk = location.pathname === "/forge/connect" ? new URLSearchParams(location.search) : null;
+
+function showForge(email) {
+  document.getElementById("content").style.display = "none";
+  document.getElementById("forge").hidden = false;
+  document.getElementById("forge-who").textContent = email;
+}
+
+document.getElementById("forge-yes").addEventListener("click", async () => {
+  const result = document.getElementById("forge-result");
+  const response = await fetch("/api/v1/forge/connect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ port: Number(forgeAsk.get("port")), state: forgeAsk.get("state") || "" }),
+  });
+  if (!response.ok) { result.textContent = "That request did not come from Keeper Forge. Start the sign-in again in the forge."; return; }
+  const { redirect } = await response.json();
+  result.textContent = "Connected. You can close this tab and go back to Keeper Forge.";
+  document.getElementById("forge-yes").hidden = true;
+  location.assign(redirect);
+});
+
 function showLogin(visible) {
   document.getElementById("login").style.display = visible ? "flex" : "none";
   document.getElementById("content").style.display = visible ? "none" : "block";
@@ -560,6 +592,7 @@ async function refresh() {
     myEmail = account.email;
     document.getElementById("who-name").textContent = account.email + (current ? " (" + current.role + ")" : "");
     showLogin(false);
+    if (forgeAsk) { showForge(account.email); return; }
     await loadStaff(account.staff === true);
     if (!org) {
       sticks = [];
