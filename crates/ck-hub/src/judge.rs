@@ -1,0 +1,127 @@
+//! What the Hub knows about a judge and about what sticks said they submitted.
+
+use chrono::{DateTime, Utc};
+use ck_protocol::EventKind;
+
+use crate::store::StoredEvent;
+
+/// A submission as the judge reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JudgeSubmission {
+    pub submission_id: u64,
+    pub contest_id: u64,
+    /// Every member. A team submission has several; handles compare without regard to case.
+    pub handles: Vec<String>,
+    pub problem_index: String,
+    pub submitted_at: DateTime<Utc>,
+}
+
+/// Identifies a stick event: stick, boot and sequence number.
+pub type EventKey = (String, String, u64);
+
+/// A stick's report that a contestant submitted to Codeforces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmitEvent {
+    pub key: EventKey,
+    pub handle: String,
+    pub contest_id: u64,
+    pub problem_index: String,
+    /// By the stick's clock.
+    pub at: DateTime<Utc>,
+    pub submission_id: Option<u64>,
+}
+
+/// Reads a Codeforces submit event. Anything else, or a payload that lacks a field, is `None`:
+/// the Hub keeps every event, but only well-formed ones can be matched.
+#[must_use]
+pub fn submit_event(stored: &StoredEvent) -> Option<SubmitEvent> {
+    let event = &stored.event;
+    if event.kind != EventKind::Submission {
+        return None;
+    }
+    let payload = &event.payload;
+    if payload.get("judge")?.as_str()? != "codeforces" {
+        return None;
+    }
+    Some(SubmitEvent {
+        key: (
+            event.stick_id.as_str().to_owned(),
+            event.boot_id.clone(),
+            event.seq,
+        ),
+        handle: payload.get("handle")?.as_str()?.to_owned(),
+        contest_id: payload.get("contest_id")?.as_u64()?,
+        problem_index: payload.get("problem_index")?.as_str()?.to_owned(),
+        at: event.sent_at,
+        submission_id: payload
+            .get("submission_id")
+            .and_then(serde_json::Value::as_u64),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use ck_protocol::{Event, FIRST_PREV_HASH, StickId};
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    fn stored(kind: EventKind, payload: Value) -> StoredEvent {
+        StoredEvent {
+            received_at: DateTime::from_timestamp(1_800_000_100, 0).expect("time"),
+            integrity: None,
+            event: Event {
+                stick_id: StickId::parse("03c9f556").expect("id"),
+                boot_id: "boot-1".to_owned(),
+                seq: 7,
+                prev_hash: FIRST_PREV_HASH.to_owned(),
+                sent_at: DateTime::from_timestamp(1_800_000_000, 0).expect("time"),
+                kind,
+                payload,
+            },
+        }
+    }
+
+    #[test]
+    fn reads_a_full_submission() {
+        let event = stored(
+            EventKind::Submission,
+            json!({"judge": "codeforces", "handle": "tourist", "contest_id": 1900,
+                   "problem_index": "B", "submission_id": 245_000_123_u64}),
+        );
+        let read = submit_event(&event).expect("a submit event");
+        assert_eq!(read.key, ("03c9f556".to_owned(), "boot-1".to_owned(), 7));
+        assert_eq!(read.handle, "tourist");
+        assert_eq!(read.contest_id, 1900);
+        assert_eq!(read.problem_index, "B");
+        assert_eq!(read.submission_id, Some(245_000_123));
+    }
+
+    #[test]
+    fn the_submission_id_is_optional() {
+        let event = stored(
+            EventKind::Submission,
+            json!({"judge": "codeforces", "handle": "a", "contest_id": 1, "problem_index": "A"}),
+        );
+        assert_eq!(submit_event(&event).expect("event").submission_id, None);
+    }
+
+    #[test]
+    fn ignores_logins_other_judges_and_incomplete_payloads() {
+        let login = stored(
+            EventKind::Login,
+            json!({"judge": "codeforces", "handle": "a"}),
+        );
+        assert!(submit_event(&login).is_none());
+        let other = stored(
+            EventKind::Submission,
+            json!({"judge": "kilonova", "handle": "a", "contest_id": 1, "problem_index": "A"}),
+        );
+        assert!(submit_event(&other).is_none());
+        let incomplete = stored(
+            EventKind::Submission,
+            json!({"judge": "codeforces", "handle": "a"}),
+        );
+        assert!(submit_event(&incomplete).is_none());
+    }
+}
