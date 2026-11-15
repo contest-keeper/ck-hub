@@ -1,6 +1,7 @@
 //! Talking to the Codeforces API.
 
 use std::fmt::Write;
+use std::time::Duration;
 
 use chrono::DateTime;
 use serde::Deserialize;
@@ -114,6 +115,80 @@ pub fn signed_query(
         .join("&");
     let digest = Sha512::digest(format!("{rand}/{method}?{joined}#{secret}").as_bytes());
     format!("{joined}&apiSig={rand}{}", hex(&digest))
+}
+
+/// A Codeforces API client. With credentials every call is signed, which also covers gyms and
+/// group contests; without them only public contests can be read.
+pub struct Client {
+    agent: ureq::Agent,
+    base: String,
+    credentials: Option<(String, String)>,
+}
+
+impl Client {
+    #[must_use]
+    pub fn new(base: &str, credentials: Option<(String, String)>) -> Self {
+        // Codeforces explains a refusal in a JSON body with an error status, so the body is read
+        // whatever the status is.
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(20)))
+            .http_status_as_error(false)
+            .build()
+            .into();
+        Self {
+            agent,
+            base: base.trim_end_matches('/').to_owned(),
+            credentials,
+        }
+    }
+
+    /// One page of `contest.status`, newest first. `from` starts at 1.
+    ///
+    /// # Errors
+    /// [`CodeforcesError::Request`] when the call fails, otherwise what [`parse_status`] says. The
+    /// error never holds the address, which carries the API key.
+    pub fn status(
+        &self,
+        contest_id: u64,
+        from: u64,
+        count: u64,
+    ) -> Result<Vec<JudgeSubmission>, CodeforcesError> {
+        let params = [
+            ("contestId", contest_id.to_string()),
+            ("from", from.to_string()),
+            ("count", count.to_string()),
+        ];
+        let query = match &self.credentials {
+            Some((key, secret)) => {
+                let now = chrono::Utc::now();
+                let rand = format!("{:06}", now.timestamp_subsec_nanos() % 1_000_000);
+                signed_query(
+                    "contest.status",
+                    &params,
+                    key,
+                    secret,
+                    now.timestamp(),
+                    &rand,
+                )
+            }
+            None => params
+                .iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect::<Vec<_>>()
+                .join("&"),
+        };
+        let url = format!("{}/api/contest.status?{query}", self.base);
+        let mut response = self
+            .agent
+            .get(&url)
+            .call()
+            .map_err(|_| CodeforcesError::Request("cannot reach Codeforces".to_owned()))?;
+        let body = response
+            .body_mut()
+            .read_to_string()
+            .map_err(|_| CodeforcesError::Request("cannot read the answer".to_owned()))?;
+        parse_status(&body)
+    }
 }
 
 #[cfg(test)]
