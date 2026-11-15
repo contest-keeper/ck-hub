@@ -7,8 +7,9 @@ from a contest machine.
 Work in progress. Today the Hub receives signed heartbeats and events from sticks and shows
 organizers every stick with its last heartbeat, who is logged in and what needs a look. It has
 accounts (sign-up with mail confirmation, password reset), organizations with owner, admin and viewer
-roles, invitations, platform staff, and mail through Azure Communication Services. Watching the judge
-and matching submissions are not built yet.
+roles, invitations, platform staff, and mail through Azure Communication Services. It follows a
+Codeforces contest and matches the judge's submissions to the stick events; watching Kilonova and vJudge is
+not built, and nothing on the page shows the matches yet.
 
 To deploy it, see [ck-infra](https://github.com/contest-keeper/ck-infra) (Azure or Docker Compose).
 
@@ -37,6 +38,9 @@ cargo run -p ck-hub -- --registry ck-registry.json --log hub.log
   `CK_ACS_KEY` only, never from a flag, so it is not in a process list, and it is never logged. Mail is
   queued and sent from a background thread: a slow or unavailable Azure does not slow or fail a request,
   and a mail that cannot be sent is logged with its error (never its text) and dropped.
+- `--codeforces-contest ID --codeforces-organization SLUG` makes the Hub poll that Codeforces contest and match its
+  submissions to the organization's stick events. It works anonymously; for a gym or group contest set
+  `CK_CODEFORCES_KEY` and `CK_CODEFORCES_SECRET` (environment only, never logged or stored).
 - `--log` adds one line per heartbeat, accepted or refused. It never holds a secret or a signature.
 
 | Route | What it does |
