@@ -5,12 +5,14 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use ck_hub::{
-    AcsMailer, ConsoleMailer, CreateUserError, Download, Hub, MIN_PASSWORD_LENGTH, Mailer,
-    MemoryStore, NewStick, OrganizationError, PasswordCost, PostgresStore, RegisterError, Registry,
-    Role, Store, StoreError, add_member, create_organization, create_user, register_sticks, router,
+    AcsMailer, CodeforcesClient, ConsoleMailer, CreateUserError, Download, Hub,
+    MIN_PASSWORD_LENGTH, Mailer, MemoryStore, NewStick, OrganizationError, PasswordCost,
+    PostgresStore, RegisterError, Registry, Role, Store, StoreError, add_member,
+    create_organization, create_user, register_sticks, router,
 };
 use clap::{Args, Parser, Subcommand};
 
@@ -60,6 +62,8 @@ struct ServeArgs {
     log: Option<PathBuf>,
     #[command(flatten)]
     download: DownloadArgs,
+    #[command(flatten)]
+    codeforces: CodeforcesArgs,
     /// How the Hub sends mail. `console` prints it, links included, and is for a developer's
     /// machine only. `acs` sends through Azure Communication Services (the key is read from the
     /// environment variable `CK_ACS_KEY`). Without this, sign-up and password reset answer 503
@@ -102,6 +106,43 @@ struct DownloadArgs {
         requires = "download_account"
     )]
     download_key: Option<String>,
+}
+
+// The field names make the flags `--codeforces-contest` and so on, so the shared prefix stays.
+#[allow(clippy::struct_field_names)]
+#[derive(Args)]
+struct CodeforcesArgs {
+    /// Follow this Codeforces contest and keep its submissions
+    #[arg(
+        long,
+        env = "CK_CODEFORCES_CONTEST",
+        requires = "codeforces_organization"
+    )]
+    codeforces_contest: Option<u64>,
+    /// The slug of the organization the contest belongs to
+    #[arg(
+        long,
+        env = "CK_CODEFORCES_ORGANIZATION",
+        requires = "codeforces_contest"
+    )]
+    codeforces_organization: Option<String>,
+    /// A Codeforces API key, for gyms and group contests. Without it only public contests can be
+    /// read. It comes with the secret or not at all
+    #[arg(
+        long,
+        env = "CK_CODEFORCES_KEY",
+        hide_env_values = true,
+        requires = "codeforces_secret"
+    )]
+    codeforces_key: Option<String>,
+    /// The secret of the API key
+    #[arg(
+        long,
+        env = "CK_CODEFORCES_SECRET",
+        hide_env_values = true,
+        requires = "codeforces_key"
+    )]
+    codeforces_secret: Option<String>,
 }
 
 #[derive(Args)]
@@ -476,6 +517,17 @@ async fn run(args: ServeArgs) -> Result<(), String> {
             "no database and no --registry: the Hub knows no stick and refuses every heartbeat"
         );
     }
+    if let (Some(contest), Some(slug)) = (
+        args.codeforces.codeforces_contest,
+        &args.codeforces.codeforces_organization,
+    ) {
+        let credentials = args
+            .codeforces
+            .codeforces_key
+            .clone()
+            .zip(args.codeforces.codeforces_secret.clone());
+        start_codeforces_watcher(&store, slug, contest, credentials).await?;
+    }
     let mut hub = Hub::new(registry, store, log, Box::new(Utc::now));
     if let (Some(account), Some(key)) =
         (&args.download.download_account, &args.download.download_key)
@@ -497,6 +549,44 @@ async fn run(args: ServeArgs) -> Result<(), String> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Follows a Codeforces contest on a thread of its own, because the store and the HTTP client
+/// block. The key and the secret are never logged.
+async fn start_codeforces_watcher(
+    store: &Arc<dyn Store>,
+    slug: &str,
+    contest: u64,
+    credentials: Option<(String, String)>,
+) -> Result<(), String> {
+    let lookup = Arc::clone(store);
+    let wanted = slug.to_owned();
+    let organization = tokio::task::spawn_blocking(move || lookup.organization_by_slug(&wanted))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no organization {slug} for the Codeforces contest"))?;
+    let client = CodeforcesClient::new("https://codeforces.com", credentials);
+    let store = Arc::clone(store);
+    std::thread::Builder::new()
+        .name("codeforces".into())
+        .spawn(move || {
+            ck_hub::watch(
+                &client,
+                &*store,
+                &organization.id,
+                contest,
+                Duration::from_secs(30),
+                Duration::from_secs(600),
+            );
+        })
+        .map_err(|e| e.to_string())?;
+    tracing::info!(
+        contest,
+        organization = slug,
+        "following the Codeforces contest"
+    );
+    Ok(())
 }
 
 /// Resolves on Ctrl-C, or on SIGTERM, which is what `docker stop` sends.

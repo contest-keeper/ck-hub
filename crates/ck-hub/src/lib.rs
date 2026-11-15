@@ -3,16 +3,20 @@
 
 mod accounts;
 mod acs_mail;
+mod codeforces;
 mod download;
 mod hub;
 mod invite;
+mod judge;
 mod mail;
+mod matcher;
 mod postgres_store;
 mod register;
 mod registry;
 mod routes;
 mod signup;
 mod store;
+mod watcher;
 
 pub use accounts::{
     Access, AccessError, Account, CreateUserError, LoginError, MAIL_ALL_WINDOW_SECONDS,
@@ -21,10 +25,13 @@ pub use accounts::{
     SESSION_LIFETIME_HOURS, add_member, create_organization, create_user,
 };
 pub use acs_mail::AcsMailer;
+pub use codeforces::{Client as CodeforcesClient, CodeforcesError, parse_status, signed_query};
 pub use download::{Download, DownloadError, LINK_LIFETIME_MINUTES};
 pub use hub::{Hub, LastHeartbeat, ONLINE_WINDOW_SECONDS, Rejection, StickView};
 pub use invite::{AcceptError, INVITATION_LIFETIME_DAYS, InviteError, MemberError, StaffError};
+pub use judge::{EventKey, JudgeSubmission, SubmitEvent, submit_event};
 pub use mail::{ConsoleMailer, Mail, MailError, Mailer, MemoryMailer, token_after};
+pub use matcher::{Verdict, match_submissions};
 pub use postgres_store::PostgresStore;
 pub use register::{NewStick, RegisterError, Registered, register_sticks};
 pub use registry::{Registry, RegistryError};
@@ -37,3 +44,4 @@ pub use store::{
     Invitation, Member, Membership, MemoryStore, NewUser, Organization, Role, SeenHeartbeat, Stick,
     Store, StoreError, StoredEvent, TokenPurpose, User,
 };
+pub use watcher::{WatchError, poll_once, run as watch};
