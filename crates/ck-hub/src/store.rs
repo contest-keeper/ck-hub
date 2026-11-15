@@ -378,7 +378,67 @@ pub trait Store: Send + Sync {
 
     /// Every stick of the organization.
     fn sticks(&self, organization: &str) -> Result<Vec<Stick>, StoreError>;
+
+    /// Keeps a profile of the organization, replacing the one with the same id. Another
+    /// organization's profile with that id is a different profile and is not touched.
+    fn put_profile(
+        &self,
+        organization: &str,
+        profile: NewProfile,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError>;
+
+    /// The organization's profiles, by name.
+    fn profiles(&self, organization: &str) -> Result<Vec<ProfileSummary>, StoreError>;
+
+    fn profile(&self, organization: &str, id: &str) -> Result<Option<Profile>, StoreError>;
+
+    /// The picture of a profile, if it has one.
+    fn profile_wallpaper(
+        &self,
+        organization: &str,
+        id: &str,
+    ) -> Result<Option<Wallpaper>, StoreError>;
+
+    /// Returns whether there was such a profile.
+    fn delete_profile(&self, organization: &str, id: &str) -> Result<bool, StoreError>;
 }
+
+/// A picture kept with a profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wallpaper {
+    pub name: String,
+    pub data: Vec<u8>,
+}
+
+/// A profile to keep: what Keeper Forge sends, already checked.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewProfile {
+    pub id: String,
+    pub name: String,
+    pub settings: serde_json::Value,
+    pub wallpaper: Option<Wallpaper>,
+}
+
+/// A kept profile without its picture's bytes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Profile {
+    pub id: String,
+    pub name: String,
+    pub settings: serde_json::Value,
+    pub wallpaper_name: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileSummary {
+    pub id: String,
+    pub name: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A profile and when it was last saved.
+type KeptProfile = (NewProfile, DateTime<Utc>);
 
 /// A token's hash, the account it is for, what it is for, and when it ends.
 type MailedToken = (String, String, TokenPurpose, DateTime<Utc>);
@@ -399,6 +459,7 @@ pub struct MemoryStore {
     members: Mutex<Vec<(String, String, Role)>>,
     next_id: AtomicU64,
     sticks: Mutex<HashMap<StickId, (String, Stick)>>,
+    profiles: Mutex<HashMap<(String, String), KeptProfile>>,
 }
 
 impl MemoryStore {
@@ -957,5 +1018,72 @@ impl Store for MemoryStore {
             .filter(|(owner, _)| owner == organization)
             .map(|(_, stick)| stick.clone())
             .collect())
+    }
+
+    fn put_profile(
+        &self,
+        organization: &str,
+        profile: NewProfile,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        self.profiles.lock().expect("profiles lock").insert(
+            (organization.to_owned(), profile.id.clone()),
+            (profile, now),
+        );
+        Ok(())
+    }
+
+    fn profiles(&self, organization: &str) -> Result<Vec<ProfileSummary>, StoreError> {
+        let mut all: Vec<ProfileSummary> = self
+            .profiles
+            .lock()
+            .expect("profiles lock")
+            .iter()
+            .filter(|((owner, _), _)| owner == organization)
+            .map(|(_, (profile, at))| ProfileSummary {
+                id: profile.id.clone(),
+                name: profile.name.clone(),
+                updated_at: *at,
+            })
+            .collect();
+        all.sort_by_key(|p| (p.name.to_lowercase(), p.id.clone()));
+        Ok(all)
+    }
+
+    fn profile(&self, organization: &str, id: &str) -> Result<Option<Profile>, StoreError> {
+        Ok(self
+            .profiles
+            .lock()
+            .expect("profiles lock")
+            .get(&(organization.to_owned(), id.to_owned()))
+            .map(|(profile, at)| Profile {
+                id: profile.id.clone(),
+                name: profile.name.clone(),
+                settings: profile.settings.clone(),
+                wallpaper_name: profile.wallpaper.as_ref().map(|w| w.name.clone()),
+                updated_at: *at,
+            }))
+    }
+
+    fn profile_wallpaper(
+        &self,
+        organization: &str,
+        id: &str,
+    ) -> Result<Option<Wallpaper>, StoreError> {
+        Ok(self
+            .profiles
+            .lock()
+            .expect("profiles lock")
+            .get(&(organization.to_owned(), id.to_owned()))
+            .and_then(|(profile, _)| profile.wallpaper.clone()))
+    }
+
+    fn delete_profile(&self, organization: &str, id: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .profiles
+            .lock()
+            .expect("profiles lock")
+            .remove(&(organization.to_owned(), id.to_owned()))
+            .is_some())
     }
 }

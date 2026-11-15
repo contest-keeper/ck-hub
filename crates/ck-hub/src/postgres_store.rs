@@ -10,13 +10,13 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use crate::judge::{JudgeSubmission, SubmitEvent, submit_event};
 
 use crate::store::{
-    Invitation, Member, Membership, NewUser, Organization, Role, SeenHeartbeat, Stick, Store,
-    StoreError, StoredEvent, TokenPurpose, User,
+    Invitation, Member, Membership, NewProfile, NewUser, Organization, Profile, ProfileSummary,
+    Role, SeenHeartbeat, Stick, Store, StoreError, StoredEvent, TokenPurpose, User, Wallpaper,
 };
 
 /// The schema, in the order it is applied. A migration that was applied is never run again and
 /// never edited: a change is a new file.
-const MIGRATIONS: [(&str, &str); 10] = [
+const MIGRATIONS: [(&str, &str); 11] = [
     (
         "0001_heartbeats_and_events",
         include_str!("../migrations/0001_heartbeats_and_events.sql"),
@@ -53,6 +53,10 @@ const MIGRATIONS: [(&str, &str); 10] = [
     (
         "0010_judge_submissions",
         include_str!("../migrations/0010_judge_submissions.sql"),
+    ),
+    (
+        "0011_profiles",
+        include_str!("../migrations/0011_profiles.sql"),
     ),
 ];
 
@@ -913,6 +917,103 @@ impl Store for PostgresStore {
             )
         })?;
         rows.iter().map(stick_from).collect()
+    }
+
+    fn put_profile(
+        &self,
+        organization: &str,
+        profile: NewProfile,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        let (wallpaper_name, wallpaper_data) = match &profile.wallpaper {
+            Some(wallpaper) => (Some(&wallpaper.name), Some(&wallpaper.data)),
+            None => (None, None),
+        };
+        self.in_org(organization, |transaction| {
+            transaction.execute(
+                "INSERT INTO profiles
+                     (organization_id, id, name, settings, wallpaper_name, wallpaper_data, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT (organization_id, id) DO UPDATE SET
+                     name = EXCLUDED.name, settings = EXCLUDED.settings,
+                     wallpaper_name = EXCLUDED.wallpaper_name,
+                     wallpaper_data = EXCLUDED.wallpaper_data,
+                     updated_at = EXCLUDED.updated_at",
+                &[
+                    &organization,
+                    &profile.id,
+                    &profile.name,
+                    &profile.settings,
+                    &wallpaper_name,
+                    &wallpaper_data,
+                    &now,
+                ],
+            )
+        })
+        .map(|_| ())
+    }
+
+    fn profiles(&self, organization: &str) -> Result<Vec<ProfileSummary>, StoreError> {
+        let rows = self.in_org(organization, |transaction| {
+            transaction.query(
+                "SELECT id, name, updated_at FROM profiles WHERE organization_id = $1
+                 ORDER BY lower(name), id",
+                &[&organization],
+            )
+        })?;
+        Ok(rows
+            .iter()
+            .map(|row| ProfileSummary {
+                id: row.get(0),
+                name: row.get(1),
+                updated_at: row.get(2),
+            })
+            .collect())
+    }
+
+    fn profile(&self, organization: &str, id: &str) -> Result<Option<Profile>, StoreError> {
+        let rows = self.in_org(organization, |transaction| {
+            transaction.query(
+                "SELECT id, name, settings, wallpaper_name, updated_at FROM profiles
+                 WHERE organization_id = $1 AND id = $2",
+                &[&organization, &id],
+            )
+        })?;
+        Ok(rows.first().map(|row| Profile {
+            id: row.get(0),
+            name: row.get(1),
+            settings: row.get(2),
+            wallpaper_name: row.get(3),
+            updated_at: row.get(4),
+        }))
+    }
+
+    fn profile_wallpaper(
+        &self,
+        organization: &str,
+        id: &str,
+    ) -> Result<Option<Wallpaper>, StoreError> {
+        let rows = self.in_org(organization, |transaction| {
+            transaction.query(
+                "SELECT wallpaper_name, wallpaper_data FROM profiles
+                 WHERE organization_id = $1 AND id = $2 AND wallpaper_data IS NOT NULL",
+                &[&organization, &id],
+            )
+        })?;
+        Ok(rows.first().map(|row| Wallpaper {
+            name: row.get(0),
+            data: row.get(1),
+        }))
+    }
+
+    fn delete_profile(&self, organization: &str, id: &str) -> Result<bool, StoreError> {
+        self.in_org(organization, |transaction| {
+            transaction.execute(
+                "DELETE FROM profiles WHERE organization_id = $1 AND id = $2",
+                &[&organization, &id],
+            )
+        })
+        .map(|deleted| deleted > 0)
     }
 }
 

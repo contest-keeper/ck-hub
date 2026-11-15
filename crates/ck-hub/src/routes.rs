@@ -6,7 +6,9 @@ use axum::Json;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, COOKIE, LOCATION, SET_COOKIE};
+use axum::http::header::{
+    AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, COOKIE, LOCATION, SET_COOKIE,
+};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -20,6 +22,9 @@ use crate::accounts::{
 use crate::forge::ForgeError;
 use crate::hub::{Hub, Rejection};
 use crate::invite::{AcceptError, InviteError, MemberError, StaffError};
+use crate::profiles::{
+    MAX_SETTINGS_BYTES, MAX_WALLPAPER_BYTES, ProfileError, ProfileInput, content_type,
+};
 use crate::register::{NewStick, RegisterError};
 use crate::signup::{SignupError, TokenError};
 use crate::store::{Membership, Role};
@@ -40,6 +45,10 @@ const EVENTS_PATH: &str = "/api/v1/events";
 
 /// A whole registry of a few hundred sticks. Only the admin-only registering route allows this much.
 const MAX_REGISTRY_BYTES: usize = 2 * 1024 * 1024;
+
+/// A profile with a wallpaper at the limit: the picture in base64 (a third larger) and the settings.
+const MAX_PROFILE_BODY_BYTES: usize =
+    MAX_WALLPAPER_BYTES.div_ceil(3) * 4 + MAX_SETTINGS_BYTES + 4096;
 
 /// A heartbeat is a few hundred bytes. Anything much bigger is not one.
 const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -86,6 +95,15 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/me", get(me))
         .route("/api/v1/forge/connect", post(forge_connect))
         .route("/api/v1/forge/token", post(forge_token))
+        .route("/api/v1/profiles", get(list_profiles))
+        .route(
+            "/api/v1/profiles/{id}",
+            get(read_profile)
+                .put(save_profile)
+                .delete(remove_profile)
+                .layer(DefaultBodyLimit::max(MAX_PROFILE_BODY_BYTES)),
+        )
+        .route("/api/v1/profiles/{id}/wallpaper", get(profile_wallpaper))
         .route("/api/v1/register", post(sign_up))
         .route("/api/v1/verify-email", post(verify_email))
         .route("/api/v1/password-reset", post(password_reset))
@@ -842,5 +860,141 @@ async fn register_into(hub: Arc<Hub>, access: Access, body: Bytes) -> Response {
             (StatusCode::BAD_REQUEST, Json(json!({ "error": why }))).into_response()
         }
         Ok(Err(RegisterError::Unavailable)) | Err(_) => unavailable(),
+    }
+}
+
+fn no_such_profile() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({ "error": "no such profile" })),
+    )
+        .into_response()
+}
+
+/// Runs a read or write of the profiles of the caller's organization. A profile of another
+/// organization is not there for the caller, so it answers like one that does not exist.
+async fn with_profiles<T: Send + 'static>(
+    hub: Arc<Hub>,
+    headers: &HeaderMap,
+    work: impl FnOnce(&Hub, &str) -> Result<T, crate::store::StoreError> + Send + 'static,
+) -> Result<T, Box<Response>> {
+    let access = require(&hub, headers, Role::Admin)
+        .await
+        .map_err(|reason| Box::new(denied(reason)))?;
+    match tokio::task::spawn_blocking(move || work(&hub, &access.organization.id)).await {
+        Ok(Ok(done)) => Ok(done),
+        Ok(Err(error)) => {
+            tracing::error!("{error}");
+            Err(Box::new(unavailable()))
+        }
+        Err(_) => Err(Box::new(unavailable())),
+    }
+}
+
+async fn list_profiles(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Response {
+    match with_profiles(hub, &headers, Hub::profiles).await {
+        Ok(profiles) => Json(
+            profiles
+                .into_iter()
+                .map(|p| json!({ "id": p.id, "name": p.name, "updated_at": p.updated_at }))
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Err(response) => *response,
+    }
+}
+
+async fn read_profile(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    match with_profiles(hub, &headers, move |hub, org| hub.profile(org, &id)).await {
+        Ok(Some(p)) => Json(json!({
+            "id": p.id,
+            "name": p.name,
+            "settings": p.settings,
+            "wallpaper": p.wallpaper_name.map(|name| json!({ "name": name })),
+            "updated_at": p.updated_at,
+        }))
+        .into_response(),
+        Ok(None) => no_such_profile(),
+        Err(response) => *response,
+    }
+}
+
+async fn save_profile(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let access = match require(&hub, &headers, Role::Admin).await {
+        Ok(access) => access,
+        Err(reason) => return denied(reason),
+    };
+    let input: ProfileInput = match serde_json::from_slice(&body) {
+        Ok(input) => input,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("the request is not a profile: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    let result =
+        tokio::task::spawn_blocking(move || hub.put_profile(&access.organization.id, &id, input))
+            .await;
+    match result {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(ProfileError::Invalid(why))) => {
+            (StatusCode::BAD_REQUEST, Json(json!({ "error": why }))).into_response()
+        }
+        Ok(Err(ProfileError::TooLarge(why))) => {
+            (StatusCode::PAYLOAD_TOO_LARGE, Json(json!({ "error": why }))).into_response()
+        }
+        Ok(Err(ProfileError::Unavailable)) | Err(_) => unavailable(),
+    }
+}
+
+async fn profile_wallpaper(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    match with_profiles(hub, &headers, move |hub, org| {
+        hub.profile_wallpaper(org, &id)
+    })
+    .await
+    {
+        Ok(Some(wallpaper)) => {
+            let Some(kind) = content_type(&wallpaper.name) else {
+                return unavailable();
+            };
+            (
+                [
+                    (CONTENT_TYPE, kind),
+                    (CONTENT_DISPOSITION, "attachment"),
+                    (CACHE_CONTROL, "private, no-store"),
+                ],
+                wallpaper.data,
+            )
+                .into_response()
+        }
+        Ok(None) => no_such_profile(),
+        Err(response) => *response,
+    }
+}
+
+async fn remove_profile(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    match with_profiles(hub, &headers, move |hub, org| hub.delete_profile(org, &id)).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => no_such_profile(),
+        Err(response) => *response,
     }
 }
