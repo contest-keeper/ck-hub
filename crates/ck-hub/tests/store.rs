@@ -711,7 +711,7 @@ fn profiles_contract(store: &dyn Store) {
         .expect("a picture");
     assert_eq!(wallpaper.data, vec![0, 1, 255]);
 
-    assert!(store.profiles(&two.id).expect("read").is_empty());
+    assert_eq!(store.profiles(&two.id).expect("read"), Vec::new());
     assert!(store.profile(&two.id, "p-1").expect("read").is_none());
     assert!(
         store

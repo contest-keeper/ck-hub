@@ -120,7 +120,9 @@ fn picture(name: &str, bytes: &[u8]) -> Value {
 }
 
 fn profile(name: &str, wallpaper: Value) -> Value {
-    json!({ "name": name, "settings": { "contest": name, "fps": 30 }, "wallpaper": wallpaper })
+    let mut body = json!({ "name": name, "settings": { "contest": name, "fps": 30 } });
+    body["wallpaper"] = wallpaper;
+    body
 }
 
 async fn put(s: &Setup, cookie: &str, id: &str, body: Value) -> Answer {
