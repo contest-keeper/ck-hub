@@ -84,7 +84,12 @@ cannot be used to log in.
 
 Everything a stick reports belongs to one organization. Row-level security keeps organizations apart
 in the database, on top of the filters of every query. It does not apply to a superuser or a role
-with `BYPASSRLS`, so connect the Hub as a plain role; the Hub warns at start when it is not one.
+with `BYPASSRLS`, so after it migrated the Hub switches the connection to the plain role `ck_hub_app`
+(`SET ROLE`, made by migration 0008, also after every reconnect), whoever logged in: your own server
+admin may be the account in `--database-url`. That role cannot log in, change the schema or the
+migration record, or rewrite the event log. The Hub warns at start if the switch did not leave row
+security in force. Migrations still need the account that logged in, so it keeps rights to change the
+schema; it is the Hub's own queries that run as the plain role.
 
 Anyone can sign up on the page when the Hub can send mail, but an account has no access until an
 owner or staff add it to an organization (`ck-hub add-member`); the page says so. Links in the mail
