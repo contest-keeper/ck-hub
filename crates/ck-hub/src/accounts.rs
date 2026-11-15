@@ -93,6 +93,8 @@ pub enum OrganizationError {
 pub struct Account {
     pub id: String,
     pub email: String,
+    /// Platform staff may make organizations. It gives no access to any organization's data.
+    pub staff: bool,
 }
 
 /// Who is asking, in which organization, and with what role.
@@ -272,6 +274,7 @@ impl Hub {
             Account {
                 id: user.id,
                 email: user.email,
+                staff: user.is_platform_staff,
             },
         ))
     }
@@ -300,6 +303,7 @@ impl Hub {
         Ok(Account {
             id: user.id,
             email: user.email,
+            staff: user.is_platform_staff,
         })
     }
 
@@ -378,7 +382,7 @@ pub(crate) fn valid_email(email: &str) -> bool {
         && !email.chars().any(|c| c.is_control() || c.is_whitespace())
 }
 
-fn valid_slug(slug: &str) -> bool {
+pub(crate) fn valid_slug(slug: &str) -> bool {
     (1..=63).contains(&slug.len())
         && slug
             .chars()

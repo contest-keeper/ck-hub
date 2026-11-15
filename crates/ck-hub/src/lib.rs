@@ -5,6 +5,7 @@ mod accounts;
 mod acs_mail;
 mod download;
 mod hub;
+mod invite;
 mod mail;
 mod postgres_store;
 mod register;
@@ -22,6 +23,7 @@ pub use accounts::{
 pub use acs_mail::AcsMailer;
 pub use download::{Download, DownloadError, LINK_LIFETIME_MINUTES};
 pub use hub::{Hub, LastHeartbeat, ONLINE_WINDOW_SECONDS, Rejection, StickView};
+pub use invite::{AcceptError, INVITATION_LIFETIME_DAYS, InviteError, MemberError, StaffError};
 pub use mail::{ConsoleMailer, Mail, MailError, Mailer, MemoryMailer, token_after};
 pub use postgres_store::PostgresStore;
 pub use register::{NewStick, RegisterError, Registered, register_sticks};
@@ -32,6 +34,6 @@ pub use signup::{
     VERIFY_LIFETIME_HOURS,
 };
 pub use store::{
-    Membership, MemoryStore, NewUser, Organization, Role, SeenHeartbeat, Stick, Store, StoreError,
-    StoredEvent, TokenPurpose, User,
+    Invitation, Member, Membership, MemoryStore, NewUser, Organization, Role, SeenHeartbeat, Stick,
+    Store, StoreError, StoredEvent, TokenPurpose, User,
 };
