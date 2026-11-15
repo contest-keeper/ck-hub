@@ -11,8 +11,8 @@ use chrono::Utc;
 use ck_hub::{
     AcsMailer, CodeforcesClient, ConsoleMailer, CreateUserError, Download, Hub,
     MIN_PASSWORD_LENGTH, Mailer, MemoryStore, NewStick, OrganizationError, PasswordCost,
-    PostgresStore, RegisterError, Registry, Role, Store, add_member, create_organization,
-    create_user, register_sticks, router,
+    PostgresStore, RegisterError, Registry, Role, Store, StoreError, add_member,
+    create_organization, create_user, register_sticks, router,
 };
 use clap::{Args, Parser, Subcommand};
 
@@ -38,6 +38,10 @@ enum Command {
     CreateOrg(CreateOrgArgs),
     /// Make an existing account a member of an organization
     AddMember(AddMemberArgs),
+    /// Make an account platform staff, who may make organizations from the page
+    MakeStaff(StaffArgs),
+    /// Take platform staff away from an account
+    RevokeStaff(StaffArgs),
     /// Register the sticks of an admin tool registry file in the database. Safe to run twice
     ImportRegistry(ImportRegistryArgs),
 }
@@ -185,6 +189,14 @@ struct AddMemberArgs {
 }
 
 #[derive(Args)]
+struct StaffArgs {
+    /// The email of the account
+    email: String,
+    #[command(flatten)]
+    database: DatabaseArgs,
+}
+
+#[derive(Args)]
 struct ImportRegistryArgs {
     /// The registry file ck-forge wrote
     file: PathBuf,
@@ -203,6 +215,8 @@ async fn main() -> ExitCode {
         Some(Command::CreateUser(args)) => make_user(args).await,
         Some(Command::CreateOrg(args)) => make_org(args).await,
         Some(Command::AddMember(args)) => add_to_org(args).await,
+        Some(Command::MakeStaff(args)) => set_staff(args, true).await,
+        Some(Command::RevokeStaff(args)) => set_staff(args, false).await,
         Some(Command::ImportRegistry(args)) => import_registry(args).await,
         None => run(cli.serve).await,
     };
@@ -344,6 +358,29 @@ async fn add_to_org(args: AddMemberArgs) -> Result<(), String> {
             Ok(())
         }
         Err(error) => Err(organization_problem(&error)),
+    }
+}
+
+async fn set_staff(args: StaffArgs, staff: bool) -> Result<(), String> {
+    let email = args.email;
+    let changed = {
+        let email = email.clone();
+        with_store(args.database, move |store| {
+            let user = store.user_by_email(&email)?;
+            if let Some(user) = &user {
+                store.set_staff(&user.id, staff)?;
+            }
+            Ok::<bool, StoreError>(user.is_some())
+        })
+        .await?
+    };
+    match changed {
+        Ok(true) => {
+            tracing::info!(email = %email, staff, "the staff flag was set");
+            Ok(())
+        }
+        Ok(false) => Err("there is no account with that email".to_owned()),
+        Err(_) => Err("the database could not be written".to_owned()),
     }
 }
 

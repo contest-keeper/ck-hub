@@ -5,8 +5,12 @@ the contest on the judge (Kilonova, Codeforces, vJudge) and flags submissions th
 from a contest machine.
 
 Work in progress. Today the Hub receives signed heartbeats and events from sticks and shows
-organizers every stick with its last heartbeat, who is logged in and what needs a look. Watching
-the judge and matching submissions are not built yet.
+organizers every stick with its last heartbeat, who is logged in and what needs a look. It has
+accounts (sign-up with mail confirmation, password reset), organizations with owner, admin and viewer
+roles, invitations, platform staff, and mail through Azure Communication Services. Watching the judge
+and matching submissions are not built yet.
+
+To deploy it, see [ck-infra](https://github.com/contest-keeper/ck-infra) (Azure or Docker Compose).
 
 ## Run it
 
@@ -49,6 +53,13 @@ cargo run -p ck-hub -- --registry ck-registry.json --log hub.log
 | `POST /api/v1/events` | A stick sends one event (a login, a submission), signed like a heartbeat. Events of one boot form a chain. A gap or a broken link does not refuse the event: it is kept with a note and shown as a warning. `409` for an event the Hub already has, which the stick counts as delivered. |
 | `POST /api/v1/orgs/{slug}/sticks` | Admin or owner of the organization. Registers sticks: one stick object, or a whole registry file of the admin tool (`{"sticks": [...]}`, extra fields are ignored, up to 2 MB). Safe to send twice. A stick that is already known with a different secret is refused with `409` and left as it was; a secret is never replaced. Nothing is registered if any stick in the request is invalid. A stick id already used by another organization is refused like a different secret. The answer says how many were added and never contains a secret. |
 | `GET /api/v1/orgs/{slug}/sticks` | A member of the organization (any role). Every stick of the organization, with its last heartbeat and whether it is online (a heartbeat in the last 60 seconds). `404` for an unknown organization and for one the account is not in, with the same answer for both. |
+| `POST /api/v1/orgs/{slug}/invitations` | Admin or owner. Invites `{"email", "role"}` by mail with a link that works once for 7 days. An owner may invite admins and viewers, an admin viewers: only roles below one's own, and nobody invites an owner. `202` with the same answer for an address with an account, one without and one already in the organization, `403`, `404`, `400` for a bad email or role, `503` without mail. Inviting the same address again replaces the open invitation. |
+| `GET /api/v1/orgs/{slug}/invitations` | Admin or owner. The open invitations: id, email, role, when the link ends. |
+| `DELETE /api/v1/orgs/{slug}/invitations/{id}` | Admin or owner, for roles below their own. `204`, `403` or `404`. |
+| `POST /api/v1/invitations/accept` | Logged in. `{"token"}` from the link. The account's email must be the invited one: `403` for another account, which leaves the invitation open; `400` for a link that was used, ended or never existed; `200` with the organization and the role. |
+| `GET /api/v1/orgs/{slug}/members` | Admin or owner. `[{user_id, email, role}]`. |
+| `DELETE /api/v1/orgs/{slug}/members/{user_id}` | Anyone may remove themselves; otherwise only a higher role removes a lower one. `409` for the last owner, who stays. `204`, `403`, `404`. |
+| `POST` and `GET /api/v1/staff/organizations` | Platform staff only (`404` for everyone else, `401` without a session). `POST {"slug", "name", "owner_email"}` makes an organization and mails its first owner an invitation (`202`, `400`, `409` for a taken slug); `GET` lists slugs and names. Staff see nothing inside an organization and are not members of the ones they make. |
 | `GET` and `POST /api/v1/sticks` | The same two routes for an account that is in exactly one organization. With several it answers `409`: use the address with the slug. |
 
 
@@ -91,8 +102,23 @@ migration record, or rewrite the event log. The Hub warns at start if the switch
 security in force. Migrations still need the account that logged in, so it keeps rights to change the
 schema; it is the Hub's own queries that run as the plain role.
 
+Platform staff are accounts with a flag, set from the command line:
+
+```sh
+ck-hub make-staff ana@example.org --database-url postgres://...
+ck-hub revoke-staff ana@example.org --database-url postgres://...
+```
+
+A staff account sees a Platform panel on the page where it makes an organization and invites its
+first owner by mail.
+
+Owners and admins invite people from the People panel under the stick list (or the routes above).
+The invited person opens the link, logs in or signs up with the address the invitation was sent to,
+and joins with the invited role. The link carries its token after the `#`, works once, ends after 7
+days and is kept only as a hash. Invitation mail counts against the same mail limits as other mail.
+
 Anyone can sign up on the page when the Hub can send mail, but an account has no access until an
-owner or staff add it to an organization (`ck-hub add-member`); the page says so. Links in the mail
+owner invites it or staff add it to an organization (`ck-hub add-member`); the page says so. Links in the mail
 carry their token after the `#`, so it never reaches a server log and a mail scanner that opens the
 link does not use it up. A link works once. At most 3 mails go to one address in 5 minutes and 120
 in a minute from the whole Hub; over that, nothing is sent and the answer stays the same. Accounts

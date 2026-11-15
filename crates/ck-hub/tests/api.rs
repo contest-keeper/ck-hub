@@ -404,6 +404,14 @@ async fn the_page_is_served_and_needs_nothing_from_outside() {
             && page.contains("location.hash"),
         "the page signs people up and handles the links in their mail"
     );
+    assert!(
+        page.contains("/api/v1/invitations/accept")
+            && page.contains("/invitations")
+            && page.contains("/members")
+            && page.contains("/api/v1/staff/organizations")
+            && page.contains("\"invite\""),
+        "the page accepts invitations, lists people and lets staff make organizations"
+    );
     // Everything is in the one file: no scripts, styles or images from another address.
     assert!(
         !page.contains("http://") && !page.contains("https://"),

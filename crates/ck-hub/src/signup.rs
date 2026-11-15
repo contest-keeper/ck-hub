@@ -191,7 +191,7 @@ impl Hub {
         Ok(())
     }
 
-    fn base_url(&self) -> &str {
+    pub(crate) fn base_url(&self) -> &str {
         self.mailer.as_ref().map_or("", |(_, base)| base.as_str())
     }
 
@@ -250,7 +250,7 @@ impl Hub {
 
     /// A mail that cannot be sent is logged, not reported to the caller: the answer must not
     /// depend on it.
-    fn send(&self, mail: Mail) {
+    pub(crate) fn send(&self, mail: Mail) {
         if let Some((mailer, _)) = &self.mailer
             && let Err(error) = mailer.send(mail)
         {

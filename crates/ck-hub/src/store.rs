@@ -58,6 +58,12 @@ impl Role {
         }
     }
 
+    /// Whether someone with this role may invite or remove someone with `other`: only a lower role.
+    #[must_use]
+    pub fn may_manage(self, other: Role) -> bool {
+        self.rank() > other.rank()
+    }
+
     /// Whether someone with this role may do what `needed` asks for.
     #[must_use]
     pub fn allows(self, needed: Role) -> bool {
@@ -91,6 +97,8 @@ pub struct User {
     /// When the owner of the address confirmed it. `None` until then.
     pub email_verified_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    /// Platform staff make organizations. They do not see inside them.
+    pub is_platform_staff: bool,
 }
 
 /// What a store needs to make an account. The store picks the id.
@@ -125,6 +133,25 @@ pub struct Organization {
     pub id: String,
     pub slug: String,
     pub name: String,
+}
+
+/// An invitation to join an organization. The hash of its token is never given back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invitation {
+    pub id: String,
+    pub organization_id: String,
+    pub email: String,
+    pub role: Role,
+    pub invited_by: Option<String>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// A person in an organization, with their role there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Member {
+    pub user_id: String,
+    pub email: String,
+    pub role: Role,
 }
 
 /// An organization a user belongs to, and the role they have in it.
@@ -297,6 +324,50 @@ pub trait Store: Send + Sync {
     /// sessions.
     fn delete_unverified_users_before(&self, before: DateTime<Utc>) -> Result<(), StoreError>;
 
+    /// Keeps an invitation. It replaces the open one for the same organization and address (capitals
+    /// do not matter).
+    fn put_invitation(
+        &self,
+        organization_id: &str,
+        email: &str,
+        role: Role,
+        token_hash: &str,
+        invited_by: Option<&str>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<Invitation, StoreError>;
+
+    /// The invitation a token belongs to, without using it up. Ended ones are returned too.
+    fn invitation_for_token(&self, token_hash: &str) -> Result<Option<Invitation>, StoreError>;
+
+    /// Uses up an invitation: it is gone afterwards, and given back only if it has not ended by `now`.
+    fn take_invitation(
+        &self,
+        token_hash: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<Invitation>, StoreError>;
+
+    /// The open invitations of an organization, ordered by address.
+    fn invitations_of(&self, organization_id: &str) -> Result<Vec<Invitation>, StoreError>;
+
+    /// Returns false when the organization has no invitation with this id.
+    fn delete_invitation(&self, organization_id: &str, id: &str) -> Result<bool, StoreError>;
+
+    /// Removes every invitation that ended at or before `now`.
+    fn delete_expired_invitations(&self, now: DateTime<Utc>) -> Result<(), StoreError>;
+
+    /// Everyone in the organization, ordered by email.
+    fn members_of(&self, organization_id: &str) -> Result<Vec<Member>, StoreError>;
+
+    /// Returns false when the user was not a member.
+    fn remove_member(&self, organization_id: &str, user_id: &str) -> Result<bool, StoreError>;
+
+    fn count_owners(&self, organization_id: &str) -> Result<usize, StoreError>;
+
+    fn set_staff(&self, user_id: &str, staff: bool) -> Result<(), StoreError>;
+
+    /// Every organization, ordered by slug.
+    fn organizations(&self) -> Result<Vec<Organization>, StoreError>;
+
     /// Adds a stick to an organization. Returns false, and changes nothing, when its id is
     /// already known to any organization: a stick's secret is never replaced, and an id belongs
     /// to one organization.
@@ -323,6 +394,7 @@ pub struct MemoryStore {
     users: Mutex<Vec<User>>,
     sessions: Mutex<HashMap<String, (String, DateTime<Utc>)>>,
     email_tokens: Mutex<Vec<MailedToken>>,
+    invitations: Mutex<Vec<(Invitation, String)>>,
     organizations: Mutex<Vec<Organization>>,
     members: Mutex<Vec<(String, String, Role)>>,
     next_id: AtomicU64,
@@ -510,6 +582,7 @@ impl Store for MemoryStore {
             password_hash: user.password_hash,
             email_verified_at: user.email_verified_at,
             created_at: user.created_at,
+            is_platform_staff: false,
         };
         users.push(user.clone());
         Ok(Some(user))
@@ -732,6 +805,134 @@ impl Store for MemoryStore {
             .expect("sessions lock")
             .retain(|_, (owner, _)| !gone.contains(owner));
         Ok(())
+    }
+
+    fn put_invitation(
+        &self,
+        organization_id: &str,
+        email: &str,
+        role: Role,
+        token_hash: &str,
+        invited_by: Option<&str>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<Invitation, StoreError> {
+        let mut invitations = self.invitations.lock().expect("invitations lock");
+        invitations.retain(|(open, _)| {
+            !(open.organization_id == organization_id && open.email.eq_ignore_ascii_case(email))
+        });
+        let invitation = Invitation {
+            id: self.id("invite"),
+            organization_id: organization_id.to_owned(),
+            email: email.to_owned(),
+            role,
+            invited_by: invited_by.map(str::to_owned),
+            expires_at,
+        };
+        invitations.push((invitation.clone(), token_hash.to_owned()));
+        Ok(invitation)
+    }
+
+    fn invitation_for_token(&self, token_hash: &str) -> Result<Option<Invitation>, StoreError> {
+        let invitations = self.invitations.lock().expect("invitations lock");
+        Ok(invitations
+            .iter()
+            .find(|(_, hash)| hash == token_hash)
+            .map(|(invitation, _)| invitation.clone()))
+    }
+
+    fn take_invitation(
+        &self,
+        token_hash: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<Invitation>, StoreError> {
+        let mut invitations = self.invitations.lock().expect("invitations lock");
+        let Some(at) = invitations.iter().position(|(_, hash)| hash == token_hash) else {
+            return Ok(None);
+        };
+        let (invitation, _) = invitations.remove(at);
+        Ok((invitation.expires_at > now).then_some(invitation))
+    }
+
+    fn invitations_of(&self, organization_id: &str) -> Result<Vec<Invitation>, StoreError> {
+        let invitations = self.invitations.lock().expect("invitations lock");
+        let mut open: Vec<Invitation> = invitations
+            .iter()
+            .filter(|(invitation, _)| invitation.organization_id == organization_id)
+            .map(|(invitation, _)| invitation.clone())
+            .collect();
+        open.sort_by_key(|a| a.email.to_lowercase());
+        Ok(open)
+    }
+
+    fn delete_invitation(&self, organization_id: &str, id: &str) -> Result<bool, StoreError> {
+        let mut invitations = self.invitations.lock().expect("invitations lock");
+        let before = invitations.len();
+        invitations.retain(|(invitation, _)| {
+            !(invitation.organization_id == organization_id && invitation.id == id)
+        });
+        Ok(invitations.len() < before)
+    }
+
+    fn delete_expired_invitations(&self, now: DateTime<Utc>) -> Result<(), StoreError> {
+        self.invitations
+            .lock()
+            .expect("invitations lock")
+            .retain(|(invitation, _)| invitation.expires_at > now);
+        Ok(())
+    }
+
+    fn members_of(&self, organization_id: &str) -> Result<Vec<Member>, StoreError> {
+        let users = self.users.lock().expect("users lock");
+        let members = self.members.lock().expect("members lock");
+        let mut found: Vec<Member> = members
+            .iter()
+            .filter(|(org, _, _)| org == organization_id)
+            .filter_map(|(_, user_id, role)| {
+                users
+                    .iter()
+                    .find(|user| &user.id == user_id)
+                    .map(|user| Member {
+                        user_id: user_id.clone(),
+                        email: user.email.clone(),
+                        role: *role,
+                    })
+            })
+            .collect();
+        found.sort_by_key(|a| a.email.to_lowercase());
+        Ok(found)
+    }
+
+    fn remove_member(&self, organization_id: &str, user_id: &str) -> Result<bool, StoreError> {
+        let mut members = self.members.lock().expect("members lock");
+        let before = members.len();
+        members.retain(|(org, user, _)| !(org == organization_id && user == user_id));
+        Ok(members.len() < before)
+    }
+
+    fn count_owners(&self, organization_id: &str) -> Result<usize, StoreError> {
+        let members = self.members.lock().expect("members lock");
+        Ok(members
+            .iter()
+            .filter(|(org, _, role)| org == organization_id && *role == Role::Owner)
+            .count())
+    }
+
+    fn set_staff(&self, user_id: &str, staff: bool) -> Result<(), StoreError> {
+        let mut users = self.users.lock().expect("users lock");
+        if let Some(user) = users.iter_mut().find(|user| user.id == user_id) {
+            user.is_platform_staff = staff;
+        }
+        Ok(())
+    }
+
+    fn organizations(&self) -> Result<Vec<Organization>, StoreError> {
+        let mut all = self
+            .organizations
+            .lock()
+            .expect("organizations lock")
+            .clone();
+        all.sort_by(|a, b| a.slug.cmp(&b.slug));
+        Ok(all)
     }
 
     fn add_stick(&self, organization: &str, stick: Stick) -> Result<bool, StoreError> {
