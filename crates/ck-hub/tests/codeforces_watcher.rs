@@ -118,12 +118,10 @@ fn a_refusal_is_an_error_and_keeps_nothing() {
     let error = poll_once(&client, &store, &org, 1900, 2, Duration::ZERO).expect_err("refused");
 
     assert!(error.to_string().contains("contestId: not found"));
-    assert!(
-        store
-            .judge_submissions(&org, "codeforces", 1900)
-            .expect("read")
-            .is_empty()
-    );
+    let kept = store
+        .judge_submissions(&org, "codeforces", 1900)
+        .expect("read");
+    assert!(kept.is_empty());
 }
 
 #[test]
