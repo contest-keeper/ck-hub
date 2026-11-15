@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Duration, Utc};
 use ck_hub::{
     AcceptError, Hub, INVITATION_LIFETIME_DAYS, InviteError, MAX_MAILS_PER_ADDRESS, Mailer,
-    MemberError, MemoryMailer, MemoryStore, PasswordCost, Registry, Role, token_after,
+    MemberError, MemoryMailer, MemoryStore, PasswordCost, Registry, Role, StaffError, Store,
+    token_after,
 };
 
 const PASSWORD: &str = "correct horse battery";
@@ -11,6 +12,7 @@ const SLUG: &str = "rcpc";
 
 struct Setup {
     hub: Hub,
+    store: Arc<MemoryStore>,
     mailer: Arc<MemoryMailer>,
     now: Arc<Mutex<DateTime<Utc>>>,
 }
@@ -46,9 +48,10 @@ fn setup() -> Setup {
         Box::new(move || *now.lock().expect("clock"))
     };
     let mailer = Arc::new(MemoryMailer::default());
+    let store = Arc::new(MemoryStore::default());
     let hub = Hub::new(
         Registry::empty(),
-        Arc::new(MemoryStore::default()),
+        Arc::clone(&store) as Arc<dyn Store>,
         None,
         clock,
     )
@@ -64,7 +67,12 @@ fn setup() -> Setup {
         .expect("owner");
     hub.create_organization(SLUG, "RCPC", "owner@example.org")
         .expect("organization");
-    Setup { hub, mailer, now }
+    Setup {
+        hub,
+        store,
+        mailer,
+        now,
+    }
 }
 
 #[test]
@@ -305,5 +313,84 @@ fn invitations_can_be_listed_and_revoked_by_those_who_may_make_them() {
     assert_eq!(
         s.hub.accept_invitation(&guest, &token),
         Err(AcceptError::Invalid)
+    );
+}
+
+fn staff_session(s: &Setup) -> String {
+    let session = s.session("staff@example.org");
+    let account = s.hub.account(&session).expect("account");
+    assert!(!account.staff);
+    s.store.set_staff(&account.id, true).expect("staff");
+    session
+}
+
+#[test]
+fn staff_make_an_organization_and_invite_its_first_owner() {
+    let s = setup();
+    let staff = staff_session(&s);
+    let made = s
+        .hub
+        .staff_create_organization(&staff, "club", "The Club", "first@example.org")
+        .expect("made");
+    assert_eq!(made.slug, "club");
+    let token = s.invite_token("first@example.org");
+    let first = s.session("first@example.org");
+    assert_eq!(s.hub.accept_invitation(&first, &token), Ok(()));
+    let members = s.hub.members_of(&first, "club").expect("members");
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].role, Role::Owner);
+    assert_eq!(members[0].email, "first@example.org");
+}
+
+#[test]
+fn only_staff_may() {
+    let s = setup();
+    let owner = s.session("owner@example.org");
+    assert_eq!(
+        s.hub
+            .staff_create_organization(&owner, "club", "Club", "a@example.org")
+            .err(),
+        Some(StaffError::Forbidden)
+    );
+    assert_eq!(
+        s.hub.staff_organizations(&owner).err(),
+        Some(StaffError::Forbidden)
+    );
+    assert_eq!(
+        s.hub.staff_organizations("no session").err(),
+        Some(StaffError::Unauthorized)
+    );
+}
+
+#[test]
+fn staff_see_slugs_and_names_but_no_sticks() {
+    let s = setup();
+    let staff = staff_session(&s);
+    let all = s.hub.staff_organizations(&staff).expect("list");
+    assert_eq!(all.len(), 1);
+    assert_eq!((all[0].slug.as_str(), all[0].name.as_str()), (SLUG, "RCPC"));
+    assert_eq!(
+        s.hub.access(&staff, SLUG, Role::Viewer).err(),
+        Some(ck_hub::AccessError::NotFound)
+    );
+}
+
+#[test]
+fn a_bad_slug_or_a_taken_slug_is_refused() {
+    let s = setup();
+    let staff = staff_session(&s);
+    let make =
+        |slug: &str, email: &str| s.hub.staff_create_organization(&staff, slug, "Name", email);
+    assert_eq!(
+        make("Bad Slug", "a@example.org").err(),
+        Some(StaffError::BadSlug)
+    );
+    assert_eq!(
+        make(SLUG, "a@example.org").err(),
+        Some(StaffError::SlugTaken)
+    );
+    assert_eq!(
+        make("fresh", "not an address").err(),
+        Some(StaffError::BadEmail)
     );
 }

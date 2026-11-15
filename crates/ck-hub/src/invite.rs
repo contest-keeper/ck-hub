@@ -2,10 +2,10 @@
 
 use chrono::Duration;
 
-use crate::accounts::{AccessError, token_hash, unavailable, valid_email};
+use crate::accounts::{AccessError, token_hash, unavailable, valid_email, valid_slug};
 use crate::hub::Hub;
 use crate::mail::Mail;
-use crate::store::{Invitation, Member, Role, StoreError};
+use crate::store::{Invitation, Member, Organization, Role, StoreError};
 
 pub const INVITATION_LIFETIME_DAYS: i64 = 7;
 
@@ -39,6 +39,18 @@ pub enum MemberError {
     NotFound,
     /// An organization always keeps one owner.
     LastOwner,
+    Unavailable,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum StaffError {
+    Unauthorized,
+    /// The account is not platform staff.
+    Forbidden,
+    NoMail,
+    BadEmail,
+    BadSlug,
+    SlugTaken,
     Unavailable,
 }
 
@@ -272,5 +284,83 @@ impl Hub {
             .delete_invitation(&access.organization.id, invitation_id)
             .map_err(store_failed)?;
         Ok(())
+    }
+
+    /// For platform staff: makes an organization and invites its first owner by mail. The staff
+    /// account does not become a member.
+    pub fn staff_create_organization(
+        &self,
+        session: &str,
+        slug: &str,
+        name: &str,
+        owner_email: &str,
+    ) -> Result<Organization, StaffError> {
+        let account = self.staff_account(session)?;
+        if self.mailer.is_none() {
+            return Err(StaffError::NoMail);
+        }
+        if !valid_slug(slug) || name.trim().is_empty() || name.chars().any(char::is_control) {
+            return Err(StaffError::BadSlug);
+        }
+        if !valid_email(owner_email) {
+            return Err(StaffError::BadEmail);
+        }
+        let store_failed = |error: StoreError| {
+            failed(&error);
+            StaffError::Unavailable
+        };
+        let organization = self
+            .store
+            .create_organization(slug, name)
+            .map_err(store_failed)?
+            .ok_or(StaffError::SlugTaken)?;
+        let token = ck_crypto::generate_stick_token();
+        let token = token.expose();
+        let now = (self.clock)();
+        self.store
+            .put_invitation(
+                &organization.id,
+                owner_email,
+                Role::Owner,
+                &token_hash(token),
+                Some(&account.id),
+                now + Duration::days(INVITATION_LIFETIME_DAYS),
+            )
+            .map_err(store_failed)?;
+        // Staff are trusted, so this mail is not counted against the per-address limit.
+        self.send(Mail {
+            to: owner_email.to_owned(),
+            subject: format!("Join {} on Keeper Hub", organization.name),
+            body: format!(
+                "You were invited to be the owner of {} on Keeper Hub. Open the link while \
+                 logged in with this address (make an account first if you have none). It works \
+                 once, for {} days.\n\n{}/#invite={token}\n",
+                organization.name,
+                INVITATION_LIFETIME_DAYS,
+                self.base_url()
+            ),
+        });
+        Ok(organization)
+    }
+
+    /// Every organization, by name only. Nothing an organization holds is shown.
+    pub fn staff_organizations(&self, session: &str) -> Result<Vec<Organization>, StaffError> {
+        self.staff_account(session)?;
+        self.store.organizations().map_err(|error| {
+            failed(&error);
+            StaffError::Unavailable
+        })
+    }
+
+    fn staff_account(&self, session: &str) -> Result<crate::accounts::Account, StaffError> {
+        let account = self.account(session).map_err(|error| match error {
+            AccessError::Unavailable => StaffError::Unavailable,
+            _ => StaffError::Unauthorized,
+        })?;
+        if account.staff {
+            Ok(account)
+        } else {
+            Err(StaffError::Forbidden)
+        }
     }
 }
