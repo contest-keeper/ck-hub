@@ -32,6 +32,6 @@ pub use signup::{
     VERIFY_LIFETIME_HOURS,
 };
 pub use store::{
-    Membership, MemoryStore, NewUser, Organization, Role, SeenHeartbeat, Stick, Store, StoreError,
-    StoredEvent, TokenPurpose, User,
+    Invitation, Member, Membership, MemoryStore, NewUser, Organization, Role, SeenHeartbeat, Stick,
+    Store, StoreError, StoredEvent, TokenPurpose, User,
 };

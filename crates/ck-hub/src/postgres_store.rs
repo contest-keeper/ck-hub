@@ -8,13 +8,13 @@ use postgres::Client;
 use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::store::{
-    Membership, NewUser, Organization, Role, SeenHeartbeat, Stick, Store, StoreError, StoredEvent,
-    TokenPurpose, User,
+    Invitation, Member, Membership, NewUser, Organization, Role, SeenHeartbeat, Stick, Store,
+    StoreError, StoredEvent, TokenPurpose, User,
 };
 
 /// The schema, in the order it is applied. A migration that was applied is never run again and
 /// never edited: a change is a new file.
-const MIGRATIONS: [(&str, &str); 8] = [
+const MIGRATIONS: [(&str, &str); 9] = [
     (
         "0001_heartbeats_and_events",
         include_str!("../migrations/0001_heartbeats_and_events.sql"),
@@ -43,6 +43,10 @@ const MIGRATIONS: [(&str, &str); 8] = [
     (
         "0008_hub_role",
         include_str!("../migrations/0008_hub_role.sql"),
+    ),
+    (
+        "0009_invitations_and_staff",
+        include_str!("../migrations/0009_invitations_and_staff.sql"),
     ),
 ];
 
@@ -361,7 +365,7 @@ impl Store for PostgresStore {
                 "INSERT INTO users (email, password_hash, email_verified_at, created_at)
                  VALUES ($1, $2, $3, $4)
                  ON CONFLICT DO NOTHING
-                 RETURNING id, email, password_hash, email_verified_at, created_at",
+                 RETURNING id, email, password_hash, email_verified_at, created_at, is_platform_staff",
                 &[
                     &user.email,
                     &user.password_hash,
@@ -376,7 +380,7 @@ impl Store for PostgresStore {
     fn user_by_email(&self, email: &str) -> Result<Option<User>, StoreError> {
         let row = self.run(|client| {
             client.query_opt(
-                "SELECT id, email, password_hash, email_verified_at, created_at
+                "SELECT id, email, password_hash, email_verified_at, created_at, is_platform_staff
                  FROM users WHERE lower(email) = lower($1)",
                 &[&email],
             )
@@ -387,7 +391,7 @@ impl Store for PostgresStore {
     fn user(&self, id: &str) -> Result<Option<User>, StoreError> {
         let row = self.run(|client| {
             client.query_opt(
-                "SELECT id, email, password_hash, email_verified_at, created_at
+                "SELECT id, email, password_hash, email_verified_at, created_at, is_platform_staff
                  FROM users WHERE id = $1",
                 &[&id],
             )
@@ -603,6 +607,158 @@ impl Store for PostgresStore {
         Ok(())
     }
 
+    fn put_invitation(
+        &self,
+        organization_id: &str,
+        email: &str,
+        role: Role,
+        token_hash: &str,
+        invited_by: Option<&str>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<Invitation, StoreError> {
+        let row = self.run(|client| {
+            let mut transaction = client.transaction()?;
+            transaction.execute(
+                "DELETE FROM invitations WHERE organization_id = $1 AND lower(email) = lower($2)",
+                &[&organization_id, &email],
+            )?;
+            let row = transaction.query_one(
+                "INSERT INTO invitations (organization_id, email, role, token_hash, invited_by, expires_at)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 RETURNING id, organization_id, email, role, invited_by, expires_at",
+                &[
+                    &organization_id,
+                    &email,
+                    &role.as_str(),
+                    &token_hash,
+                    &invited_by,
+                    &expires_at,
+                ],
+            )?;
+            transaction.commit()?;
+            Ok(row)
+        })?;
+        invitation_from(&row)
+    }
+
+    fn invitation_for_token(&self, token_hash: &str) -> Result<Option<Invitation>, StoreError> {
+        let row = self.run(|client| {
+            client.query_opt(
+                "SELECT id, organization_id, email, role, invited_by, expires_at
+                 FROM invitations WHERE token_hash = $1",
+                &[&token_hash],
+            )
+        })?;
+        row.as_ref().map(invitation_from).transpose()
+    }
+
+    fn take_invitation(
+        &self,
+        token_hash: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<Invitation>, StoreError> {
+        let row = self.run(|client| {
+            client.query_opt(
+                "DELETE FROM invitations WHERE token_hash = $1
+                 RETURNING id, organization_id, email, role, invited_by, expires_at",
+                &[&token_hash],
+            )
+        })?;
+        let Some(invitation) = row.as_ref().map(invitation_from).transpose()? else {
+            return Ok(None);
+        };
+        Ok((invitation.expires_at > now).then_some(invitation))
+    }
+
+    fn invitations_of(&self, organization_id: &str) -> Result<Vec<Invitation>, StoreError> {
+        let rows = self.run(|client| {
+            client.query(
+                "SELECT id, organization_id, email, role, invited_by, expires_at
+                 FROM invitations WHERE organization_id = $1 ORDER BY lower(email)",
+                &[&organization_id],
+            )
+        })?;
+        rows.iter().map(invitation_from).collect()
+    }
+
+    fn delete_invitation(&self, organization_id: &str, id: &str) -> Result<bool, StoreError> {
+        let deleted = self.run(|client| {
+            client.execute(
+                "DELETE FROM invitations WHERE organization_id = $1 AND id = $2",
+                &[&organization_id, &id],
+            )
+        })?;
+        Ok(deleted > 0)
+    }
+
+    fn delete_expired_invitations(&self, now: DateTime<Utc>) -> Result<(), StoreError> {
+        self.run(|client| {
+            client.execute("DELETE FROM invitations WHERE expires_at <= $1", &[&now])
+        })?;
+        Ok(())
+    }
+
+    fn members_of(&self, organization_id: &str) -> Result<Vec<Member>, StoreError> {
+        let rows = self.run(|client| {
+            client.query(
+                "SELECT users.id, users.email, memberships.role
+                 FROM memberships JOIN users ON users.id = memberships.user_id
+                 WHERE memberships.organization_id = $1 ORDER BY lower(users.email)",
+                &[&organization_id],
+            )
+        })?;
+        rows.iter()
+            .map(|row| {
+                Ok(Member {
+                    user_id: row.get(0),
+                    email: row.get(1),
+                    role: role_from(row.get::<_, &str>(2))?,
+                })
+            })
+            .collect()
+    }
+
+    fn remove_member(&self, organization_id: &str, user_id: &str) -> Result<bool, StoreError> {
+        let removed = self.run(|client| {
+            client.execute(
+                "DELETE FROM memberships WHERE organization_id = $1 AND user_id = $2",
+                &[&organization_id, &user_id],
+            )
+        })?;
+        Ok(removed > 0)
+    }
+
+    fn count_owners(&self, organization_id: &str) -> Result<usize, StoreError> {
+        let row = self.run(|client| {
+            client.query_one(
+                "SELECT count(*) FROM memberships WHERE organization_id = $1 AND role = 'owner'",
+                &[&organization_id],
+            )
+        })?;
+        let count: i64 = row.get(0);
+        usize::try_from(count).map_err(failed)
+    }
+
+    fn set_staff(&self, user_id: &str, staff: bool) -> Result<(), StoreError> {
+        self.run(|client| {
+            client.execute(
+                "UPDATE users SET is_platform_staff = $2 WHERE id = $1",
+                &[&user_id, &staff],
+            )
+        })?;
+        Ok(())
+    }
+
+    fn organizations(&self) -> Result<Vec<Organization>, StoreError> {
+        let rows = self.run(|client| {
+            client.query(
+                "SELECT id, slug, name FROM organizations ORDER BY slug",
+                &[],
+            )
+        })?;
+        Ok(rows.iter().map(organization_from).collect())
+    }
+
     fn add_stick(&self, organization: &str, stick: Stick) -> Result<bool, StoreError> {
         let machine = stick
             .machine_number
@@ -685,7 +841,19 @@ fn user_from(row: &postgres::Row) -> User {
         password_hash: row.get(2),
         email_verified_at: row.get(3),
         created_at: row.get(4),
+        is_platform_staff: row.get(5),
     }
+}
+
+fn invitation_from(row: &postgres::Row) -> Result<Invitation, StoreError> {
+    Ok(Invitation {
+        id: row.get(0),
+        organization_id: row.get(1),
+        email: row.get(2),
+        role: role_from(row.get::<_, &str>(3))?,
+        invited_by: row.get(4),
+        expires_at: row.get(5),
+    })
 }
 
 fn organization_from(row: &postgres::Row) -> Organization {

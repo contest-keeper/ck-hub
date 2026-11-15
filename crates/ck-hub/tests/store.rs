@@ -297,6 +297,7 @@ fn identity_contract(store: &dyn Store) {
 
     sessions_contract(store, &id, &user.id);
     verification_contract(store);
+    invitations_contract(store);
 }
 
 fn verification_contract(store: &dyn Store) {
@@ -937,4 +938,183 @@ fn postgres_hub_role_cannot_change_the_schema_or_the_event_log() {
             .batch_execute("ROLLBACK TO SAVEPOINT s")
             .expect("rollback");
     }
+}
+
+// One long scenario on purpose: its steps share the same organization and people.
+#[allow(clippy::too_many_lines)]
+fn invitations_contract(store: &dyn Store) {
+    let id = unique();
+    let org = store
+        .create_organization(&format!("{id}-invite"), "Invite")
+        .expect("write")
+        .expect("a new organization")
+        .id;
+    let person = |name: &str| {
+        store
+            .create_user(NewUser {
+                email: format!("{id}-{name}@example.org"),
+                password_hash: "hash".to_owned(),
+                email_verified_at: Some(time(0)),
+                created_at: time(0),
+            })
+            .expect("write")
+            .expect("a new account")
+    };
+    let (ana, bo, cy) = (person("ana"), person("bo"), person("cy"));
+    let hash = |name: &str| format!("{id}-hash-{name}");
+
+    // One open invitation per organization and address, capitals aside: inviting again replaces it.
+    let first = store
+        .put_invitation(
+            &org,
+            &bo.email,
+            Role::Viewer,
+            &hash("one"),
+            Some(&ana.id),
+            time(100),
+        )
+        .expect("write");
+    let second = store
+        .put_invitation(
+            &org,
+            &bo.email.to_uppercase(),
+            Role::Admin,
+            &hash("two"),
+            None,
+            time(200),
+        )
+        .expect("write");
+    assert_ne!(first.id, second.id);
+    assert_eq!(second.role, Role::Admin);
+    assert_eq!(second.invited_by, None);
+    assert_eq!(
+        store.invitation_for_token(&hash("one")).expect("read"),
+        None,
+        "replaced"
+    );
+    assert_eq!(
+        store.invitation_for_token(&hash("two")).expect("read"),
+        Some(second.clone())
+    );
+    assert_eq!(
+        store.invitations_of(&org).expect("read"),
+        vec![second.clone()]
+    );
+
+    // Taking uses it up, and only gives it back before it ended.
+    assert_eq!(
+        store
+            .take_invitation(&hash("two"), time(150))
+            .expect("write"),
+        Some(second.clone())
+    );
+    assert_eq!(
+        store
+            .take_invitation(&hash("two"), time(150))
+            .expect("write"),
+        None
+    );
+    store
+        .put_invitation(
+            &org,
+            &cy.email,
+            Role::Viewer,
+            &hash("late"),
+            None,
+            time(100),
+        )
+        .expect("write");
+    assert_eq!(
+        store
+            .take_invitation(&hash("late"), time(100))
+            .expect("write"),
+        None
+    );
+    assert_eq!(
+        store.invitation_for_token(&hash("late")).expect("read"),
+        None,
+        "gone either way"
+    );
+
+    // Listed by address, revoked by id within the organization only.
+    let kept = store
+        .put_invitation(
+            &org,
+            &cy.email,
+            Role::Viewer,
+            &hash("cy"),
+            Some(&ana.id),
+            time(300),
+        )
+        .expect("write");
+    let other_org = store
+        .create_organization(&format!("{id}-other"), "Other")
+        .expect("write")
+        .expect("a new organization")
+        .id;
+    assert!(
+        !store
+            .delete_invitation(&other_org, &kept.id)
+            .expect("write")
+    );
+    assert!(store.delete_invitation(&org, &kept.id).expect("write"));
+    assert!(!store.delete_invitation(&org, &kept.id).expect("write"));
+    store
+        .put_invitation(&org, &cy.email, Role::Viewer, &hash("old"), None, time(10))
+        .expect("write");
+    store.delete_expired_invitations(time(50)).expect("write");
+    assert!(store.invitations_of(&org).expect("read").is_empty());
+
+    // Members: listed by email, removed once, owners counted.
+    assert!(store.add_member(&org, &ana.id, Role::Owner).expect("write"));
+    assert!(store.add_member(&org, &cy.id, Role::Viewer).expect("write"));
+    assert!(store.add_member(&org, &bo.id, Role::Admin).expect("write"));
+    let listed = store.members_of(&org).expect("read");
+    assert_eq!(
+        listed
+            .iter()
+            .map(|m| (m.email.clone(), m.role))
+            .collect::<Vec<_>>(),
+        vec![
+            (ana.email.clone(), Role::Owner),
+            (bo.email.clone(), Role::Admin),
+            (cy.email.clone(), Role::Viewer),
+        ]
+    );
+    assert_eq!(store.count_owners(&org).expect("read"), 1);
+    assert!(store.remove_member(&org, &cy.id).expect("write"));
+    assert!(!store.remove_member(&org, &cy.id).expect("write"));
+    assert_eq!(store.members_of(&org).expect("read").len(), 2);
+
+    // Staff flag, and the list of organizations.
+    assert!(
+        !store
+            .user(&ana.id)
+            .expect("read")
+            .expect("user")
+            .is_platform_staff
+    );
+    store.set_staff(&ana.id, true).expect("write");
+    assert!(
+        store
+            .user(&ana.id)
+            .expect("read")
+            .expect("user")
+            .is_platform_staff
+    );
+    store.set_staff(&ana.id, false).expect("write");
+    assert!(
+        !store
+            .user(&ana.id)
+            .expect("read")
+            .expect("user")
+            .is_platform_staff
+    );
+    let slugs: Vec<String> = store
+        .organizations()
+        .expect("read")
+        .into_iter()
+        .map(|o| o.slug)
+        .collect();
+    assert!(slugs.contains(&format!("{id}-invite")) && slugs.contains(&format!("{id}-other")));
 }
