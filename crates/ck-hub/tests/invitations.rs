@@ -120,7 +120,7 @@ fn an_invitation_is_accepted_only_by_the_account_with_that_address_and_only_once
         Err(AcceptError::Unauthorized)
     );
     let guest = s.session("guest@example.org");
-    assert_eq!(s.hub.accept_invitation(&guest, &token), Ok(()));
+    assert!(s.hub.accept_invitation(&guest, &token).is_ok());
     let members = s.hub.members_of(&owner, SLUG).expect("members");
     assert!(
         members
@@ -167,7 +167,7 @@ fn inviting_again_replaces_the_open_invitation_and_the_old_link_stops_working() 
         s.hub.accept_invitation(&guest, &first),
         Err(AcceptError::Invalid)
     );
-    assert_eq!(s.hub.accept_invitation(&guest, &second), Ok(()));
+    assert!(s.hub.accept_invitation(&guest, &second).is_ok());
     assert_eq!(s.hub.invitations_of(&owner, SLUG).expect("list"), vec![]);
 }
 
@@ -335,7 +335,7 @@ fn staff_make_an_organization_and_invite_its_first_owner() {
     assert_eq!(made.slug, "club");
     let token = s.invite_token("first@example.org");
     let first = s.session("first@example.org");
-    assert_eq!(s.hub.accept_invitation(&first, &token), Ok(()));
+    assert!(s.hub.accept_invitation(&first, &token).is_ok());
     let members = s.hub.members_of(&first, "club").expect("members");
     assert_eq!(members.len(), 1);
     assert_eq!(members[0].role, Role::Owner);

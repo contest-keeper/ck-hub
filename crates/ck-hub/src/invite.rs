@@ -5,7 +5,7 @@ use chrono::Duration;
 use crate::accounts::{AccessError, token_hash, unavailable, valid_email, valid_slug};
 use crate::hub::Hub;
 use crate::mail::Mail;
-use crate::store::{Invitation, Member, Organization, Role, StoreError};
+use crate::store::{Invitation, Member, Membership, Organization, Role, StoreError};
 
 pub const INVITATION_LIFETIME_DAYS: i64 = 7;
 
@@ -162,8 +162,13 @@ impl Hub {
         Ok(())
     }
 
-    /// Uses an invitation for the logged-in account, which must have the invited address.
-    pub fn accept_invitation(&self, session: &str, invite_token: &str) -> Result<(), AcceptError> {
+    /// Uses an invitation for the logged-in account, which must have the invited address. Gives
+    /// back the organization and the role the account has in it afterwards.
+    pub fn accept_invitation(
+        &self,
+        session: &str,
+        invite_token: &str,
+    ) -> Result<Membership, AcceptError> {
         let account = self.account(session).map_err(|error| match error {
             AccessError::Unavailable => AcceptError::Unavailable,
             _ => AcceptError::Unauthorized,
@@ -193,7 +198,11 @@ impl Hub {
         self.store
             .add_member(&invitation.organization_id, &account.id, invitation.role)
             .map_err(store_failed)?;
-        Ok(())
+        self.organizations_of(&account)
+            .map_err(|_| AcceptError::Unavailable)?
+            .into_iter()
+            .find(|m| m.organization.id == invitation.organization_id)
+            .ok_or(AcceptError::Unavailable)
     }
 
     pub fn members_of(&self, session: &str, slug: &str) -> Result<Vec<Member>, MemberError> {

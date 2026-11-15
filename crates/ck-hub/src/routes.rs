@@ -9,7 +9,7 @@ use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::header::{CACHE_CONTROL, COOKIE, LOCATION, SET_COOKIE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use ck_protocol::{HEARTBEAT_PATH, SIGNATURE_HEADER, STICK_HEADER};
 use serde::Deserialize;
 use serde_json::json;
@@ -18,6 +18,7 @@ use crate::accounts::{
     Access, AccessError, Account, LoginError, MIN_PASSWORD_LENGTH, SESSION_LIFETIME_HOURS,
 };
 use crate::hub::{Hub, Rejection};
+use crate::invite::{AcceptError, InviteError, MemberError, StaffError};
 use crate::register::{NewStick, RegisterError};
 use crate::signup::{SignupError, TokenError};
 use crate::store::{Membership, Role};
@@ -59,6 +60,24 @@ pub fn router(hub: Arc<Hub>) -> Router {
             get(sticks_of)
                 .post(register_in)
                 .layer(DefaultBodyLimit::max(MAX_REGISTRY_BYTES)),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/invitations",
+            get(invitations_of).post(invite),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/invitations/{id}",
+            delete(revoke_invitation),
+        )
+        .route("/api/v1/orgs/{slug}/members", get(members_of))
+        .route(
+            "/api/v1/orgs/{slug}/members/{user_id}",
+            delete(remove_member),
+        )
+        .route("/api/v1/invitations/accept", post(accept_invitation))
+        .route(
+            "/api/v1/staff/organizations",
+            get(staff_organizations).post(staff_create_organization),
         )
         .route("/api/v1/login", post(login))
         .route("/api/v1/logout", post(logout))
@@ -386,11 +405,241 @@ fn account_json(account: &Account, memberships: &[Membership]) -> serde_json::Va
         "email": account.email,
         "organizations": organizations,
     });
+    if account.staff {
+        answer["staff"] = json!(true);
+    }
     // The role of an account with one organization, as the page and the admin tool read it today.
     if let [only] = memberships {
         answer["role"] = json!(only.role.as_str());
     }
     answer
+}
+
+#[derive(Deserialize)]
+struct InviteBody {
+    email: String,
+    role: String,
+}
+
+#[derive(Deserialize)]
+struct StaffOrganizationBody {
+    slug: String,
+    name: String,
+    owner_email: String,
+}
+
+fn error_text(status: StatusCode, text: &str) -> Response {
+    (status, Json(json!({ "error": text }))).into_response()
+}
+
+fn member_denied(error: &MemberError) -> Response {
+    match error {
+        MemberError::Unauthorized => denied(denied_for(&AccessError::Unauthorized)),
+        MemberError::Forbidden => denied(denied_for(&AccessError::Forbidden)),
+        MemberError::NotFound => denied(denied_for(&AccessError::NotFound)),
+        MemberError::LastOwner => error_text(
+            StatusCode::CONFLICT,
+            "an organization keeps at least one owner",
+        ),
+        MemberError::Unavailable => denied(denied_for(&AccessError::Unavailable)),
+    }
+}
+
+/// Runs `work` with the session cookie's token on a thread where blocking is fine. No cookie is a 401.
+async fn with_session<T: Send + 'static>(
+    hub: Arc<Hub>,
+    headers: &HeaderMap,
+    work: impl FnOnce(&Hub, &str) -> T + Send + 'static,
+) -> Result<T, Response> {
+    let Some(token) = session_token(headers) else {
+        return Err(denied(denied_for(&AccessError::Unauthorized)));
+    };
+    tokio::task::spawn_blocking(move || work(&hub, &token))
+        .await
+        .map_err(|_| denied(denied_for(&AccessError::Unavailable)))
+}
+
+async fn invite(
+    State(hub): State<Arc<Hub>>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<InviteBody>,
+) -> Response {
+    let Some(role) = Role::parse(&body.role) else {
+        return bad_request("the role must be owner, admin or viewer");
+    };
+    let result = with_session(hub, &headers, move |hub, token| {
+        hub.invite(token, &slug, &body.email, role)
+    })
+    .await;
+    match result {
+        Err(response) => response,
+        Ok(Ok(())) => accepted_mail("invitation sent"),
+        Ok(Err(InviteError::NoMail)) => no_mail(),
+        Ok(Err(InviteError::BadEmail)) => bad_request("that is not an email address"),
+        Ok(Err(InviteError::Unauthorized)) => denied(denied_for(&AccessError::Unauthorized)),
+        Ok(Err(InviteError::Forbidden)) => denied(denied_for(&AccessError::Forbidden)),
+        Ok(Err(InviteError::NotFound)) => denied(denied_for(&AccessError::NotFound)),
+        Ok(Err(InviteError::Unavailable)) => denied(denied_for(&AccessError::Unavailable)),
+    }
+}
+
+async fn invitations_of(
+    State(hub): State<Arc<Hub>>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let result = with_session(hub, &headers, move |hub, token| {
+        hub.invitations_of(token, &slug)
+    })
+    .await;
+    match result {
+        Err(response) => response,
+        Ok(Ok(list)) => Json(
+            list.iter()
+                .map(|i| {
+                    json!({
+                        "id": i.id,
+                        "email": i.email,
+                        "role": i.role.as_str(),
+                        "expires_at": i.expires_at,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Ok(Err(error)) => member_denied(&error),
+    }
+}
+
+async fn revoke_invitation(
+    State(hub): State<Arc<Hub>>,
+    Path((slug, id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let result = with_session(hub, &headers, move |hub, token| {
+        hub.revoke_invitation(token, &slug, &id)
+    })
+    .await;
+    match result {
+        Err(response) => response,
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(error)) => member_denied(&error),
+    }
+}
+
+async fn members_of(
+    State(hub): State<Arc<Hub>>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let result = with_session(hub, &headers, move |hub, token| {
+        hub.members_of(token, &slug)
+    })
+    .await;
+    match result {
+        Err(response) => response,
+        Ok(Ok(list)) => Json(
+            list.iter()
+                .map(|m| json!({ "user_id": m.user_id, "email": m.email, "role": m.role.as_str() }))
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Ok(Err(error)) => member_denied(&error),
+    }
+}
+
+async fn remove_member(
+    State(hub): State<Arc<Hub>>,
+    Path((slug, user_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let result = with_session(hub, &headers, move |hub, token| {
+        hub.remove_member(token, &slug, &user_id)
+    })
+    .await;
+    match result {
+        Err(response) => response,
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(error)) => member_denied(&error),
+    }
+}
+
+async fn accept_invitation(
+    State(hub): State<Arc<Hub>>,
+    headers: HeaderMap,
+    Json(body): Json<TokenBody>,
+) -> Response {
+    let result = with_session(hub, &headers, move |hub, token| {
+        hub.accept_invitation(token, &body.token)
+    })
+    .await;
+    match result {
+        Err(response) => response,
+        Ok(Ok(membership)) => Json(json!({
+            "organization": {
+                "slug": membership.organization.slug,
+                "name": membership.organization.name,
+            },
+            "role": membership.role.as_str(),
+        }))
+        .into_response(),
+        Ok(Err(AcceptError::Unauthorized)) => denied(denied_for(&AccessError::Unauthorized)),
+        Ok(Err(AcceptError::WrongAccount)) => error_text(
+            StatusCode::FORBIDDEN,
+            "this invitation is for another account: log in with the address it was sent to",
+        ),
+        Ok(Err(AcceptError::Invalid)) => bad_link(),
+        Ok(Err(AcceptError::Unavailable)) => denied(denied_for(&AccessError::Unavailable)),
+    }
+}
+
+/// Staff routes answer 404 to everyone else, so nobody learns they exist.
+fn staff_denied(error: &StaffError) -> Response {
+    match error {
+        StaffError::Unauthorized => denied(denied_for(&AccessError::Unauthorized)),
+        StaffError::Forbidden => StatusCode::NOT_FOUND.into_response(),
+        StaffError::NoMail => no_mail(),
+        StaffError::BadEmail => bad_request("that is not an email address"),
+        StaffError::BadSlug => bad_request(
+            "the slug must be lowercase letters, digits and hyphens, and the name must not be empty",
+        ),
+        StaffError::SlugTaken => error_text(
+            StatusCode::CONFLICT,
+            "an organization with that slug exists",
+        ),
+        StaffError::Unavailable => denied(denied_for(&AccessError::Unavailable)),
+    }
+}
+
+async fn staff_create_organization(
+    State(hub): State<Arc<Hub>>,
+    headers: HeaderMap,
+    Json(body): Json<StaffOrganizationBody>,
+) -> Response {
+    let result = with_session(hub, &headers, move |hub, token| {
+        hub.staff_create_organization(token, &body.slug, &body.name, &body.owner_email)
+    })
+    .await;
+    match result {
+        Err(response) => response,
+        Ok(Ok(_)) => accepted_mail("the organization was made and its owner invited"),
+        Ok(Err(error)) => staff_denied(&error),
+    }
+}
+
+async fn staff_organizations(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Response {
+    let result = with_session(hub, &headers, |hub, token| hub.staff_organizations(token)).await;
+    match result {
+        Err(response) => response,
+        Ok(Ok(list)) => Json(
+            list.iter()
+                .map(|o| json!({ "slug": o.slug, "name": o.name }))
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Ok(Err(error)) => staff_denied(&error),
+    }
 }
 
 /// The cookie that carries a session. `HttpOnly` keeps scripts from reading it, `SameSite=Strict`
