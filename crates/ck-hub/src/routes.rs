@@ -450,13 +450,13 @@ async fn with_session<T: Send + 'static>(
     hub: Arc<Hub>,
     headers: &HeaderMap,
     work: impl FnOnce(&Hub, &str) -> T + Send + 'static,
-) -> Result<T, Response> {
+) -> Result<T, Denied> {
     let Some(token) = session_token(headers) else {
-        return Err(denied(denied_for(&AccessError::Unauthorized)));
+        return Err(denied_for(&AccessError::Unauthorized));
     };
     tokio::task::spawn_blocking(move || work(&hub, &token))
         .await
-        .map_err(|_| denied(denied_for(&AccessError::Unavailable)))
+        .map_err(|_| denied_for(&AccessError::Unavailable))
 }
 
 async fn invite(
@@ -473,7 +473,7 @@ async fn invite(
     })
     .await;
     match result {
-        Err(response) => response,
+        Err(reason) => denied(reason),
         Ok(Ok(())) => accepted_mail("invitation sent"),
         Ok(Err(InviteError::NoMail)) => no_mail(),
         Ok(Err(InviteError::BadEmail)) => bad_request("that is not an email address"),
@@ -494,7 +494,7 @@ async fn invitations_of(
     })
     .await;
     match result {
-        Err(response) => response,
+        Err(reason) => denied(reason),
         Ok(Ok(list)) => Json(
             list.iter()
                 .map(|i| {
@@ -522,7 +522,7 @@ async fn revoke_invitation(
     })
     .await;
     match result {
-        Err(response) => response,
+        Err(reason) => denied(reason),
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
         Ok(Err(error)) => member_denied(&error),
     }
@@ -538,7 +538,7 @@ async fn members_of(
     })
     .await;
     match result {
-        Err(response) => response,
+        Err(reason) => denied(reason),
         Ok(Ok(list)) => Json(
             list.iter()
                 .map(|m| json!({ "user_id": m.user_id, "email": m.email, "role": m.role.as_str() }))
@@ -559,7 +559,7 @@ async fn remove_member(
     })
     .await;
     match result {
-        Err(response) => response,
+        Err(reason) => denied(reason),
         Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
         Ok(Err(error)) => member_denied(&error),
     }
@@ -575,7 +575,7 @@ async fn accept_invitation(
     })
     .await;
     match result {
-        Err(response) => response,
+        Err(reason) => denied(reason),
         Ok(Ok(membership)) => Json(json!({
             "organization": {
                 "slug": membership.organization.slug,
@@ -622,7 +622,7 @@ async fn staff_create_organization(
     })
     .await;
     match result {
-        Err(response) => response,
+        Err(reason) => denied(reason),
         Ok(Ok(_)) => accepted_mail("the organization was made and its owner invited"),
         Ok(Err(error)) => staff_denied(&error),
     }
@@ -631,7 +631,7 @@ async fn staff_create_organization(
 async fn staff_organizations(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Response {
     let result = with_session(hub, &headers, Hub::staff_organizations).await;
     match result {
-        Err(response) => response,
+        Err(reason) => denied(reason),
         Ok(Ok(list)) => Json(
             list.iter()
                 .map(|o| json!({ "slug": o.slug, "name": o.name }))

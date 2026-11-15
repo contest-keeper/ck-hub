@@ -779,7 +779,7 @@ impl Store for MemoryStore {
             .filter(|(invitation, _)| invitation.organization_id == organization_id)
             .map(|(invitation, _)| invitation.clone())
             .collect();
-        open.sort_by(|a, b| a.email.to_lowercase().cmp(&b.email.to_lowercase()));
+        open.sort_by_key(|a| a.email.to_lowercase());
         Ok(open)
     }
 
@@ -817,7 +817,7 @@ impl Store for MemoryStore {
                     })
             })
             .collect();
-        found.sort_by(|a, b| a.email.to_lowercase().cmp(&b.email.to_lowercase()));
+        found.sort_by_key(|a| a.email.to_lowercase());
         Ok(found)
     }
 
