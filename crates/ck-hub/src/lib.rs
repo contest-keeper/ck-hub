@@ -5,6 +5,7 @@ mod accounts;
 mod acs_mail;
 mod codeforces;
 mod download;
+mod forge;
 mod hub;
 mod invite;
 mod judge;
@@ -27,6 +28,7 @@ pub use accounts::{
 pub use acs_mail::AcsMailer;
 pub use codeforces::{Client as CodeforcesClient, CodeforcesError, parse_status, signed_query};
 pub use download::{Download, DownloadError, LINK_LIFETIME_MINUTES};
+pub use forge::{FORGE_CODE_LIFETIME_SECONDS, ForgeError};
 pub use hub::{Hub, LastHeartbeat, ONLINE_WINDOW_SECONDS, Rejection, StickView};
 pub use invite::{AcceptError, INVITATION_LIFETIME_DAYS, InviteError, MemberError, StaffError};
 pub use judge::{EventKey, JudgeSubmission, SubmitEvent, submit_event};
