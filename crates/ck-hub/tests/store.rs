@@ -586,7 +586,7 @@ fn judge_contract(store: &dyn Store) {
         .expect("write");
     assert_eq!(added, 2);
     let again = store
-        .add_judge_submissions(&org, "codeforces", &[first.clone()], time(9))
+        .add_judge_submissions(&org, "codeforces", std::slice::from_ref(&first), time(9))
         .expect("write");
     assert_eq!(again, 0, "a submission seen again changes nothing");
 
