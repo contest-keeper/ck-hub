@@ -648,8 +648,98 @@ fn judge_contract(store: &dyn Store) {
     assert_eq!(seen[0].submission_id, Some(10));
 }
 
+/// Profiles are kept per organization; saving again replaces the one row, and the picture's bytes
+/// come back as they went in.
+fn profiles_contract(store: &dyn Store) {
+    let id = unique();
+    let make = |tag: &str| {
+        store
+            .create_organization(&format!("{id}-{tag}"), tag)
+            .expect("write")
+            .expect("a new organization")
+    };
+    let (one, two) = (make("one"), make("two"));
+    let new = |name: &str, wallpaper: Option<(&str, &[u8])>| ck_hub::NewProfile {
+        id: "p-1".to_owned(),
+        name: name.to_owned(),
+        settings: serde_json::json!({ "contest": name }),
+        wallpaper: wallpaper.map(|(name, data)| ck_hub::Wallpaper {
+            name: name.to_owned(),
+            data: data.to_vec(),
+        }),
+    };
+
+    store
+        .put_profile(
+            &one.id,
+            new("First", Some(("w.png", &[0, 1, 255]))),
+            time(0),
+        )
+        .expect("write");
+    store
+        .put_profile(&one.id, new("Second", None), time(5))
+        .expect("write");
+    let listed = store.profiles(&one.id).expect("read");
+    assert_eq!(listed.len(), 1, "saving again replaces");
+    assert_eq!(
+        (listed[0].name.as_str(), listed[0].updated_at),
+        ("Second", time(5))
+    );
+    assert!(
+        store
+            .profile_wallpaper(&one.id, "p-1")
+            .expect("read")
+            .is_none()
+    );
+
+    store
+        .put_profile(
+            &one.id,
+            new("Second", Some(("w.png", &[0, 1, 255]))),
+            time(6),
+        )
+        .expect("write");
+    let kept = store
+        .profile(&one.id, "p-1")
+        .expect("read")
+        .expect("a profile");
+    assert_eq!(kept.settings, serde_json::json!({ "contest": "Second" }));
+    assert_eq!(kept.wallpaper_name.as_deref(), Some("w.png"));
+    let wallpaper = store
+        .profile_wallpaper(&one.id, "p-1")
+        .expect("read")
+        .expect("a picture");
+    assert_eq!(wallpaper.data, vec![0, 1, 255]);
+
+    assert!(store.profiles(&two.id).expect("read").is_empty());
+    assert!(store.profile(&two.id, "p-1").expect("read").is_none());
+    assert!(
+        store
+            .profile_wallpaper(&two.id, "p-1")
+            .expect("read")
+            .is_none()
+    );
+    assert!(!store.delete_profile(&two.id, "p-1").expect("write"));
+    store
+        .put_profile(&two.id, new("Theirs", None), time(7))
+        .expect("write");
+    assert_eq!(
+        store
+            .profile(&one.id, "p-1")
+            .expect("read")
+            .expect("kept")
+            .name,
+        "Second"
+    );
+
+    assert!(store.delete_profile(&one.id, "p-1").expect("write"));
+    assert!(store.profile(&one.id, "p-1").expect("read").is_none());
+    assert!(store.profile(&two.id, "p-1").expect("read").is_some());
+}
+
 #[test]
 fn the_memory_store_keeps_its_contract() {
+    profiles_contract(&MemoryStore::default());
     the_store_contract(&MemoryStore::default());
     judge_contract(&MemoryStore::default());
     organizations_are_kept_apart(&MemoryStore::default());
@@ -662,6 +752,7 @@ fn the_postgres_store_keeps_its_contract() {
         return;
     };
     let store = PostgresStore::connect(&url).expect("connect");
+    profiles_contract(&store);
     the_store_contract(&store);
     judge_contract(&store);
     organizations_are_kept_apart(&store);
