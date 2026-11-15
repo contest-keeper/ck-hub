@@ -595,23 +595,23 @@ fn judge_contract(store: &dyn Store) {
         .judge_submissions(&org, "codeforces", 1900)
         .expect("read");
     assert_eq!(kept, vec![first.clone(), second]);
-    assert!(
+    assert_eq!(
         store
             .judge_submissions(&org, "codeforces", 1)
-            .expect("read")
-            .is_empty()
+            .expect("read"),
+        Vec::new()
     );
-    assert!(
+    assert_eq!(
         store
             .judge_submissions(&org, "kilonova", 1900)
-            .expect("read")
-            .is_empty()
+            .expect("read"),
+        Vec::new()
     );
-    assert!(
+    assert_eq!(
         store
             .judge_submissions(&other, "codeforces", 1900)
-            .expect("read")
-            .is_empty()
+            .expect("read"),
+        Vec::new()
     );
 
     // What sticks said: two sticks' Codeforces submits come back in the order received; a login,
