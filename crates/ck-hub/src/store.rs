@@ -56,6 +56,12 @@ impl Role {
         }
     }
 
+    /// Whether someone with this role may invite or remove someone with `other`: only a lower role.
+    #[must_use]
+    pub fn may_manage(self, other: Role) -> bool {
+        self.rank() > other.rank()
+    }
+
     /// Whether someone with this role may do what `needed` asks for.
     #[must_use]
     pub fn allows(self, needed: Role) -> bool {
