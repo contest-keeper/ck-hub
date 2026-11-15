@@ -5,8 +5,12 @@ the contest on the judge (Kilonova, Codeforces, vJudge) and flags submissions th
 from a contest machine.
 
 Work in progress. Today the Hub receives signed heartbeats and events from sticks and shows
-organizers every stick with its last heartbeat, who is logged in and what needs a look. Watching
-the judge and matching submissions are not built yet.
+organizers every stick with its last heartbeat, who is logged in and what needs a look. It has
+accounts (sign-up with mail confirmation, password reset), organizations with owner, admin and viewer
+roles, invitations, platform staff, and mail through Azure Communication Services. Watching the judge
+and matching submissions are not built yet.
+
+To deploy it, see [ck-infra](https://github.com/contest-keeper/ck-infra) (Azure or Docker Compose).
 
 ## Run it
 
