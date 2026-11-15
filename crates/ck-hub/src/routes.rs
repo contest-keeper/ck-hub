@@ -877,15 +877,17 @@ async fn with_profiles<T: Send + 'static>(
     hub: Arc<Hub>,
     headers: &HeaderMap,
     work: impl FnOnce(&Hub, &str) -> Result<T, crate::store::StoreError> + Send + 'static,
-) -> Result<T, Response> {
-    let access = require(&hub, headers, Role::Admin).await.map_err(denied)?;
+) -> Result<T, Box<Response>> {
+    let access = require(&hub, headers, Role::Admin)
+        .await
+        .map_err(|reason| Box::new(denied(reason)))?;
     match tokio::task::spawn_blocking(move || work(&hub, &access.organization.id)).await {
         Ok(Ok(done)) => Ok(done),
         Ok(Err(error)) => {
             tracing::error!("{error}");
-            Err(unavailable())
+            Err(Box::new(unavailable()))
         }
-        Err(_) => Err(unavailable()),
+        Err(_) => Err(Box::new(unavailable())),
     }
 }
 
@@ -898,7 +900,7 @@ async fn list_profiles(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Respo
                 .collect::<Vec<_>>(),
         )
         .into_response(),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -917,7 +919,7 @@ async fn read_profile(
         }))
         .into_response(),
         Ok(None) => no_such_profile(),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -981,7 +983,7 @@ async fn profile_wallpaper(
                 .into_response()
         }
         Ok(None) => no_such_profile(),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -993,6 +995,6 @@ async fn remove_profile(
     match with_profiles(hub, &headers, move |hub, org| hub.delete_profile(org, &id)).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => no_such_profile(),
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
