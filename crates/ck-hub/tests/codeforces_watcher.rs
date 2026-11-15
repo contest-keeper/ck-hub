@@ -121,7 +121,7 @@ fn a_refusal_is_an_error_and_keeps_nothing() {
     let kept = store
         .judge_submissions(&org, "codeforces", 1900)
         .expect("read");
-    assert!(kept.is_empty());
+    assert_eq!(kept, [] as [ck_hub::JudgeSubmission; 0]);
 }
 
 #[test]
