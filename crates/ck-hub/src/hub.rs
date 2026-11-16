@@ -63,8 +63,21 @@ pub struct StickView {
     pub last_event_at: Option<DateTime<Utc>>,
     /// Who logged in last during the stick's latest boot, if anyone did.
     pub current_user: Option<String>,
+    /// Submissions the stick reported since the Hub started, and the latest of them.
+    pub submissions: usize,
+    pub last_submission: Option<SubmissionView>,
     /// Things an organizer should look at: a chain problem, two users on one stick.
     pub warnings: Vec<String>,
+}
+
+/// What a submission event says, read loosely: the shape of the payload is fixed by the capture
+/// rule of each platform, and a field a rule does not send is just left out.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct SubmissionView {
+    pub received_at: DateTime<Utc>,
+    pub problem: Option<String>,
+    pub language: Option<String>,
+    pub submission_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -371,6 +384,11 @@ impl Hub {
                 events: stored.len(),
                 last_event_at: stored.last().map(|s| s.received_at),
                 current_user: users_of_boot(&stored, boot.as_deref()).pop(),
+                submissions: stored
+                    .iter()
+                    .filter(|s| s.event.kind == EventKind::Submission)
+                    .count(),
+                last_submission: last_submission(&stored),
                 warnings: warnings(&stored, boot.as_deref()),
             });
         }
@@ -444,6 +462,25 @@ fn users_of_boot(stored: &[StoredEvent], boot: Option<&str>) -> Vec<String> {
         }
     }
     users
+}
+
+fn last_submission(stored: &[StoredEvent]) -> Option<SubmissionView> {
+    let item = stored
+        .iter()
+        .rev()
+        .find(|s| s.event.kind == EventKind::Submission)?;
+    // A text, or a number as text; anything else is left out.
+    let text = |key: &str| match item.event.payload.get(key)? {
+        serde_json::Value::String(value) => Some(value.chars().take(64).collect()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    };
+    Some(SubmissionView {
+        received_at: item.received_at,
+        problem: text("problem"),
+        language: text("language"),
+        submission_id: text("submission_id"),
+    })
 }
 
 /// Why an organizer should look at this stick.

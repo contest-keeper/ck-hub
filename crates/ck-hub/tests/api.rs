@@ -481,6 +481,54 @@ async fn a_chained_login_event_shows_who_is_logged_in() {
 }
 
 #[tokio::test]
+async fn a_submission_event_is_counted_and_its_problem_and_language_are_shown() {
+    let setup = setup();
+    assert_eq!(
+        send_event(&setup.app, "b1", 1, FIRST_PREV_HASH, "ana")
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let h1 = next_hash("b1", 1, FIRST_PREV_HASH, "ana");
+    let submission = Event {
+        stick_id: StickId::parse("stick-a").expect("id"),
+        boot_id: "b1".to_owned(),
+        seq: 2,
+        prev_hash: h1,
+        sent_at: "2026-11-12T10:05:00Z".parse().expect("time"),
+        kind: EventKind::Submission,
+        payload: serde_json::json!({
+            "platform": "codeforces", "problem": "1A", "language": "C++20", "submission_id": 98765,
+            "code_sha256": "ab", "password": "must never be shown"
+        }),
+    }
+    .canonical_bytes();
+    let request = Request::post("/api/v1/events")
+        .header(STICK_HEADER, "stick-a")
+        .header(SIGNATURE_HEADER, sign(TOKEN_A, &submission))
+        .body(Body::from(submission))
+        .expect("request");
+    assert_eq!(call(&setup.app, request).await.0, StatusCode::OK);
+
+    let sticks = list(&setup.app).await;
+    assert_eq!(sticks[0]["submissions"], 1);
+    assert_eq!(
+        sticks[0]["current_user"], "ana",
+        "a submission is not a login"
+    );
+    let last = &sticks[0]["last_submission"];
+    assert_eq!(last["problem"], "1A");
+    assert_eq!(last["language"], "C++20");
+    assert_eq!(last["submission_id"], "98765");
+    assert!(
+        !last.to_string().contains("never be shown"),
+        "only named fields are passed on"
+    );
+    assert_eq!(sticks[1]["submissions"], 0);
+    assert!(sticks[1]["last_submission"].is_null());
+}
+
+#[tokio::test]
 async fn an_event_the_hub_already_has_is_a_conflict_and_forged_ones_are_refused() {
     let setup = setup();
     assert_eq!(

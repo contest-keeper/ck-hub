@@ -354,6 +354,12 @@ function facts(stick) {
   add("Heartbeats", last ? String(last.heartbeats) : "—");
   add("Image", last ? last.image_version : "—");
   add("Events", String(stick.events));
+  add("Submissions", String(stick.submissions));
+  const sub = stick.last_submission;
+  if (sub) {
+    const parts = [sub.problem, sub.language, sub.submission_id ? "#" + sub.submission_id : null].filter(Boolean);
+    add("Last submission", (parts.length ? parts.join(", ") + ", " : "") + new Date(sub.received_at).toLocaleTimeString());
+  }
   return list;
 }
 
