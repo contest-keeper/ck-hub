@@ -6,7 +6,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{DateTime, Duration, Utc};
 use ck_hub::{
-    Download, Hub, MemoryStore, ONLINE_WINDOW_SECONDS, PasswordCost, Registry, Role, router,
+    Download, Hub, Judge, MemoryStore, ONLINE_WINDOW_SECONDS, PasswordCost, Registry, Role, router,
 };
 use ck_protocol::{
     Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, RecorderStatus, RecordingMode,
@@ -41,6 +41,10 @@ fn registry_json(sticks: &[(&str, &str, &str, u32)]) -> String {
 }
 
 fn setup() -> Setup {
+    setup_with(None)
+}
+
+fn setup_with(judge: Option<Arc<dyn Judge>>) -> Setup {
     let dir = TempDir::new().expect("temp dir");
     fs::write(
         dir.path().join("registry.json"),
@@ -79,6 +83,10 @@ fn setup() -> Setup {
         .expect("an organization");
     hub.add_member("default", "organizer@example.org", Role::Viewer)
         .expect("a viewer");
+    let hub = match judge {
+        Some(judge) => hub.with_judge(judge),
+        None => hub,
+    };
     let app = router(Arc::new(hub));
     Setup { dir, app, now }
 }
@@ -589,6 +597,110 @@ async fn network_events_make_a_history_with_sites_and_refused_requests() {
         .body(Body::empty())
         .expect("request");
     assert_eq!(call(&setup.app, request).await.0, StatusCode::UNAUTHORIZED);
+}
+
+struct FakeJudge;
+
+impl Judge for FakeJudge {
+    fn submissions_of(
+        &self,
+        contest_id: u64,
+        handle: &str,
+    ) -> Result<Vec<ck_hub::JudgeSubmission>, ck_hub::CodeforcesError> {
+        assert_eq!((contest_id, handle), (2285, "ana"));
+        let at = |text: &str| text.parse::<DateTime<Utc>>().expect("time");
+        let row = |id, problem: &str, when: &str| ck_hub::JudgeSubmission {
+            submission_id: id,
+            contest_id: 2285,
+            handles: vec!["Ana".to_owned()],
+            problem_index: problem.to_owned(),
+            submitted_at: at(when),
+        };
+        Ok(vec![
+            row(900, "C", "2026-11-12T10:20:00Z"),
+            row(800, "A", "2026-11-12T10:05:10Z"),
+        ])
+    }
+}
+
+async fn send_kind(
+    app: &Router,
+    seq: u64,
+    kind: EventKind,
+    payload: serde_json::Value,
+) -> StatusCode {
+    let body = Event {
+        stick_id: StickId::parse("stick-a").expect("id"),
+        boot_id: "boot-1234567890".to_owned(),
+        seq,
+        prev_hash: String::new(),
+        sent_at: "2026-11-12T10:05:00Z".parse().expect("time"),
+        kind,
+        payload,
+    }
+    .canonical_bytes();
+    let request = Request::post("/api/v1/events")
+        .header(STICK_HEADER, "stick-a")
+        .header(SIGNATURE_HEADER, sign(TOKEN_A, &body))
+        .body(Body::from(body))
+        .expect("request");
+    call(app, request).await.0
+}
+
+#[tokio::test]
+async fn submissions_are_compared_with_the_judge_and_the_unreported_one_is_a_suspect() {
+    let setup = setup_with(Some(Arc::new(FakeJudge)));
+    // The chain is not checked here: only that the events are read.
+    let login = serde_json::json!({"platform": "codeforces", "username": "ana"});
+    let submit = serde_json::json!({"platform": "codeforces", "username": "ana",
+        "contest_id": "2285", "problem": "A", "language": "91", "accepted": true});
+    send_kind(&setup.app, 1, EventKind::Login, login).await;
+    send_kind(&setup.app, 2, EventKind::Submission, submit).await;
+
+    let cookie = organizer_cookie(&setup.app).await;
+    let request = Request::get("/api/v1/sticks/stick-a/submissions")
+        .header("cookie", cookie.clone())
+        .body(Body::empty())
+        .expect("request");
+    let (status, text) = call(&setup.app, request).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let seen: serde_json::Value = serde_json::from_str(&text).expect("json");
+    assert_eq!(seen["suspect"], 1);
+    assert_eq!(seen["submissions"][0]["judge_id"], 800);
+    assert_eq!(seen["judge"][0]["submission_id"], 900);
+    assert_eq!(seen["judge"][0]["suspect"], true);
+    assert_eq!(seen["judge"][1]["from_stick"], true);
+
+    let request = Request::get("/api/v1/sticks/stick-b/submissions")
+        .header("cookie", cookie)
+        .body(Body::empty())
+        .expect("request");
+    let (_, text) = call(&setup.app, request).await;
+    let none: serde_json::Value = serde_json::from_str(&text).expect("json");
+    assert_eq!(none["suspect"], 0);
+
+    let request = Request::get("/api/v1/sticks/stick-a/submissions")
+        .body(Body::empty())
+        .expect("request");
+    assert_eq!(call(&setup.app, request).await.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn without_a_judge_the_submissions_say_nothing_is_compared() {
+    let setup = setup();
+    let cookie = organizer_cookie(&setup.app).await;
+    let request = Request::get("/api/v1/sticks/stick-a/submissions")
+        .header("cookie", cookie)
+        .body(Body::empty())
+        .expect("request");
+    let (_, text) = call(&setup.app, request).await;
+    let seen: serde_json::Value = serde_json::from_str(&text).expect("json");
+    assert!(
+        seen["judge_note"]
+            .as_str()
+            .expect("note")
+            .contains("not set up")
+    );
 }
 
 #[tokio::test]

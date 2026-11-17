@@ -81,6 +81,11 @@ pub fn router(hub: Arc<Hub>) -> Router {
             delete(revoke_invitation),
         )
         .route("/api/v1/sticks/{id}/network", get(network))
+        .route("/api/v1/sticks/{id}/submissions", get(submissions))
+        .route(
+            "/api/v1/orgs/{slug}/sticks/{id}/submissions",
+            get(submissions_of),
+        )
         .route("/api/v1/orgs/{slug}/sticks/{id}/network", get(network_of))
         .route("/api/v1/orgs/{slug}/members", get(members_of))
         .route(
@@ -245,6 +250,42 @@ async fn network_of(
 
 async fn show_network(hub: Arc<Hub>, access: Access, id: String) -> Response {
     match tokio::task::spawn_blocking(move || hub.network_of(&access.organization.id, &id)).await {
+        Ok(Ok(Some(view))) => Json(view).into_response(),
+        Ok(Ok(None)) => (StatusCode::NOT_FOUND, "there is no such stick").into_response(),
+        Ok(Err(error)) => {
+            tracing::error!("{error}");
+            unavailable()
+        }
+        Err(_) => unavailable(),
+    }
+}
+
+async fn submissions(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    match require(&hub, &headers, Role::Viewer).await {
+        Ok(access) => show_submissions(hub, access, id).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+async fn submissions_of(
+    State(hub): State<Arc<Hub>>,
+    Path((slug, id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    match require_in(&hub, &headers, slug, Role::Viewer).await {
+        Ok(access) => show_submissions(hub, access, id).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+async fn show_submissions(hub: Arc<Hub>, access: Access, id: String) -> Response {
+    match tokio::task::spawn_blocking(move || hub.submissions_of(&access.organization.id, &id))
+        .await
+    {
         Ok(Ok(Some(view))) => Json(view).into_response(),
         Ok(Ok(None)) => (StatusCode::NOT_FOUND, "there is no such stick").into_response(),
         Ok(Err(error)) => {

@@ -153,18 +153,42 @@ impl Client {
         from: u64,
         count: u64,
     ) -> Result<Vec<JudgeSubmission>, CodeforcesError> {
-        let params = [
+        self.contest_status(&[
             ("contestId", contest_id.to_string()),
             ("from", from.to_string()),
             ("count", count.to_string()),
-        ];
+        ])
+    }
+
+    /// The newest `count` submissions of one person in a contest, newest first.
+    ///
+    /// # Errors
+    /// The same as [`Client::status`].
+    pub fn status_of(
+        &self,
+        contest_id: u64,
+        handle: &str,
+        count: u64,
+    ) -> Result<Vec<JudgeSubmission>, CodeforcesError> {
+        self.contest_status(&[
+            ("contestId", contest_id.to_string()),
+            ("handle", handle.to_owned()),
+            ("from", "1".to_owned()),
+            ("count", count.to_string()),
+        ])
+    }
+
+    fn contest_status(
+        &self,
+        params: &[(&str, String)],
+    ) -> Result<Vec<JudgeSubmission>, CodeforcesError> {
         let query = match &self.credentials {
             Some((key, secret)) => {
                 let now = chrono::Utc::now();
                 let rand = format!("{:06}", now.timestamp_subsec_nanos() % 1_000_000);
                 signed_query(
                     "contest.status",
-                    &params,
+                    params,
                     key,
                     secret,
                     now.timestamp(),
@@ -188,6 +212,30 @@ impl Client {
             .read_to_string()
             .map_err(|_| CodeforcesError::Request("cannot read the answer".to_owned()))?;
         parse_status(&body)
+    }
+}
+
+/// Where the submissions of a person in a contest come from. The Codeforces client is the real one;
+/// tests use a fake.
+pub trait Judge: Send + Sync {
+    /// The newest submissions of `handle` in `contest_id`, newest first.
+    ///
+    /// # Errors
+    /// The judge cannot be asked or does not answer as expected.
+    fn submissions_of(
+        &self,
+        contest_id: u64,
+        handle: &str,
+    ) -> Result<Vec<JudgeSubmission>, CodeforcesError>;
+}
+
+impl Judge for Client {
+    fn submissions_of(
+        &self,
+        contest_id: u64,
+        handle: &str,
+    ) -> Result<Vec<JudgeSubmission>, CodeforcesError> {
+        self.status_of(contest_id, handle, 100)
     }
 }
 

@@ -19,6 +19,7 @@ mod registry;
 mod routes;
 mod signup;
 mod store;
+mod submissions;
 mod watcher;
 
 pub use accounts::{
@@ -28,7 +29,9 @@ pub use accounts::{
     SESSION_LIFETIME_HOURS, add_member, create_organization, create_user,
 };
 pub use acs_mail::AcsMailer;
-pub use codeforces::{Client as CodeforcesClient, CodeforcesError, parse_status, signed_query};
+pub use codeforces::{
+    Client as CodeforcesClient, CodeforcesError, Judge, parse_status, signed_query,
+};
 pub use download::{Download, DownloadError, LINK_LIFETIME_MINUTES};
 pub use forge::{FORGE_CODE_LIFETIME_SECONDS, ForgeError};
 pub use hub::{Hub, LastHeartbeat, ONLINE_WINDOW_SECONDS, Rejection, StickView};
@@ -52,4 +55,5 @@ pub use store::{
     ProfileSummary, Role, SeenHeartbeat, Stick, Store, StoreError, StoredEvent, TokenPurpose, User,
     Wallpaper,
 };
+pub use submissions::{JudgeRow, StickSubmission, SubmissionsView};
 pub use watcher::{WatchError, poll_once, run as watch};
