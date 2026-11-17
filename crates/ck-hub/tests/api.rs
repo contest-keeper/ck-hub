@@ -500,6 +500,10 @@ async fn network_events_make_a_history_with_sites_and_refused_requests() {
           "result": "TCP_DENIED", "bytes": 3900, "ms": 0, "type": "text/html" },
         { "t": 107, "method": "GET", "host": "chat.example.org", "path": "/", "status": 403,
           "result": "NONE_NONE", "bytes": 3900, "ms": 0, "type": "text/html" },
+        { "t": 109, "method": "GET", "host": "www.google.com", "path": "/complete/search", "status": 403,
+          "result": "TCP_DENIED", "bytes": 100, "ms": 0, "type": "text/html" },
+        { "t": 110, "method": "GET", "host": "update.googleapis.com", "path": "/service/update2/crx",
+          "status": 403, "result": "TCP_DENIED", "bytes": 100, "ms": 0, "type": "text/html" },
         { "t": 108, "method": "CONNECT", "host": "chat.example.org:443", "path": "", "status": 200,
           "result": "TCP_DENIED", "bytes": 0, "ms": 0, "type": "-" }
     ]);
@@ -541,7 +545,7 @@ async fn network_events_make_a_history_with_sites_and_refused_requests() {
     );
     let history: serde_json::Value = serde_json::from_str(&text).expect("json");
     assert_eq!(history["requests"], 5);
-    assert_eq!(history["hidden"], 4);
+    assert_eq!(history["hidden"], 6);
     assert_eq!(history["blocked"], 3);
     assert_eq!(history["bytes"], 1000 + 2000 + 3900 + 3900 + 3900);
     let entries = history["entries"].as_array().expect("entries");
