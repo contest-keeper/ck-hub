@@ -135,6 +135,15 @@ try { if (localStorage.getItem("ck-theme") === "classic") document.documentEleme
   .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px 20px; margin: 0; }
   .facts dt { font-size: 12px; color: var(--muted); }
   .facts dd { margin: 0; font-weight: 500; overflow-wrap: anywhere; }
+  .net { margin-top: 18px; }
+  .net h3 { margin: 0 0 8px; font-size: 14px; }
+  .net .scroll { max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); margin-bottom: 12px; }
+  .net table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .net th, .net td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  .net th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 600; }
+  .net td.where { white-space: normal; overflow-wrap: anywhere; }
+  .net tr.refused td { color: var(--bad); background: var(--bad-bg); }
+  .net .tools { display: flex; gap: 14px; align-items: center; margin: 0 0 8px; font-size: 13px; }
   #empty { display: none; padding: 22px 16px; color: var(--muted); }
   .hint { margin: 12px 4px; font-size: 13px; color: var(--muted); }
 
@@ -337,6 +346,94 @@ function matches(stick) {
   return text.includes(query);
 }
 
+function bytesText(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+  return (n / 1048576).toFixed(1) + " MB";
+}
+
+// What each stick's proxy carried and refused, fetched when its details are open and again when
+// the stick reports more.
+const histories = new Map();
+const onlyRefused = new Set();
+
+async function fetchHistory(stick) {
+  const before = histories.get(stick.stick_id);
+  histories.set(stick.stick_id, { requests: stick.network_requests, data: before ? before.data : null, failed: false });
+  let data = before ? before.data : null;
+  let failed = false;
+  try {
+    const response = await fetch("/api/v1/orgs/" + encodeURIComponent(org) + "/sticks/" + encodeURIComponent(stick.stick_id) + "/network", { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    data = await response.json();
+  } catch (error) {
+    failed = true;
+  }
+  histories.set(stick.stick_id, { requests: stick.network_requests, data, failed });
+  render();
+}
+
+function table(head, rows) {
+  const scroll = el("div", "scroll");
+  const grid = el("table");
+  const top = el("tr");
+  for (const name of head) top.appendChild(el("th", "", name));
+  grid.appendChild(top);
+  for (const [cells, className] of rows) {
+    const row = el("tr", className);
+    cells.forEach((text, at) => cell(row, text, at === 1 && head[1] === "Address" ? "where mono" : ""));
+    grid.appendChild(row);
+  }
+  scroll.appendChild(grid);
+  return scroll;
+}
+
+function networkPanel(stick) {
+  const box = el("div", "net");
+  box.appendChild(el("h3", "", "Network history"));
+  if (!stick.network_requests) {
+    box.appendChild(el("p", "muted", "Nothing reported yet. The stick sends what its proxy carried or refused every few seconds."));
+    return box;
+  }
+  const cached = histories.get(stick.stick_id);
+  if (!cached || cached.requests !== stick.network_requests) fetchHistory(stick);
+  if (!cached || !cached.data) {
+    box.appendChild(el("p", "muted", cached && cached.failed ? "The history could not be loaded." : "Loading…"));
+    return box;
+  }
+  const data = cached.data;
+  box.appendChild(el("p", "", data.requests + " requests, " + data.blocked + " refused, " + bytesText(data.bytes) + " carried."));
+
+  box.appendChild(table(["Site", "Requests", "Refused", "Data"],
+    data.hosts.map((h) => [[h.host || "—", String(h.requests), String(h.blocked), bytesText(h.bytes)], h.blocked ? "refused" : ""])));
+
+  const tools = el("label", "tools");
+  const check = el("input");
+  check.type = "checkbox";
+  check.checked = onlyRefused.has(stick.stick_id);
+  check.addEventListener("change", () => {
+    if (check.checked) onlyRefused.add(stick.stick_id); else onlyRefused.delete(stick.stick_id);
+    render();
+  });
+  tools.appendChild(check);
+  tools.appendChild(el("span", "", "Only refused requests"));
+  box.appendChild(tools);
+  const shown = data.entries.filter((e) => !check.checked || e.blocked);
+  box.appendChild(table(["Time", "Address", "Method", "Answer", "Data", "Took"],
+    shown.map((e) => [[
+      new Date(e.t * 1000).toLocaleTimeString(),
+      e.host + e.path,
+      e.method,
+      e.blocked ? "refused" : String(e.status),
+      bytesText(e.bytes),
+      e.ms + " ms",
+    ], e.blocked ? "refused" : ""])));
+  if (data.requests > data.entries.length) {
+    box.appendChild(el("p", "hint", "The newest " + data.entries.length + " requests are listed. The totals count all of them."));
+  }
+  return box;
+}
+
 function facts(stick) {
   const last = stick.last;
   const list = el("dl", "facts");
@@ -354,6 +451,8 @@ function facts(stick) {
   add("Heartbeats", last ? String(last.heartbeats) : "—");
   add("Image", last ? last.image_version : "—");
   add("Events", String(stick.events));
+  add("Requests", String(stick.network_requests));
+  add("Refused", String(stick.blocked_requests));
   add("Submissions", String(stick.submissions));
   const sub = stick.last_submission;
   if (sub) {
@@ -415,6 +514,7 @@ function render() {
       const td = el("td");
       td.colSpan = 7;
       td.appendChild(facts(stick));
+      td.appendChild(networkPanel(stick));
       detail.appendChild(td);
       body.appendChild(detail);
     }
