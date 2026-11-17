@@ -13,6 +13,7 @@ use serde_json::json;
 use crate::accounts::{Accounts, PasswordCost};
 use crate::download::Download;
 use crate::mail::Mailer;
+use crate::network::{self, NetworkView};
 use crate::registry::Registry;
 use crate::store::{Stick, Store, StoreError, StoredEvent};
 
@@ -63,6 +64,9 @@ pub struct StickView {
     pub last_event_at: Option<DateTime<Utc>>,
     /// Who logged in last during the stick's latest boot, if anyone did.
     pub current_user: Option<String>,
+    /// What the stick's proxy carried, and how much of it was refused as a site not allowed.
+    pub network_requests: usize,
+    pub blocked_requests: usize,
     /// Submissions the stick reported since the Hub started, and the latest of them.
     pub submissions: usize,
     pub last_submission: Option<SubmissionView>,
@@ -331,6 +335,20 @@ impl Hub {
         Ok(seq)
     }
 
+    /// The whole network history of one stick of the organization, or `None` for an id that is not
+    /// one. A stick of another organization has no events here, so its history is empty.
+    pub fn network_of(
+        &self,
+        organization: &str,
+        stick: &str,
+    ) -> Result<Option<NetworkView>, StoreError> {
+        let Ok(id) = StickId::parse(stick) else {
+            return Ok(None);
+        };
+        let stored = self.store.events(organization, &id)?;
+        Ok(Some(network::view(&stored)))
+    }
+
     /// Every stick of the organization, with its last heartbeat when it has sent one.
     pub fn sticks(&self, organization: &str) -> Result<Vec<StickView>, StoreError> {
         let now = (self.clock)();
@@ -359,6 +377,7 @@ impl Hub {
         for entry in &entries {
             let seen = self.store.last_heartbeat(organization, &entry.stick_id)?;
             let stored = self.store.events(organization, &entry.stick_id)?;
+            let (network_requests, blocked_requests) = network::counts(&stored);
             let boot = seen.as_ref().map(|s| s.heartbeat.boot_id.clone());
             let last = seen.map(|s| LastHeartbeat {
                 received_at: s.received_at,
@@ -384,6 +403,8 @@ impl Hub {
                 events: stored.len(),
                 last_event_at: stored.last().map(|s| s.received_at),
                 current_user: users_of_boot(&stored, boot.as_deref()).pop(),
+                network_requests,
+                blocked_requests,
                 submissions: stored
                     .iter()
                     .filter(|s| s.event.kind == EventKind::Submission)

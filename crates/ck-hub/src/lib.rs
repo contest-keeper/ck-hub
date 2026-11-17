@@ -11,6 +11,7 @@ mod invite;
 mod judge;
 mod mail;
 mod matcher;
+mod network;
 mod postgres_store;
 mod profiles;
 mod register;

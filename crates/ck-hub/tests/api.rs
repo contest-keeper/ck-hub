@@ -481,6 +481,88 @@ async fn a_chained_login_event_shows_who_is_logged_in() {
 }
 
 #[tokio::test]
+async fn network_events_make_a_history_with_sites_and_refused_requests() {
+    let setup = setup();
+    let entries = serde_json::json!([
+        { "t": 100, "method": "GET", "host": "Codeforces.com", "path": "/enter", "status": 200,
+          "result": "TCP_MISS", "bytes": 1000, "ms": 50, "type": "text/html" },
+        { "t": 101, "method": "CONNECT", "host": "codeforces.com:443", "path": "", "status": 200,
+          "result": "TCP_TUNNEL", "bytes": 500, "ms": 900, "type": "-" },
+        { "t": 102, "method": "GET", "host": "docs.python.org", "path": "/3/", "status": 403,
+          "result": "TCP_DENIED", "bytes": 3900, "ms": 0, "type": "text/html" },
+        { "t": 103, "method": "GET", "host": "codeforces.com", "path": "/", "status": 200,
+          "result": "TCP_HIT", "bytes": 2000, "ms": 5, "type": "text/html" }
+    ]);
+    let batch = Event {
+        stick_id: StickId::parse("stick-a").expect("id"),
+        boot_id: "boot-1234567890".to_owned(),
+        seq: 1,
+        prev_hash: FIRST_PREV_HASH.to_owned(),
+        sent_at: "2026-11-12T10:05:00Z".parse().expect("time"),
+        kind: EventKind::Network,
+        payload: serde_json::json!({ "entries": entries, "cookie": "must never be shown" }),
+    }
+    .canonical_bytes();
+    let request = Request::post("/api/v1/events")
+        .header(STICK_HEADER, "stick-a")
+        .header(SIGNATURE_HEADER, sign(TOKEN_A, &batch))
+        .body(Body::from(batch))
+        .expect("request");
+    assert_eq!(call(&setup.app, request).await.0, StatusCode::OK);
+
+    let sticks = list(&setup.app).await;
+    assert_eq!(sticks[0]["network_requests"], 4);
+    assert_eq!(sticks[0]["blocked_requests"], 1);
+    assert_eq!(sticks[1]["network_requests"], 0);
+
+    let cookie = organizer_cookie(&setup.app).await;
+    let request = Request::get("/api/v1/sticks/stick-a/network")
+        .header("cookie", cookie.clone())
+        .body(Body::empty())
+        .expect("request");
+    let (status, text) = call(&setup.app, request).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !text.contains("never be shown"),
+        "only named fields are passed on"
+    );
+    let history: serde_json::Value = serde_json::from_str(&text).expect("json");
+    assert_eq!(history["requests"], 4);
+    assert_eq!(history["blocked"], 1);
+    assert_eq!(history["bytes"], 7400);
+    // The newest request comes first, and a refused one says so.
+    assert_eq!(history["entries"][0]["path"], "/");
+    assert_eq!(history["entries"][1]["host"], "docs.python.org");
+    assert_eq!(history["entries"][1]["blocked"], true);
+    assert_eq!(history["entries"][3]["host"], "codeforces.com");
+    assert_eq!(history["entries"][3]["boot"], "boot-123");
+    // The busiest site first; case and the port do not make a site another one.
+    assert_eq!(history["hosts"][0]["host"], "codeforces.com");
+    assert_eq!(history["hosts"][0]["requests"], 3);
+    assert_eq!(history["hosts"][1]["host"], "docs.python.org");
+    assert_eq!(history["hosts"][1]["blocked"], 1);
+
+    let request = Request::get("/api/v1/sticks/stick-b/network")
+        .header("cookie", cookie.clone())
+        .body(Body::empty())
+        .expect("request");
+    let (_, text) = call(&setup.app, request).await;
+    let empty: serde_json::Value = serde_json::from_str(&text).expect("json");
+    assert_eq!(empty["requests"], 0);
+
+    let request = Request::get("/api/v1/sticks/not%20an%20id/network")
+        .header("cookie", cookie)
+        .body(Body::empty())
+        .expect("request");
+    assert_eq!(call(&setup.app, request).await.0, StatusCode::NOT_FOUND);
+
+    let request = Request::get("/api/v1/sticks/stick-a/network")
+        .body(Body::empty())
+        .expect("request");
+    assert_eq!(call(&setup.app, request).await.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn a_submission_event_is_counted_and_its_problem_and_language_are_shown() {
     let setup = setup();
     assert_eq!(

@@ -80,6 +80,8 @@ pub fn router(hub: Arc<Hub>) -> Router {
             "/api/v1/orgs/{slug}/invitations/{id}",
             delete(revoke_invitation),
         )
+        .route("/api/v1/sticks/{id}/network", get(network))
+        .route("/api/v1/orgs/{slug}/sticks/{id}/network", get(network_of))
         .route("/api/v1/orgs/{slug}/members", get(members_of))
         .route(
             "/api/v1/orgs/{slug}/members/{user_id}",
@@ -210,6 +212,41 @@ async fn sticks_of(
 async fn list_sticks(hub: Arc<Hub>, access: Access) -> Response {
     match tokio::task::spawn_blocking(move || hub.sticks(&access.organization.id)).await {
         Ok(Ok(sticks)) => Json(sticks).into_response(),
+        Ok(Err(error)) => {
+            tracing::error!("{error}");
+            unavailable()
+        }
+        Err(_) => unavailable(),
+    }
+}
+
+/// The network history of one stick of the only organization the caller belongs to.
+async fn network(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    match require(&hub, &headers, Role::Viewer).await {
+        Ok(access) => show_network(hub, access, id).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+async fn network_of(
+    State(hub): State<Arc<Hub>>,
+    Path((slug, id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    match require_in(&hub, &headers, slug, Role::Viewer).await {
+        Ok(access) => show_network(hub, access, id).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+async fn show_network(hub: Arc<Hub>, access: Access, id: String) -> Response {
+    match tokio::task::spawn_blocking(move || hub.network_of(&access.organization.id, &id)).await {
+        Ok(Ok(Some(view))) => Json(view).into_response(),
+        Ok(Ok(None)) => (StatusCode::NOT_FOUND, "there is no such stick").into_response(),
         Ok(Err(error)) => {
             tracing::error!("{error}");
             unavailable()
