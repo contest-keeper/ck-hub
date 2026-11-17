@@ -1,9 +1,13 @@
 //! The network history of a stick: what its proxy carried or refused, read from its network events.
 //!
+//! Only what an organizer can use is shown: the pages that were opened, the forms that were sent,
+//! and the requests the proxy refused. The files a page loads, the tunnels and what the browser
+//! asks for in the background are counted as hidden, and the same request repeated is one line.
+//!
 //! The payload of such an event is `{"entries": [...]}`. Its shape is fixed by the stick, so it is
 //! read loosely here: a field that is missing or of another type is left empty.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ck_protocol::EventKind;
 use serde::Serialize;
@@ -17,7 +21,10 @@ const MAX_HOSTS: usize = 100;
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct NetworkView {
+    /// The requests that are shown, repeats counted.
     pub requests: usize,
+    /// Requests that are left out: files a page loads, tunnels, browser background traffic.
+    pub hidden: usize,
     /// Refused by the proxy: the site is not one the contest allows.
     pub blocked: usize,
     pub bytes: u64,
@@ -50,6 +57,8 @@ pub struct EntryView {
     pub content_type: String,
     pub blocked: bool,
     pub boot: String,
+    /// How many times the same request was made.
+    pub count: usize,
 }
 
 fn text(entry: &Value, key: &str) -> String {
@@ -79,19 +88,59 @@ fn number(entry: &Value, key: &str) -> u64 {
 
 fn entry_of(entry: &Value, boot: &str) -> EntryView {
     let result = text(entry, "result");
+    let status = number(entry, "status");
     EntryView {
         t: entry.get("t").and_then(Value::as_i64).unwrap_or(0),
         method: text(entry, "method"),
         host: site(&text(entry, "host")),
         path: text(entry, "path"),
-        status: number(entry, "status"),
-        blocked: result.contains("DENIED"),
+        blocked: refused(&result, status),
+        status,
         result,
         bytes: number(entry, "bytes"),
         ms: number(entry, "ms"),
         content_type: text(entry, "type"),
         boot: boot.chars().take(8).collect(),
+        count: 1,
     }
+}
+
+/// The proxy refused it: its own denial, or the error page it makes for a site that is not allowed.
+fn refused(result: &str, status: u64) -> bool {
+    result.contains("DENIED") || (status == 403 && result.starts_with("NONE"))
+}
+
+/// What a browser asks for by itself while it runs; no one on the stick chose it.
+const BACKGROUND_SITES: [&str; 7] = [
+    "mozilla.com",
+    "mozilla.net",
+    "mozilla.org",
+    "firefox.com",
+    "firefox-portal-detection.com",
+    "cloudflareinsights.com",
+    "cloudflare.com",
+];
+
+fn background(host: &str) -> bool {
+    BACKGROUND_SITES
+        .iter()
+        .any(|site| host == *site || host.ends_with(&format!(".{site}")))
+}
+
+/// A page that was opened or a form that was sent: the answer is a page or a redirect. The scripts,
+/// images and polling a page makes are not.
+fn useful(entry: &EntryView) -> bool {
+    if background(&entry.host) {
+        return false;
+    }
+    if entry.blocked {
+        return true;
+    }
+    if entry.method == "CONNECT" {
+        return false;
+    }
+    entry.content_type.contains("html")
+        || ((300..400).contains(&entry.status) && entry.status != 304)
 }
 
 /// Everything the stick's network events say, in the order they were received.
@@ -105,6 +154,18 @@ pub fn view(stored: &[StoredEvent]) -> NetworkView {
             all.push(entry_of(entry, &item.event.boot_id));
         }
     }
+    // A refused tunnel to a site that also has a refused request says the same twice.
+    let refused_sites: HashSet<String> = all
+        .iter()
+        .filter(|e| e.blocked && e.method != "CONNECT")
+        .map(|e| e.host.clone())
+        .collect();
+    let total = all.len();
+    all.retain(|e| {
+        useful(e) && !(e.blocked && e.method == "CONNECT" && refused_sites.contains(&e.host))
+    });
+    let requests = all.len();
+
     let mut sites: HashMap<&str, HostView> = HashMap::new();
     let mut bytes = 0;
     let mut blocked = 0;
@@ -130,12 +191,29 @@ pub fn view(stored: &[StoredEvent]) -> NetworkView {
             .then_with(|| a.host.cmp(&b.host))
     });
     hosts.truncate(MAX_HOSTS);
-    let requests = all.len();
-    let mut entries = all;
-    entries.reverse();
+
+    // Newest first; the same request again adds to the count of the line already there.
+    let mut entries: Vec<EntryView> = Vec::new();
+    let mut seen: HashMap<(String, String, String, u64, bool), usize> = HashMap::new();
+    for entry in all.into_iter().rev() {
+        let key = (
+            entry.method.clone(),
+            entry.host.clone(),
+            entry.path.clone(),
+            entry.status,
+            entry.blocked,
+        );
+        if let Some(&at) = seen.get(&key) {
+            entries[at].count += 1;
+        } else {
+            seen.insert(key, entries.len());
+            entries.push(entry);
+        }
+    }
     entries.truncate(MAX_ENTRIES);
     NetworkView {
         requests,
+        hidden: total - requests,
         blocked,
         bytes,
         hosts,

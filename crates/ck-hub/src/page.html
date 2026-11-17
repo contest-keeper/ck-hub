@@ -402,7 +402,7 @@ function networkPanel(stick) {
     return box;
   }
   const data = cached.data;
-  box.appendChild(el("p", "", data.requests + " requests, " + data.blocked + " refused, " + bytesText(data.bytes) + " carried."));
+  box.appendChild(el("p", "", data.requests + " requests, " + data.blocked + " refused, " + bytesText(data.bytes) + " carried. " + data.hidden + " background requests (files a page loads, tunnels, browser traffic) are not listed."));
 
   box.appendChild(table(["Site", "Requests", "Refused", "Data"],
     data.hosts.map((h) => [[h.host || "—", String(h.requests), String(h.blocked), bytesText(h.bytes)], h.blocked ? "refused" : ""])));
@@ -422,7 +422,7 @@ function networkPanel(stick) {
   box.appendChild(table(["Time", "Address", "Method", "Answer", "Data", "Took"],
     shown.map((e) => [[
       new Date(e.t * 1000).toLocaleTimeString(),
-      e.host + e.path,
+      e.host + e.path + (e.count > 1 ? "  x" + e.count : ""),
       e.method,
       e.blocked ? "refused" : String(e.status),
       bytesText(e.bytes),
