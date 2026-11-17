@@ -111,17 +111,26 @@ fn refused(result: &str, status: u64) -> bool {
 }
 
 /// What a browser asks for by itself while it runs; no one on the stick chose it.
-const BACKGROUND_SITES: [&str; 7] = [
+const BACKGROUND_SITES: [&str; 12] = [
     "mozilla.com",
     "mozilla.net",
     "mozilla.org",
     "firefox.com",
     "firefox-portal-detection.com",
+    "openh264.org",
+    "googleapis.com",
+    "gstatic.com",
+    "googletagmanager.com",
+    "google-analytics.com",
     "cloudflareinsights.com",
     "cloudflare.com",
 ];
 
-fn background(host: &str) -> bool {
+fn background(host: &str, path: &str) -> bool {
+    // The address bar asking a search engine for suggestions while someone types.
+    if host.ends_with("google.com") && path.starts_with("/complete/") {
+        return true;
+    }
     BACKGROUND_SITES
         .iter()
         .any(|site| host == *site || host.ends_with(&format!(".{site}")))
@@ -130,7 +139,7 @@ fn background(host: &str) -> bool {
 /// A page that was opened or a form that was sent: the answer is a page or a redirect. The scripts,
 /// images and polling a page makes are not.
 fn useful(entry: &EntryView) -> bool {
-    if background(&entry.host) {
+    if background(&entry.host, &entry.path) {
         return false;
     }
     if entry.blocked {
