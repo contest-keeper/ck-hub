@@ -614,10 +614,29 @@ async fn a_submission_event_is_counted_and_its_problem_and_language_are_shown() 
         }),
     }
     .canonical_bytes();
+    let first_hash = ck_crypto::sha256_hex(&submission);
     let request = Request::post("/api/v1/events")
         .header(STICK_HEADER, "stick-a")
         .header(SIGNATURE_HEADER, sign(TOKEN_A, &submission))
         .body(Body::from(submission))
+        .expect("request");
+    assert_eq!(call(&setup.app, request).await.0, StatusCode::OK);
+
+    // The site first asked for a check, so the stick saw this one refused: it is not a submission.
+    let refused = Event {
+        stick_id: StickId::parse("stick-a").expect("id"),
+        boot_id: "b1".to_owned(),
+        seq: 3,
+        prev_hash: first_hash,
+        sent_at: "2026-11-12T10:05:30Z".parse().expect("time"),
+        kind: EventKind::Submission,
+        payload: serde_json::json!({ "platform": "codeforces", "problem": "1B", "accepted": false }),
+    }
+    .canonical_bytes();
+    let request = Request::post("/api/v1/events")
+        .header(STICK_HEADER, "stick-a")
+        .header(SIGNATURE_HEADER, sign(TOKEN_A, &refused))
+        .body(Body::from(refused))
         .expect("request");
     assert_eq!(call(&setup.app, request).await.0, StatusCode::OK);
 

@@ -405,10 +405,7 @@ impl Hub {
                 current_user: users_of_boot(&stored, boot.as_deref()).pop(),
                 network_requests,
                 blocked_requests,
-                submissions: stored
-                    .iter()
-                    .filter(|s| s.event.kind == EventKind::Submission)
-                    .count(),
+                submissions: stored.iter().filter(|s| taken(s)).count(),
                 last_submission: last_submission(&stored),
                 warnings: warnings(&stored, boot.as_deref()),
             });
@@ -485,11 +482,15 @@ fn users_of_boot(stored: &[StoredEvent], boot: Option<&str>) -> Vec<String> {
     users
 }
 
+/// A submission the judge took. One the stick saw refused, for example while the site asked for a
+/// check first, is not one; an event without the field counts as taken.
+fn taken(item: &StoredEvent) -> bool {
+    item.event.kind == EventKind::Submission
+        && item.event.payload.get("accepted") != Some(&serde_json::Value::Bool(false))
+}
+
 fn last_submission(stored: &[StoredEvent]) -> Option<SubmissionView> {
-    let item = stored
-        .iter()
-        .rev()
-        .find(|s| s.event.kind == EventKind::Submission)?;
+    let item = stored.iter().rev().find(|s| taken(s))?;
     // A text, or a number as text; anything else is left out.
     let text = |key: &str| match item.event.payload.get(key)? {
         serde_json::Value::String(value) => Some(value.chars().take(64).collect()),
