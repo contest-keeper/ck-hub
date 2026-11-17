@@ -14,8 +14,8 @@ argon2 = "0.6.0"
 axum = "0.8.9"
 base64 = { version = "0.23.1", default-features = false, features = ["alloc", "std"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
-ck-crypto = { git = "https://github.com/contest-keeper/ck-protocol", rev = "51aa6ca05444b1eaa02930e16d7fd0ff8e5b2dc7", version = "0.1.0" }
-ck-protocol = { git = "https://github.com/contest-keeper/ck-protocol", rev = "51aa6ca05444b1eaa02930e16d7fd0ff8e5b2dc7", version = "0.1.0" }
+ck-crypto = { git = "https://github.com/contest-keeper/ck-protocol", rev = "4aa1e0fcc12b80b30382060351802acbd4231444", version = "0.1.0" }
+ck-protocol = { git = "https://github.com/contest-keeper/ck-protocol", rev = "4aa1e0fcc12b80b30382060351802acbd4231444", version = "0.1.0" }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 hmac = "0.13.0"
 postgres = { version = "0.19.14", features = ["with-chrono-0_4", "with-serde_json-1"] }
