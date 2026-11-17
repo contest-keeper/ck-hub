@@ -491,7 +491,17 @@ async fn network_events_make_a_history_with_sites_and_refused_requests() {
         { "t": 102, "method": "GET", "host": "docs.python.org", "path": "/3/", "status": 403,
           "result": "TCP_DENIED", "bytes": 3900, "ms": 0, "type": "text/html" },
         { "t": 103, "method": "GET", "host": "codeforces.com", "path": "/", "status": 200,
-          "result": "TCP_HIT", "bytes": 2000, "ms": 5, "type": "text/html" }
+          "result": "TCP_HIT", "bytes": 2000, "ms": 5, "type": "text/html" },
+        { "t": 104, "method": "GET", "host": "codeforces.com", "path": "/static/app.js", "status": 200,
+          "result": "TCP_MISS", "bytes": 9000, "ms": 5, "type": "application/javascript" },
+        { "t": 105, "method": "GET", "host": "firefox.settings.services.mozilla.com", "path": "/v1/",
+          "status": 403, "result": "TCP_DENIED", "bytes": 100, "ms": 0, "type": "text/html" },
+        { "t": 106, "method": "GET", "host": "docs.python.org", "path": "/3/", "status": 403,
+          "result": "TCP_DENIED", "bytes": 3900, "ms": 0, "type": "text/html" },
+        { "t": 107, "method": "GET", "host": "chat.example.org", "path": "/", "status": 403,
+          "result": "NONE_NONE", "bytes": 3900, "ms": 0, "type": "text/html" },
+        { "t": 108, "method": "CONNECT", "host": "chat.example.org:443", "path": "", "status": 200,
+          "result": "TCP_DENIED", "bytes": 0, "ms": 0, "type": "-" }
     ]);
     let batch = Event {
         stick_id: StickId::parse("stick-a").expect("id"),
@@ -510,9 +520,12 @@ async fn network_events_make_a_history_with_sites_and_refused_requests() {
         .expect("request");
     assert_eq!(call(&setup.app, request).await.0, StatusCode::OK);
 
+    // Shown: the two pages, the refused request to docs.python.org twice, and the refused one to
+    // chat.example.org (its refused tunnel says the same). Hidden: the tunnel, the script and the
+    // browser's own request.
     let sticks = list(&setup.app).await;
-    assert_eq!(sticks[0]["network_requests"], 4);
-    assert_eq!(sticks[0]["blocked_requests"], 1);
+    assert_eq!(sticks[0]["network_requests"], 5);
+    assert_eq!(sticks[0]["blocked_requests"], 3);
     assert_eq!(sticks[1]["network_requests"], 0);
 
     let cookie = organizer_cookie(&setup.app).await;
@@ -527,20 +540,32 @@ async fn network_events_make_a_history_with_sites_and_refused_requests() {
         "only named fields are passed on"
     );
     let history: serde_json::Value = serde_json::from_str(&text).expect("json");
-    assert_eq!(history["requests"], 4);
-    assert_eq!(history["blocked"], 1);
-    assert_eq!(history["bytes"], 7400);
-    // The newest request comes first, and a refused one says so.
-    assert_eq!(history["entries"][0]["path"], "/");
-    assert_eq!(history["entries"][1]["host"], "docs.python.org");
-    assert_eq!(history["entries"][1]["blocked"], true);
-    assert_eq!(history["entries"][3]["host"], "codeforces.com");
-    assert_eq!(history["entries"][3]["boot"], "boot-123");
+    assert_eq!(history["requests"], 5);
+    assert_eq!(history["hidden"], 4);
+    assert_eq!(history["blocked"], 3);
+    assert_eq!(history["bytes"], 1000 + 2000 + 3900 + 3900 + 3900);
+    let entries = history["entries"].as_array().expect("entries");
+    // The same refused request is one line with a count; newest first.
+    assert_eq!(entries.len(), 4);
+    assert_eq!(entries[0]["host"], "chat.example.org");
+    assert_eq!(
+        entries[0]["blocked"], true,
+        "the proxy's error page is a refusal"
+    );
+    assert_eq!(entries[1]["host"], "docs.python.org");
+    assert_eq!(entries[1]["count"], 2);
+    assert_eq!(entries[2]["path"], "/");
+    assert_eq!(entries[3]["path"], "/enter");
+    assert_eq!(entries[3]["boot"], "boot-123");
+    assert!(
+        !text.contains("mozilla"),
+        "the browser's background traffic is left out"
+    );
     // The busiest site first; case and the port do not make a site another one.
     assert_eq!(history["hosts"][0]["host"], "codeforces.com");
-    assert_eq!(history["hosts"][0]["requests"], 3);
+    assert_eq!(history["hosts"][0]["requests"], 2);
     assert_eq!(history["hosts"][1]["host"], "docs.python.org");
-    assert_eq!(history["hosts"][1]["blocked"], 1);
+    assert_eq!(history["hosts"][1]["blocked"], 2);
 
     let request = Request::get("/api/v1/sticks/stick-b/network")
         .header("cookie", cookie.clone())
