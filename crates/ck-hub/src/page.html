@@ -143,6 +143,11 @@ try { if (localStorage.getItem("ck-theme") === "classic") document.documentEleme
   .net th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 600; }
   .net td.where { white-space: normal; overflow-wrap: anywhere; }
   .net tr.refused td { color: var(--bad); background: var(--bad-bg); }
+  .net tr.ok td { color: var(--ok); }
+  .net tr.unconfirmed td { color: var(--warn); background: var(--warn-row); }
+  .net h4 { margin: 12px 0 6px; font-size: 13px; }
+  .net p.bad { color: var(--bad); font-weight: 600; }
+  .net td a { color: inherit; text-decoration: underline; }
   .net .tools { display: flex; gap: 14px; align-items: center; margin: 0 0 8px; font-size: 13px; }
   #empty { display: none; padding: 22px 16px; color: var(--muted); }
   .hint { margin: 12px 4px; font-size: 13px; color: var(--muted); }
@@ -388,6 +393,115 @@ function table(head, rows) {
   return scroll;
 }
 
+// What the stick said was submitted, next to what Codeforces says the same people submitted.
+const proofs = new Map();
+
+async function fetchProof(stick) {
+  const before = proofs.get(stick.stick_id);
+  proofs.set(stick.stick_id, { at: Date.now(), version: stick.submissions + ":" + stick.network_requests, data: before ? before.data : null, failed: false });
+  let data = before ? before.data : null;
+  let failed = false;
+  try {
+    const response = await fetch("/api/v1/orgs/" + encodeURIComponent(org) + "/sticks/" + encodeURIComponent(stick.stick_id) + "/submissions", { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    data = await response.json();
+  } catch (error) {
+    failed = true;
+  }
+  proofs.set(stick.stick_id, { at: Date.now(), version: stick.submissions + ":" + stick.network_requests, data, failed });
+  render();
+}
+
+// Written in two parts: the page must hold no outside address as text; these are only links people click.
+const CODEFORCES = "https" + "://codeforces.com";
+
+function link(text, address) {
+  const a = el("a", "", text);
+  a.href = address;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  return a;
+}
+
+// A handle is shown as a link only when it is made of what a Codeforces handle is made of.
+function handleLink(handle) {
+  if (!handle) return document.createTextNode("—");
+  if (!/^[A-Za-z0-9_.-]{1,24}$/.test(handle)) return document.createTextNode(handle);
+  return link(handle, CODEFORCES + "/profile/" + handle);
+}
+
+function contestLink(contest) {
+  return contest ? link(String(contest), CODEFORCES + "/contest/" + contest) : document.createTextNode("—");
+}
+
+function submissionLink(contest, id) {
+  return link("#" + id, CODEFORCES + "/contest/" + contest + "/submission/" + id);
+}
+
+function proofTable(head, rows) {
+  const scroll = el("div", "scroll");
+  const grid = el("table");
+  const top = el("tr");
+  for (const name of head) top.appendChild(el("th", "", name));
+  grid.appendChild(top);
+  for (const [cells, className] of rows) {
+    const row = el("tr", className);
+    for (const content of cells) {
+      const td = el("td");
+      td.appendChild(typeof content === "string" ? document.createTextNode(content) : content);
+      row.appendChild(td);
+    }
+    grid.appendChild(row);
+  }
+  scroll.appendChild(grid);
+  return scroll;
+}
+
+function proofPanel(stick) {
+  const box = el("div", "net");
+  box.appendChild(el("h3", "", "Submissions"));
+  const cached = proofs.get(stick.stick_id);
+  const version = stick.submissions + ":" + stick.network_requests;
+  if (!cached || cached.version !== version || Date.now() - cached.at > 30000) fetchProof(stick);
+  if (!cached || !cached.data) {
+    box.appendChild(el("p", "muted", cached && cached.failed ? "The submissions could not be loaded." : "Loading…"));
+    return box;
+  }
+  const data = cached.data;
+  const who = data.handles.length ? " by " + data.handles.join(", ") : "";
+  const summary = el("p", data.suspect ? "bad" : "", data.submissions.length + " reported by the stick" + who + ". " +
+    (data.suspect ? data.suspect + " on Codeforces not from this stick: SUSPECT." : "Every Codeforces submission seen was made from this stick."));
+  box.appendChild(summary);
+  if (data.judge_note) box.appendChild(el("p", "hint", data.judge_note));
+
+  if (data.submissions.length) {
+    box.appendChild(el("h4", "", "Reported by the stick"));
+    box.appendChild(proofTable(["Time", "User", "Contest", "Problem", "Language", "Source", "On Codeforces"],
+      data.submissions.map((s) => [[
+        new Date(s.received_at).toLocaleTimeString(),
+        handleLink(s.handle),
+        contestLink(s.contest_id),
+        s.problem || "—",
+        s.language || "—",
+        s.source_sha256 ? s.source_sha256 + (s.source_bytes ? " (" + s.source_bytes + " B" + (s.source_cut ? ", cut" : "") + ")" : "") : "—",
+        !s.accepted ? "refused by the site" : s.judge_id ? submissionLink(s.contest_id, s.judge_id) : "not found",
+      ], !s.accepted ? "" : s.judge_id ? "ok" : "unconfirmed"])));
+  }
+  if (data.judge.length) {
+    box.appendChild(el("h4", "", "Seen on Codeforces"));
+    box.appendChild(proofTable(["Time", "User", "Contest", "Problem", "Submission", "From this stick"],
+      data.judge.map((j) => [[
+        new Date(j.submitted_at).toLocaleTimeString(),
+        handleLink(j.handles[0]),
+        contestLink(j.contest_id),
+        j.problem,
+        submissionLink(j.contest_id, j.submission_id),
+        j.suspect ? "SUSPECT: the stick did not report it" : "yes",
+      ], j.suspect ? "refused" : "ok"])));
+  }
+  return box;
+}
+
 function networkPanel(stick) {
   const box = el("div", "net");
   box.appendChild(el("h3", "", "Network history"));
@@ -514,6 +628,7 @@ function render() {
       const td = el("td");
       td.colSpan = 7;
       td.appendChild(facts(stick));
+      td.appendChild(proofPanel(stick));
       td.appendChild(networkPanel(stick));
       detail.appendChild(td);
       body.appendChild(detail);

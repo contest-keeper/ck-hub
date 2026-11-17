@@ -11,11 +11,14 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::accounts::{Accounts, PasswordCost};
+use crate::codeforces::Judge;
 use crate::download::Download;
+use crate::judge::JudgeSubmission;
 use crate::mail::Mailer;
 use crate::network::{self, NetworkView};
 use crate::registry::Registry;
 use crate::store::{Stick, Store, StoreError, StoredEvent};
+use crate::submissions::{self, SubmissionsView};
 
 /// A stick that has sent nothing for longer than this is shown as offline.
 pub const ONLINE_WINDOW_SECONDS: i64 = 60;
@@ -98,6 +101,9 @@ pub struct LastHeartbeat {
     pub heartbeats: u64,
 }
 
+/// Per contest and handle: when the judge was asked and what it said.
+type JudgedCache = HashMap<(u64, String), (DateTime<Utc>, Vec<JudgeSubmission>)>;
+
 pub struct Hub {
     pub(crate) registry: Mutex<Registry>,
     pub(crate) store: Arc<dyn Store>,
@@ -113,6 +119,10 @@ pub struct Hub {
     /// How mail is sent and the address its links start with, once set up.
     pub(crate) mailer: Option<(Arc<dyn Mailer>, String)>,
     pub(crate) clock: Box<dyn Fn() -> DateTime<Utc> + Send + Sync>,
+    /// Where the submissions of a person in a contest are asked, once set up.
+    judge: Option<Arc<dyn Judge>>,
+    /// What the judge answered lately, so a page that refreshes does not ask again each time.
+    judged: Mutex<JudgedCache>,
 }
 
 impl Hub {
@@ -141,7 +151,16 @@ impl Hub {
             download: None,
             mailer: None,
             clock,
+            judge: None,
+            judged: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Lets the Hub ask the judge what people submitted, to compare with what sticks reported.
+    #[must_use]
+    pub fn with_judge(mut self, judge: Arc<dyn Judge>) -> Self {
+        self.judge = Some(judge);
+        self
     }
 
     /// Lets the Hub send mail. `public_url` is the address people reach the Hub at: the links in
@@ -347,6 +366,43 @@ impl Hub {
         };
         let stored = self.store.events(organization, &id)?;
         Ok(Some(network::view(&stored)))
+    }
+
+    /// What the stick reported as submitted, and what the judge says the same people submitted.
+    pub fn submissions_of(
+        &self,
+        organization: &str,
+        stick: &str,
+    ) -> Result<Option<SubmissionsView>, StoreError> {
+        let Ok(id) = StickId::parse(stick) else {
+            return Ok(None);
+        };
+        let stored = self.store.events(organization, &id)?;
+        let ask = |contest: u64, handle: &str| {
+            let judge = self
+                .judge
+                .as_ref()
+                .expect("asked only when there is a judge");
+            let key = (contest, handle.to_lowercase());
+            let now = (self.clock)();
+            if let Ok(cache) = self.judged.lock()
+                && let Some((at, found)) = cache.get(&key)
+                && now - *at < chrono::TimeDelta::seconds(30)
+            {
+                return Ok(found.clone());
+            }
+            let found = judge.submissions_of(contest, handle)?;
+            if let Ok(mut cache) = self.judged.lock() {
+                cache.insert(key, (now, found.clone()));
+            }
+            Ok(found)
+        };
+        let ask: Option<&submissions::Ask<'_>> = if self.judge.is_some() {
+            Some(&ask)
+        } else {
+            None
+        };
+        Ok(Some(submissions::view(&stored, ask)))
     }
 
     /// Every stick of the organization, with its last heartbeat when it has sent one.

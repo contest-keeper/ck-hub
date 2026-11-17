@@ -40,18 +40,31 @@ pub fn submit_event(stored: &StoredEvent) -> Option<SubmitEvent> {
         return None;
     }
     let payload = &event.payload;
-    if payload.get("judge")?.as_str()? != "codeforces" {
+    // The stick names the fields `platform`, `username` and `problem`; the plan called them
+    // `judge`, `handle` and `problem_index`. Both are read.
+    let text = |names: [&str; 2]| {
+        names
+            .iter()
+            .find_map(|name| payload.get(*name).and_then(serde_json::Value::as_str))
+    };
+    if text(["judge", "platform"])? != "codeforces" {
         return None;
     }
+    // The contest id is a number, or a number written as text.
+    let contest_id = match payload.get("contest_id")? {
+        serde_json::Value::Number(number) => number.as_u64()?,
+        serde_json::Value::String(text) => text.parse().ok()?,
+        _ => return None,
+    };
     Some(SubmitEvent {
         key: (
             event.stick_id.as_str().to_owned(),
             event.boot_id.clone(),
             event.seq,
         ),
-        handle: payload.get("handle")?.as_str()?.to_owned(),
-        contest_id: payload.get("contest_id")?.as_u64()?,
-        problem_index: payload.get("problem_index")?.as_str()?.to_owned(),
+        handle: text(["handle", "username"])?.to_owned(),
+        contest_id,
+        problem_index: text(["problem_index", "problem"])?.to_owned(),
         at: event.sent_at,
         submission_id: payload
             .get("submission_id")

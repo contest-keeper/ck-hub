@@ -539,6 +539,11 @@ async fn run(args: ServeArgs) -> Result<(), String> {
     if let Some((mailer, url)) = mailer {
         hub = hub.with_mail(mailer, &url);
     }
+    // Public contests need no key, so this is always possible; the key and secret are not used.
+    hub = hub.with_judge(Arc::new(CodeforcesClient::new(
+        "https://codeforces.com",
+        None,
+    )));
     let hub = Arc::new(hub);
 
     let listener = tokio::net::TcpListener::bind(args.listen)
