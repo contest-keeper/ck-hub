@@ -1,5 +1,7 @@
 [advisories]
 yanked = "deny"
+# chrono is flagged as unmaintained. Timestamps depend on it; revisit when we move off it.
+ignore = ["RUSTSEC-2026-0543"]
 
 [licenses]
 allow = [
