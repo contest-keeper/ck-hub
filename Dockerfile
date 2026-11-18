@@ -16,6 +16,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /ck-hub /ck-hub
+# The licences of what the Hub is built from, at fixed paths (decision 14). The file is made by
+# `cargo about` (see about.toml) and CI checks that it is up to date.
+COPY --from=build /src/LICENSE /LICENSE
+COPY --from=build /src/THIRD-PARTY-LICENSES /THIRD-PARTY-LICENSES
 # Listen on every interface inside the container. Put HTTPS in front of it: the session cookie is
 # Secure. Give the database in CK_DATABASE_URL; without it the Hub forgets everything on restart.
 ENV CK_LISTEN=0.0.0.0:8088

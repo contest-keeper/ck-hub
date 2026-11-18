@@ -1,0 +1,30 @@
+Keeper Hub third-party licences
+================================
+
+Keeper Hub is licensed under the Apache License 2.0 (see LICENSE). It is built from the Rust crates
+below. Each one is used under the licence shown; the full text follows the list.
+
+Generated with cargo-about from Cargo.lock. Do not edit by hand: run
+`cargo about generate about.hbs -o THIRD-PARTY-LICENSES`.
+
+Licences used
+-------------
+{{#each overview}}
+{{{name}}}  ({{count}} crates)
+{{/each}}
+
+Crates
+------
+{{#each licenses}}
+
+================================================================================
+{{{name}}}
+================================================================================
+
+Used by:
+{{#each used_by}}
+  - {{crate.name}} {{crate.version}}{{#if crate.repository}}  {{crate.repository}}{{/if}}
+{{/each}}
+
+{{{text}}}
+{{/each}}
