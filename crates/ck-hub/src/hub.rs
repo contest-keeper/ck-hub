@@ -19,6 +19,7 @@ use crate::images::ImageSource;
 use crate::judge::JudgeSubmission;
 use crate::mail::Mailer;
 use crate::network::{self, NetworkView};
+use crate::recordings::Blobs;
 use crate::registry::Registry;
 use crate::store::{Stick, Store, StoreError, StoredEvent};
 use crate::submissions::{self, SubmissionsView};
@@ -128,6 +129,10 @@ pub struct Hub {
     log: Option<Mutex<File>>,
     default_org: OnceLock<String>,
     pub(crate) download: Option<Download>,
+    /// Where recordings are kept and for how many days, once set up.
+    pub(crate) recordings: Option<(Arc<dyn Blobs>, i64)>,
+    /// Per stick: when the current minute of upload calls started and how many it has seen.
+    pub(crate) chunk_rates: Mutex<HashMap<StickId, (OffsetDateTime, u32)>>,
     /// The images organizers may download, once set up.
     pub(crate) images: Option<Arc<dyn ImageSource>>,
     /// How mail is sent and the address its links start with, once set up.
@@ -174,6 +179,8 @@ impl Hub {
             log: log.map(Mutex::new),
             default_org: OnceLock::new(),
             download: None,
+            recordings: None,
+            chunk_rates: Mutex::new(HashMap::new()),
             images: None,
             mailer: None,
             clock,
@@ -300,7 +307,7 @@ impl Hub {
 
     /// Who sent this: the stick named in the header, if the registry knows it and its secret
     /// signed exactly these bytes. Also the organization the stick belongs to.
-    fn authenticate(
+    pub(crate) fn authenticate(
         &self,
         stick_header: Option<&str>,
         signature: Option<&str>,

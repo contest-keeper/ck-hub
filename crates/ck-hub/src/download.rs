@@ -66,7 +66,28 @@ impl Download {
     /// [`LINK_LIFETIME_MINUTES`] from `now`.
     #[must_use]
     pub fn link(&self, blob: &str, now: OffsetDateTime) -> String {
-        let ends = (now + Duration::minutes(LINK_LIFETIME_MINUTES))
+        self.sas(
+            blob,
+            "r",
+            Duration::minutes(LINK_LIFETIME_MINUTES),
+            None,
+            now,
+        )
+    }
+
+    /// A link to `blob` with exactly the permissions named (`r` read, `c` create, `w` write, `d`
+    /// delete) for `lifetime` from `now`. With `content_type` the storage answers with that type
+    /// whatever the file was stored as, so an uploaded file can never choose how a browser treats it.
+    #[must_use]
+    pub fn sas(
+        &self,
+        blob: &str,
+        permissions: &str,
+        lifetime: Duration,
+        content_type: Option<&str>,
+        now: OffsetDateTime,
+    ) -> String {
+        let ends = (now + lifetime)
             .replace_nanosecond(0)
             .expect("zero is a valid nanosecond");
         let expiry = ends
@@ -78,7 +99,7 @@ impl Download {
         // identifier, IP range, protocol, version, resource type, snapshot time, encryption scope
         // and the five response header overrides. Only the ones used are filled in.
         let to_sign = [
-            "r",
+            permissions,
             "",
             &expiry,
             &resource,
@@ -93,14 +114,19 @@ impl Download {
             "",
             "",
             "",
-            "",
+            content_type.unwrap_or(""),
         ]
-        .join("\n");
+        .join(
+            "
+",
+        );
         let mut mac = Hmac::<Sha256>::new_from_slice(&self.key).expect("HMAC takes any key length");
         mac.update(to_sign.as_bytes());
         let signature = STANDARD.encode(mac.finalize().into_bytes());
+        let override_type =
+            content_type.map_or_else(String::new, |t| format!("&rsct={}", encode(t)));
         format!(
-            "https://{}.blob.core.windows.net/{}/{}?sv={SAS_VERSION}&sp=r&sr=b&se={}&spr=https&sig={}",
+            "https://{}.blob.core.windows.net/{}/{}?sv={SAS_VERSION}&sp={permissions}&sr=b&se={}&spr=https{override_type}&sig={}",
             self.account,
             self.container,
             blob,
@@ -112,7 +138,7 @@ impl Download {
 
 /// Percent-encodes what a query value may not hold as it is. The signature and the expiry only
 /// contain letters, digits and `+/=:-`, so that is all this needs to handle.
-fn encode(value: &str) -> String {
+pub(crate) fn encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
@@ -166,6 +192,46 @@ mod tests {
         assert!(
             link.ends_with("&sig=LJkscj3n8xulIt%2FQnl088ZPKFvLVm%2FTmL0XeLv8gX2M%3D"),
             "{link}"
+        );
+    }
+
+    #[test]
+    fn permissions_and_a_content_type_are_part_of_the_link_and_the_signature() {
+        let download =
+            Download::new("ckdlabc12", "downloads", "a2V5LWZvci10ZXN0cw==").expect("valid");
+        let now = at("2026-11-14T12:00:00Z");
+        let read = download.sas("a", "r", Duration::hours(2), None, now);
+        let write = download.sas("a", "cw", Duration::hours(2), None, now);
+        let typed = download.sas("a", "r", Duration::hours(2), Some("video/x-matroska"), now);
+        assert!(read.contains("&sp=r&") && write.contains("&sp=cw&"));
+        assert!(read.contains("se=2026-11-14T14%3A00%3A00Z"));
+        assert!(typed.contains("&rsct=video%2Fx-matroska&sig="));
+        let signature = |link: &str| link.rsplit("&sig=").next().expect("sig").to_owned();
+        assert_ne!(signature(&read), signature(&write));
+        assert_ne!(signature(&read), signature(&typed));
+    }
+
+    #[test]
+    fn write_and_typed_links_match_signatures_made_with_another_tool() {
+        // Made with python3 hmac-sha256 over the 16 newline-joined fields, as for the read link.
+        let download =
+            Download::new("ckdlabc12", "downloads", "a2V5LWZvci10ZXN0cw==").expect("valid");
+        let now = at("2026-11-14T12:00:00Z");
+        let typed = download.sas(
+            "forge/setup.exe",
+            "r",
+            Duration::hours(2),
+            Some("video/x-matroska"),
+            now,
+        );
+        assert!(
+            typed.ends_with("&sig=G7L8zlXcLgRoN%2BET%2FxwuuOm6X%2FQGgQLgnXAOXfql7QY%3D"),
+            "{typed}"
+        );
+        let write = download.sas("forge/setup.exe", "cw", Duration::hours(2), None, now);
+        assert!(
+            write.ends_with("&sig=mGmZSkU2pjG6zTBGa%2F3AyQcu3uKBkQ5Uns0fFUwZuBc%3D"),
+            "{write}"
         );
     }
 

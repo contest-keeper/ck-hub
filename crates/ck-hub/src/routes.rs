@@ -27,6 +27,7 @@ use crate::invite::{AcceptError, InviteError, MemberError, StaffError};
 use crate::profiles::{
     MAX_SETTINGS_BYTES, MAX_WALLPAPER_BYTES, ProfileError, ProfileInput, content_type,
 };
+use crate::recordings::{CHUNK_BYTES, RecordingError, UploadStatus};
 use crate::register::{NewStick, RegisterError};
 use crate::signup::{SignupError, TokenError};
 use crate::store::{Membership, Role};
@@ -51,6 +52,13 @@ const MAX_REGISTRY_BYTES: usize = 2 * 1024 * 1024;
 /// A profile with a wallpaper at the limit: the picture in base64 (a third larger) and the settings.
 const MAX_PROFILE_BODY_BYTES: usize =
     MAX_WALLPAPER_BYTES.div_ceil(3) * 4 + MAX_SETTINGS_BYTES + 4096;
+
+/// Chunks of recordings in flight at once, in the whole Hub. Each one is held in memory while it is
+/// checked and written, and the container has 0.5 GiB.
+static CHUNKS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+
+/// Header that carries the SHA-256 of a chunk.
+const CHUNK_SHA_HEADER: &str = "x-ck-chunk-sha256";
 
 /// A heartbeat is a few hundred bytes. Anything much bigger is not one.
 const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -97,6 +105,22 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route(
             "/api/v1/orgs/{slug}/commands/{command_id}",
             get(one_command),
+        )
+        .route("/api/v1/recordings", post(start_upload))
+        .route("/api/v1/recordings/{id}", get(upload_status))
+        .route(
+            "/api/v1/recordings/{id}/chunks/{index}",
+            axum::routing::put(put_chunk).layer(DefaultBodyLimit::max(CHUNK_BYTES + 1)),
+        )
+        .route("/api/v1/recordings/{id}/complete", post(complete_upload))
+        .route("/api/v1/sticks/{id}/recordings", get(recordings))
+        .route(
+            "/api/v1/orgs/{slug}/sticks/{id}/recordings",
+            get(recordings_of),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/recordings/{recording_id}/view",
+            get(view_recording),
         )
         .route("/api/v1/enrolment-codes", post(mint_code))
         .route("/api/v1/orgs/{slug}/enrolment-codes", post(mint_code_in))
@@ -263,6 +287,176 @@ async fn heartbeat(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes)
             Json(json!({ "accepted": seq, "commands": commands })).into_response()
         }
         other => accepted(other.map(|answer| answer.map(|(seq, _)| seq))),
+    }
+}
+
+async fn start_upload(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) -> Response {
+    let (stick, signature) = auth_headers(&headers);
+    let result = tokio::task::spawn_blocking(move || {
+        hub.start_upload(stick.as_deref(), signature.as_deref(), &body)
+    })
+    .await;
+    upload_answer(result)
+}
+
+async fn upload_status(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let (stick, signature) = auth_headers(&headers);
+    let result = tokio::task::spawn_blocking(move || {
+        hub.upload_status(stick.as_deref(), signature.as_deref(), &id)
+    })
+    .await;
+    upload_answer(result)
+}
+
+/// One chunk of a recording. The size is limited before the body is read, and only a few chunks are
+/// handled at a time.
+async fn put_chunk(
+    State(hub): State<Arc<Hub>>,
+    Path((id, index)): Path<(String, u32)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let (stick, signature) = auth_headers(&headers);
+    let sha = headers
+        .get(CHUNK_SHA_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let Some(sha) = sha else {
+        return upload_answer(Ok(Err(RecordingError::BadRequest(
+            "the x-ck-chunk-sha256 header is missing",
+        ))));
+    };
+    let Ok(_slot) = CHUNKS.acquire().await else {
+        return unavailable();
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        hub.put_chunk(
+            stick.as_deref(),
+            signature.as_deref(),
+            &id,
+            index,
+            &sha,
+            &body,
+        )
+    })
+    .await;
+    upload_answer(result)
+}
+
+async fn complete_upload(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let (stick, signature) = auth_headers(&headers);
+    let result = tokio::task::spawn_blocking(move || {
+        hub.complete_upload(stick.as_deref(), signature.as_deref(), &id)
+    })
+    .await;
+    upload_answer(result)
+}
+
+fn upload_answer(
+    result: Result<Result<UploadStatus, RecordingError>, tokio::task::JoinError>,
+) -> Response {
+    match result {
+        Ok(Ok(status)) => Json(status).into_response(),
+        Ok(Err(RecordingError::NotFound)) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Err(RecordingError::BadRequest(why))) => {
+            (StatusCode::BAD_REQUEST, Json(json!({ "error": why }))).into_response()
+        }
+        Ok(Err(RecordingError::Unauthorized)) => {
+            (StatusCode::UNAUTHORIZED, "unknown stick or bad signature").into_response()
+        }
+        Ok(Err(RecordingError::Conflict {
+            message,
+            next_chunk,
+        })) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": message, "next_chunk": next_chunk })),
+        )
+            .into_response(),
+        Ok(Err(RecordingError::TooBig)) => StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+        Ok(Err(RecordingError::TooMany)) => {
+            (StatusCode::TOO_MANY_REQUESTS, "too many requests").into_response()
+        }
+        Ok(Err(RecordingError::Unavailable)) | Err(_) => unavailable(),
+    }
+}
+
+async fn recordings(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    match require(&hub, &headers, Role::Viewer).await {
+        Ok(access) => show_recordings(hub, access, id).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+async fn recordings_of(
+    State(hub): State<Arc<Hub>>,
+    Path((slug, id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    match require_in(&hub, &headers, slug, Role::Viewer).await {
+        Ok(access) => show_recordings(hub, access, id).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+async fn show_recordings(hub: Arc<Hub>, access: Access, id: String) -> Response {
+    match tokio::task::spawn_blocking(move || hub.recordings_of_stick(&access.organization.id, &id))
+        .await
+    {
+        Ok(Ok(Some(list))) => Json(list).into_response(),
+        Ok(Ok(None)) => (StatusCode::NOT_FOUND, "there is no such stick").into_response(),
+        Ok(Err(error)) => {
+            tracing::error!("{error}");
+            unavailable()
+        }
+        Err(_) => unavailable(),
+    }
+}
+
+/// Sends a member of the organization to a read-only link to a complete recording. The link works
+/// for a couple of hours and shows the file as the type the Hub chose, so the file's own claims
+/// about itself never matter. A browser follows it in its own tab, so the Hub page needs no more
+/// permission than it has.
+async fn view_recording(
+    State(hub): State<Arc<Hub>>,
+    Path((slug, recording_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let access = match require_in(&hub, &headers, slug, Role::Viewer).await {
+        Ok(access) => access,
+        Err(reason) => return denied(reason),
+    };
+    match tokio::task::spawn_blocking(move || {
+        hub.recording_link(&access.organization.id, &recording_id)
+    })
+    .await
+    {
+        Ok(Ok(Some(link))) => (
+            StatusCode::FOUND,
+            [(LOCATION, link), (CACHE_CONTROL, "no-store".to_owned())],
+        )
+            .into_response(),
+        Ok(Ok(None)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no such recording" })),
+        )
+            .into_response(),
+        Ok(Err(error)) => {
+            tracing::error!("{error}");
+            unavailable()
+        }
+        Err(_) => unavailable(),
     }
 }
 

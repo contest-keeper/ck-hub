@@ -738,6 +738,144 @@ fn profiles_contract(store: &dyn Store) {
 }
 
 #[allow(clippy::too_many_lines)]
+fn recordings_contract(store: &dyn Store) {
+    use ck_hub::{Kind, Recording};
+
+    let id = unique();
+    let make = |tag: &str| {
+        store
+            .create_organization(&format!("{id}-{tag}"), tag)
+            .expect("write")
+            .expect("a new organization")
+    };
+    let (one, two) = (make("one"), make("two"));
+    let stick = StickId::parse("stick-a").expect("id");
+    let recording = |name: &str, at: i64| Recording {
+        id: format!("{id}{name}"),
+        stick_id: "stick-a".to_owned(),
+        file: format!("{name}.mkv"),
+        kind: Kind::Video,
+        size: 9_000_000,
+        sha256: "a".repeat(64),
+        started_at: Some(time(at)),
+        duration_s: Some(600),
+        next_chunk: 0,
+        created_at: time(at),
+        completed_at: None,
+        expires_at: None,
+    };
+
+    let first = recording("first", 10);
+    assert!(store.add_recording(&one.id, &first).expect("write"));
+    // The same file name of the same stick is the same recording.
+    let mut again = recording("again", 11);
+    again.file.clone_from(&first.file);
+    assert!(!store.add_recording(&one.id, &again).expect("write"));
+    assert!(
+        store
+            .add_recording(&one.id, &recording("second", 20))
+            .expect("write")
+    );
+    // Another organization cannot see these.
+    assert_eq!(
+        store.recording(&two.id, &first.id).expect("read"),
+        None,
+        "another organization sees nothing"
+    );
+    assert_eq!(
+        store.recording(&one.id, &first.id).expect("read"),
+        Some(first.clone())
+    );
+
+    let listed = store.recordings_of(&one.id, &stick, 10).expect("read");
+    let names: Vec<&str> = listed.iter().map(|r| r.file.as_str()).collect();
+    assert_eq!(names, ["second.mkv", "first.mkv"], "newest first");
+
+    // Chunks go in order, and only once each.
+    assert!(
+        !store
+            .advance_recording(&one.id, &first.id, 1)
+            .expect("write")
+    );
+    assert!(
+        store
+            .advance_recording(&one.id, &first.id, 0)
+            .expect("write")
+    );
+    assert!(
+        !store
+            .advance_recording(&one.id, &first.id, 0)
+            .expect("write")
+    );
+    assert!(
+        store
+            .advance_recording(&one.id, &first.id, 1)
+            .expect("write")
+    );
+    assert!(
+        !store
+            .advance_recording(&two.id, &first.id, 2)
+            .expect("write")
+    );
+    assert_eq!(
+        store
+            .recording(&one.id, &first.id)
+            .expect("read")
+            .expect("kept")
+            .next_chunk,
+        2
+    );
+
+    // Completing happens once and sets the expiry.
+    assert!(
+        store
+            .complete_recording(&one.id, &first.id, time(30), time(100))
+            .expect("write")
+    );
+    assert!(
+        !store
+            .complete_recording(&one.id, &first.id, time(31), time(999))
+            .expect("write")
+    );
+    assert!(
+        !store
+            .advance_recording(&one.id, &first.id, 2)
+            .expect("write")
+    );
+    let done = store
+        .recording(&one.id, &first.id)
+        .expect("read")
+        .expect("kept");
+    assert_eq!(done.completed_at, Some(time(30)));
+    assert_eq!(done.expires_at, Some(time(100)));
+
+    // Due: a complete one past its expiry, and an unfinished one older than the cutoff.
+    let due = |now: i64, cutoff: i64| {
+        store
+            .due_recordings(&one.id, time(now), time(cutoff))
+            .expect("read")
+            .into_iter()
+            .map(|r| r.file)
+            .collect::<Vec<_>>()
+    };
+    assert!(due(50, 5).is_empty(), "nothing has expired yet");
+    assert_eq!(due(101, 5), ["first.mkv"]);
+    assert_eq!(due(101, 25), ["first.mkv", "second.mkv"]);
+    assert!(
+        store
+            .due_recordings(&two.id, time(101), time(25))
+            .expect("read")
+            .iter()
+            .all(|r| r.id != first.id)
+    );
+
+    store.delete_recording(&two.id, &first.id).expect("write");
+    assert!(store.recording(&one.id, &first.id).expect("read").is_some());
+    store.delete_recording(&one.id, &first.id).expect("write");
+    assert_eq!(store.recording(&one.id, &first.id).expect("read"), None);
+}
+
+#[allow(clippy::too_many_lines)]
 fn commands_contract(store: &dyn Store) {
     use ck_hub::{CommandState, StoredCommand};
     use ck_protocol::{AckResult, Action, Command, CommandAck, Refusal};
@@ -1084,6 +1222,7 @@ fn enrolment_contract(store: &dyn Store) {
 fn the_memory_store_keeps_its_contract() {
     enrolment_contract(&MemoryStore::default());
     commands_contract(&MemoryStore::default());
+    recordings_contract(&MemoryStore::default());
     profiles_contract(&MemoryStore::default());
     the_store_contract(&MemoryStore::default());
     judge_contract(&MemoryStore::default());
@@ -1099,6 +1238,7 @@ fn the_postgres_store_keeps_its_contract() {
     let store = PostgresStore::connect(&url).expect("connect");
     enrolment_contract(&store);
     commands_contract(&store);
+    recordings_contract(&store);
     profiles_contract(&store);
     the_store_contract(&store);
     judge_contract(&store);

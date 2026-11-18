@@ -16,6 +16,7 @@ use time::OffsetDateTime;
 use crate::commands::{CommandState, StoredCommand, settled};
 use crate::enrol::{EnrolledStick, NewEnrolmentCode, Redemption};
 use crate::judge::{JudgeSubmission, SubmitEvent, submit_event};
+use crate::recordings::Recording;
 
 #[derive(Debug, thiserror::Error)]
 #[error("the store failed: {0}")]
@@ -475,6 +476,49 @@ pub trait Store: Send + Sync {
         organization: &str,
         before: OffsetDateTime,
     ) -> Result<(), StoreError>;
+
+    /// Keeps a new recording. Returns false, and keeps nothing, when the stick already has a
+    /// recording of that file name.
+    fn add_recording(&self, organization: &str, recording: &Recording) -> Result<bool, StoreError>;
+
+    fn recording(&self, organization: &str, id: &str) -> Result<Option<Recording>, StoreError>;
+
+    /// The newest recordings of a stick, newest first.
+    fn recordings_of(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        limit: u32,
+    ) -> Result<Vec<Recording>, StoreError>;
+
+    /// Moves an upload past chunk `index`, only if `index` is the next one it expects and it is not
+    /// complete. Returns whether it changed anything.
+    fn advance_recording(
+        &self,
+        organization: &str,
+        id: &str,
+        index: u32,
+    ) -> Result<bool, StoreError>;
+
+    /// Marks an upload complete, once.
+    fn complete_recording(
+        &self,
+        organization: &str,
+        id: &str,
+        now: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<bool, StoreError>;
+
+    /// Recordings that are complete and expired at `now`, and uploads created before
+    /// `abandoned_before` that never completed. At most a few hundred.
+    fn due_recordings(
+        &self,
+        organization: &str,
+        now: OffsetDateTime,
+        abandoned_before: OffsetDateTime,
+    ) -> Result<Vec<Recording>, StoreError>;
+
+    fn delete_recording(&self, organization: &str, id: &str) -> Result<(), StoreError>;
 }
 
 /// A picture kept with a profile.
@@ -536,6 +580,7 @@ pub struct MemoryStore {
     commands: Mutex<Vec<(String, StoredCommand)>>,
     /// Per code hash: the organization, what it was minted for and whether it is used.
     enrolment_codes: Mutex<HashMap<String, KeptCode>>,
+    recordings: Mutex<Vec<(String, Recording)>>,
 }
 
 struct KeptCode {
@@ -1347,6 +1392,113 @@ impl Store for MemoryStore {
             .lock()
             .expect("codes lock")
             .retain(|_, kept| kept.organization != organization || kept.code.created_at >= before);
+        Ok(())
+    }
+
+    fn add_recording(&self, organization: &str, recording: &Recording) -> Result<bool, StoreError> {
+        let mut all = self.recordings.lock().expect("recordings lock");
+        if all.iter().any(|(org, r)| {
+            org == organization && r.stick_id == recording.stick_id && r.file == recording.file
+        }) {
+            return Ok(false);
+        }
+        all.push((organization.to_owned(), recording.clone()));
+        Ok(true)
+    }
+
+    fn recording(&self, organization: &str, id: &str) -> Result<Option<Recording>, StoreError> {
+        Ok(self
+            .recordings
+            .lock()
+            .expect("recordings lock")
+            .iter()
+            .find(|(org, r)| org == organization && r.id == id)
+            .map(|(_, r)| r.clone()))
+    }
+
+    fn recordings_of(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        limit: u32,
+    ) -> Result<Vec<Recording>, StoreError> {
+        let stick = stick.to_string();
+        let mut found: Vec<Recording> = self
+            .recordings
+            .lock()
+            .expect("recordings lock")
+            .iter()
+            .filter(|(org, r)| org == organization && r.stick_id == stick)
+            .map(|(_, r)| r.clone())
+            .collect();
+        found.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+        found.truncate(limit as usize);
+        Ok(found)
+    }
+
+    fn advance_recording(
+        &self,
+        organization: &str,
+        id: &str,
+        index: u32,
+    ) -> Result<bool, StoreError> {
+        let mut all = self.recordings.lock().expect("recordings lock");
+        for (org, r) in all.iter_mut() {
+            if org == organization && r.id == id && !r.is_complete() && r.next_chunk == index {
+                r.next_chunk = index + 1;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn complete_recording(
+        &self,
+        organization: &str,
+        id: &str,
+        now: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        let mut all = self.recordings.lock().expect("recordings lock");
+        for (org, r) in all.iter_mut() {
+            if org == organization && r.id == id && !r.is_complete() {
+                r.completed_at = Some(now);
+                r.expires_at = Some(expires_at);
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn due_recordings(
+        &self,
+        organization: &str,
+        now: OffsetDateTime,
+        abandoned_before: OffsetDateTime,
+    ) -> Result<Vec<Recording>, StoreError> {
+        Ok(self
+            .recordings
+            .lock()
+            .expect("recordings lock")
+            .iter()
+            .filter(|(org, r)| {
+                org == organization
+                    && if r.is_complete() {
+                        r.expires_at.is_some_and(|end| end < now)
+                    } else {
+                        r.created_at < abandoned_before
+                    }
+            })
+            .take(200)
+            .map(|(_, r)| r.clone())
+            .collect())
+    }
+
+    fn delete_recording(&self, organization: &str, id: &str) -> Result<(), StoreError> {
+        self.recordings
+            .lock()
+            .expect("recordings lock")
+            .retain(|(org, r)| org != organization || r.id != id);
         Ok(())
     }
 }

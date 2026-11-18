@@ -8,10 +8,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ck_hub::{
-    AcsMailer, CodeforcesClient, ConsoleMailer, CreateUserError, Download, Hub,
-    MIN_PASSWORD_LENGTH, Mailer, MemoryStore, NewStick, OrganizationError, PasswordCost,
-    PostgresStore, RegisterError, Registry, Role, StorageImages, Store, StoreError, add_member,
-    create_organization, create_user, register_sticks, router,
+    AcsMailer, AzureBlobs, CodeforcesClient, ConsoleMailer, CreateUserError,
+    DEFAULT_RETENTION_DAYS, Download, Hub, MIN_PASSWORD_LENGTH, Mailer, MemoryStore, NewStick,
+    OrganizationError, PasswordCost, PostgresStore, RegisterError, Registry, Role, StorageImages,
+    Store, StoreError, add_member, create_organization, create_user, register_sticks, router,
 };
 use clap::{Args, Parser, Subcommand};
 use time::OffsetDateTime;
@@ -106,6 +106,13 @@ struct DownloadArgs {
         requires = "download_account"
     )]
     download_key: Option<String>,
+    /// The private container for recordings uploaded by sticks, in the same account. Recordings are
+    /// only accepted when the download account is set
+    #[arg(long, env = "CK_RECORDINGS_CONTAINER", default_value = "recordings")]
+    recordings_container: String,
+    /// How many days a complete recording is kept before it is deleted (1 to 365)
+    #[arg(long, env = "CK_RECORDING_RETENTION_DAYS", default_value_t = DEFAULT_RETENTION_DAYS)]
+    recording_retention_days: i64,
 }
 
 // The field names make the flags `--codeforces-contest` and so on, so the shared prefix stays.
@@ -534,9 +541,15 @@ async fn run(args: ServeArgs) -> Result<(), String> {
     {
         let download = Download::new(account, &args.download.download_container, key)
             .map_err(|e| e.to_string())?;
+        let recordings = Download::new(account, &args.download.recordings_container, key)
+            .map_err(|e| e.to_string())?;
         hub = hub
             .with_images(Arc::new(StorageImages::new(download.clone())))
-            .with_download(download);
+            .with_download(download)
+            .with_recordings(
+                Arc::new(AzureBlobs::new(recordings)),
+                args.download.recording_retention_days,
+            );
     }
     if let Some((mailer, url)) = mailer {
         hub = hub.with_mail(mailer, &url);
@@ -547,6 +560,7 @@ async fn run(args: ServeArgs) -> Result<(), String> {
         None,
     )));
     let hub = Arc::new(hub);
+    start_recording_purge(&hub);
 
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
@@ -556,6 +570,27 @@ async fn run(args: ServeArgs) -> Result<(), String> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Removes expired recordings every hour, on a thread of its own because the store and the storage
+/// calls block.
+fn start_recording_purge(hub: &Arc<Hub>) {
+    let hub = Arc::clone(hub);
+    let started = std::thread::Builder::new()
+        .name("recording-purge".into())
+        .spawn(move || {
+            loop {
+                match hub.purge_recordings() {
+                    Ok(0) => {}
+                    Ok(removed) => tracing::info!("removed {removed} expired recordings"),
+                    Err(error) => tracing::error!("{error}"),
+                }
+                std::thread::sleep(Duration::from_secs(3600));
+            }
+        });
+    if let Err(error) = started {
+        tracing::error!("the recording clean-up cannot start: {error}");
+    }
 }
 
 /// Follows a Codeforces contest on a thread of its own, because the store and the HTTP client
