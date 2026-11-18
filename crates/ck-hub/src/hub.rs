@@ -13,6 +13,7 @@ use serde_json::json;
 use crate::accounts::{Accounts, PasswordCost};
 use crate::codeforces::Judge;
 use crate::download::Download;
+use crate::images::ImageSource;
 use crate::judge::JudgeSubmission;
 use crate::mail::Mailer;
 use crate::network::{self, NetworkView};
@@ -116,6 +117,8 @@ pub struct Hub {
     log: Option<Mutex<File>>,
     default_org: OnceLock<String>,
     pub(crate) download: Option<Download>,
+    /// The images organizers may download, once set up.
+    pub(crate) images: Option<Arc<dyn ImageSource>>,
     /// How mail is sent and the address its links start with, once set up.
     pub(crate) mailer: Option<(Arc<dyn Mailer>, String)>,
     pub(crate) clock: Box<dyn Fn() -> DateTime<Utc> + Send + Sync>,
@@ -130,6 +133,14 @@ impl Hub {
     #[must_use]
     pub fn with_download(mut self, download: Download) -> Self {
         self.download = Some(download);
+        self
+    }
+
+    /// Lets organizers list and download the images the source names. It also needs a download
+    /// container, or the links cannot be made.
+    #[must_use]
+    pub fn with_images(mut self, images: Arc<dyn ImageSource>) -> Self {
+        self.images = Some(images);
         self
     }
 
@@ -149,6 +160,7 @@ impl Hub {
             log: log.map(Mutex::new),
             default_org: OnceLock::new(),
             download: None,
+            images: None,
             mailer: None,
             clock,
             judge: None,

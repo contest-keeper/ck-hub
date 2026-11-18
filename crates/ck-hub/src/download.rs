@@ -18,6 +18,7 @@ const SAS_VERSION: &str = "2022-11-02";
 pub const LINK_LIFETIME_MINUTES: i64 = 5;
 
 /// A private storage container the Hub may hand out files from.
+#[derive(Clone)]
 pub struct Download {
     account: String,
     container: String,

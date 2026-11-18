@@ -6,7 +6,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{DateTime, Duration, Utc};
 use ck_hub::{
-    Download, Hub, Judge, MemoryStore, ONLINE_WINDOW_SECONDS, PasswordCost, Registry, Role, router,
+    Download, Hub, Image, Judge, MemoryStore, ONLINE_WINDOW_SECONDS, PasswordCost, Registry, Role,
+    StaticImages, router,
 };
 use ck_protocol::{
     Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, RecorderStatus, RecordingMode,
@@ -45,6 +46,10 @@ fn setup() -> Setup {
 }
 
 fn setup_with(judge: Option<Arc<dyn Judge>>) -> Setup {
+    build(judge, false)
+}
+
+fn build(judge: Option<Arc<dyn Judge>>, with_images: bool) -> Setup {
     let dir = TempDir::new().expect("temp dir");
     fs::write(
         dir.path().join("registry.json"),
@@ -86,6 +91,23 @@ fn setup_with(judge: Option<Arc<dyn Judge>>) -> Setup {
     let hub = match judge {
         Some(judge) => hub.with_judge(judge),
         None => hub,
+    };
+    let hub = if with_images {
+        let download =
+            Download::new("ckdlabc12", "downloads", "a2V5LWZvci10ZXN0cw==").expect("valid");
+        hub.with_download(download)
+            .with_images(Arc::new(StaticImages(vec![Image {
+                id: "keeper-os-0.3.0".to_owned(),
+                name: "Keeper OS".to_owned(),
+                version: "0.3.0".to_owned(),
+                blob: "images/keeper-os-0.3.0.img.zst".to_owned(),
+                size: 1_500_000_000,
+                sha256: "a".repeat(64),
+                family: "ubuntu".to_owned(),
+                profile: "generic".to_owned(),
+            }])))
+    } else {
+        hub
     };
     let app = router(Arc::new(hub));
     Setup { dir, app, now }
@@ -1001,4 +1023,98 @@ async fn the_forge_download_sends_the_visitor_to_a_short_lived_link() {
     ));
     assert!(location.contains("&se=2026-11-14T12%3A05%3A00Z&"));
     assert_eq!(response.headers()["cache-control"], "no-store");
+}
+
+#[tokio::test]
+async fn the_image_list_and_download_need_a_login() {
+    let setup = build(None, true);
+    for path in ["/api/v1/images", "/download/image/keeper-os-0.3.0"] {
+        let (status, _) = call(
+            &setup.app,
+            Request::get(path).body(Body::empty()).expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn images_are_not_found_until_they_are_set_up() {
+    let setup = setup();
+    let cookie = organizer_cookie(&setup.app).await;
+    for path in ["/api/v1/images", "/download/image/keeper-os-0.3.0"] {
+        let (status, _) = call(
+            &setup.app,
+            Request::get(path)
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn an_organizer_sees_the_manifest_without_the_storage_path() {
+    let setup = build(None, true);
+    let cookie = organizer_cookie(&setup.app).await;
+    let (status, text) = call(
+        &setup.app,
+        Request::get("/api/v1/images")
+            .header("cookie", cookie)
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let json: serde_json::Value = serde_json::from_str(&text).expect("json");
+    let image = &json["images"][0];
+    assert_eq!(image["id"], "keeper-os-0.3.0");
+    assert_eq!(image["url"], "/download/image/keeper-os-0.3.0");
+    assert_eq!(image["size"], 1_500_000_000u64);
+    assert_eq!(image["sha256"], "a".repeat(64));
+    assert_eq!(image["family"], "ubuntu");
+    assert_eq!(image["profile"], "generic");
+    assert!(!text.contains("blob") && !text.contains("images/keeper"));
+}
+
+#[tokio::test]
+async fn an_organizer_is_sent_to_a_five_minute_link_and_a_wrong_id_is_refused() {
+    let setup = build(None, true);
+    let cookie = organizer_cookie(&setup.app).await;
+    let response = setup
+        .app
+        .clone()
+        .oneshot(
+            Request::get("/download/image/keeper-os-0.3.0")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::FOUND);
+    let location = response.headers()["location"].to_str().expect("text");
+    assert!(location.starts_with(
+        "https://ckdlabc12.blob.core.windows.net/downloads/images/keeper-os-0.3.0.img.zst?sv="
+    ));
+    // The test clock reads 10:00:00, so the link ends at 10:05:00.
+    assert!(
+        location.contains("&se=2026-11-12T10%3A05%3A00Z&"),
+        "{location}"
+    );
+    assert_eq!(response.headers()["cache-control"], "no-store");
+
+    for id in ["nope", "..%2Fsecret", "keeper-os-0.3.0%2F..%2Fx"] {
+        let (status, _) = call(
+            &setup.app,
+            Request::get(format!("/download/image/{id}"))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{id}");
+    }
 }
