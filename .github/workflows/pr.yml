@@ -19,3 +19,12 @@ jobs:
     uses: contest-keeper/.github/.github/workflows/rust-ci.yml@main
     with:
       postgres: true
+  # THIRD-PARTY-LICENSES ships in the Hub image, so it must match Cargo.lock.
+  licences:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-about --locked --features cli --version 0.9.3
+      - run: cargo about generate about.hbs -o THIRD-PARTY-LICENSES
+      - run: git diff --exit-code THIRD-PARTY-LICENSES

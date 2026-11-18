@@ -1,0 +1,16 @@
+# Licence texts of every Rust crate the Hub is built from, for THIRD-PARTY-LICENSES.
+# Same list as deny.toml, which is the gate; cargo-about only writes the file.
+accepted = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "CDLA-Permissive-2.0",
+]
+ignore-dev-dependencies = true
+ignore-build-dependencies = true
+workarounds = ["ring"]
