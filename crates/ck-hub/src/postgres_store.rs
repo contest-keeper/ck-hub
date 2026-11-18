@@ -11,6 +11,7 @@ use crate::commands::{CommandState, StoredCommand, action_type, settled};
 use crate::enrol::{EnrolledStick, NewEnrolmentCode, Redemption};
 use crate::judge::{JudgeSubmission, SubmitEvent, submit_event};
 
+use crate::recordings::{Kind, Recording};
 use crate::store::{
     Invitation, Member, Membership, NewProfile, NewUser, Organization, Profile, ProfileSummary,
     Role, SeenHeartbeat, Stick, Store, StoreError, StoredEvent, TokenPurpose, User, Wallpaper,
@@ -18,7 +19,7 @@ use crate::store::{
 
 /// The schema, in the order it is applied. A migration that was applied is never run again and
 /// never edited: a change is a new file.
-const MIGRATIONS: [(&str, &str); 13] = [
+const MIGRATIONS: [(&str, &str); 14] = [
     (
         "0001_heartbeats_and_events",
         include_str!("../migrations/0001_heartbeats_and_events.sql"),
@@ -67,6 +68,10 @@ const MIGRATIONS: [(&str, &str); 13] = [
     (
         "0013_enrolment_codes",
         include_str!("../migrations/0013_enrolment_codes.sql"),
+    ),
+    (
+        "0014_recordings",
+        include_str!("../migrations/0014_recordings.sql"),
     ),
 ];
 
@@ -1271,6 +1276,164 @@ impl Store for PostgresStore {
         })
         .map(|_| ())
     }
+    fn add_recording(&self, organization: &str, recording: &Recording) -> Result<bool, StoreError> {
+        let size = i64::try_from(recording.size).map_err(failed)?;
+        let duration = recording
+            .duration_s
+            .map(i64::try_from)
+            .transpose()
+            .map_err(failed)?;
+        let next = i32::try_from(recording.next_chunk).map_err(failed)?;
+        self.in_org(organization, |transaction| {
+            transaction.execute(
+                "INSERT INTO recordings
+                     (organization_id, id, stick_id, file, kind, size, sha256, started_at,
+                      duration_s, next_chunk, created_at, completed_at, expires_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                 ON CONFLICT (organization_id, stick_id, file) DO NOTHING",
+                &[
+                    &organization,
+                    &recording.id,
+                    &recording.stick_id,
+                    &recording.file,
+                    &recording.kind.as_str(),
+                    &size,
+                    &recording.sha256,
+                    &recording.started_at,
+                    &duration,
+                    &next,
+                    &recording.created_at,
+                    &recording.completed_at,
+                    &recording.expires_at,
+                ],
+            )
+        })
+        .map(|inserted| inserted == 1)
+    }
+
+    fn recording(&self, organization: &str, id: &str) -> Result<Option<Recording>, StoreError> {
+        let rows = self.in_org(organization, |transaction| {
+            transaction.query(
+                &format!(
+                    "SELECT {RECORDING_COLUMNS} FROM recordings
+                     WHERE organization_id = $1 AND id = $2"
+                ),
+                &[&organization, &id],
+            )
+        })?;
+        rows.first().map(recording_from_row).transpose()
+    }
+
+    fn recordings_of(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        limit: u32,
+    ) -> Result<Vec<Recording>, StoreError> {
+        let stick = stick.to_string();
+        let limit = i64::from(limit);
+        let rows = self.in_org(organization, |transaction| {
+            transaction.query(
+                &format!(
+                    "SELECT {RECORDING_COLUMNS} FROM recordings
+                     WHERE organization_id = $1 AND stick_id = $2
+                     ORDER BY created_at DESC, id DESC LIMIT $3"
+                ),
+                &[&organization, &stick, &limit],
+            )
+        })?;
+        rows.iter().map(recording_from_row).collect()
+    }
+
+    fn advance_recording(
+        &self,
+        organization: &str,
+        id: &str,
+        index: u32,
+    ) -> Result<bool, StoreError> {
+        let index = i32::try_from(index).map_err(failed)?;
+        self.in_org(organization, |transaction| {
+            transaction.execute(
+                "UPDATE recordings SET next_chunk = $3 + 1
+                 WHERE organization_id = $1 AND id = $2 AND next_chunk = $3
+                   AND completed_at IS NULL",
+                &[&organization, &id, &index],
+            )
+        })
+        .map(|changed| changed == 1)
+    }
+
+    fn complete_recording(
+        &self,
+        organization: &str,
+        id: &str,
+        now: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        self.in_org(organization, |transaction| {
+            transaction.execute(
+                "UPDATE recordings SET completed_at = $3, expires_at = $4
+                 WHERE organization_id = $1 AND id = $2 AND completed_at IS NULL",
+                &[&organization, &id, &now, &expires_at],
+            )
+        })
+        .map(|changed| changed == 1)
+    }
+
+    fn due_recordings(
+        &self,
+        organization: &str,
+        now: OffsetDateTime,
+        abandoned_before: OffsetDateTime,
+    ) -> Result<Vec<Recording>, StoreError> {
+        let rows = self.in_org(organization, |transaction| {
+            transaction.query(
+                &format!(
+                    "SELECT {RECORDING_COLUMNS} FROM recordings
+                     WHERE organization_id = $1
+                       AND ((completed_at IS NOT NULL AND expires_at < $2)
+                            OR (completed_at IS NULL AND created_at < $3))
+                     ORDER BY created_at LIMIT 200"
+                ),
+                &[&organization, &now, &abandoned_before],
+            )
+        })?;
+        rows.iter().map(recording_from_row).collect()
+    }
+
+    fn delete_recording(&self, organization: &str, id: &str) -> Result<(), StoreError> {
+        self.in_org(organization, |transaction| {
+            transaction.execute(
+                "DELETE FROM recordings WHERE organization_id = $1 AND id = $2",
+                &[&organization, &id],
+            )
+        })
+        .map(|_| ())
+    }
+}
+
+const RECORDING_COLUMNS: &str = "id, stick_id, file, kind, size, sha256, started_at, duration_s, \
+     next_chunk, created_at, completed_at, expires_at";
+
+fn recording_from_row(row: &postgres::Row) -> Result<Recording, StoreError> {
+    let kind: String = row.get("kind");
+    let size: i64 = row.get("size");
+    let duration: Option<i64> = row.get("duration_s");
+    let next: i32 = row.get("next_chunk");
+    Ok(Recording {
+        id: row.get("id"),
+        stick_id: row.get("stick_id"),
+        file: row.get("file"),
+        kind: Kind::parse(&kind).ok_or_else(|| failed("a recording has an unknown kind"))?,
+        size: u64::try_from(size).map_err(failed)?,
+        sha256: row.get("sha256"),
+        started_at: row.get("started_at"),
+        duration_s: duration.map(u64::try_from).transpose().map_err(failed)?,
+        next_chunk: u32::try_from(next).map_err(failed)?,
+        created_at: row.get("created_at"),
+        completed_at: row.get("completed_at"),
+        expires_at: row.get("expires_at"),
+    })
 }
 
 const COMMAND_COLUMNS: &str = "sent_by_user_id, sent_by_email, signed_command, state, refusal,

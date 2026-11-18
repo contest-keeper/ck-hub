@@ -17,6 +17,7 @@ mod matcher;
 mod network;
 mod postgres_store;
 mod profiles;
+mod recordings;
 mod register;
 mod registry;
 mod routes;
@@ -55,6 +56,11 @@ pub use matcher::{Verdict, match_submissions};
 pub use postgres_store::PostgresStore;
 pub use profiles::{
     MAX_SETTINGS_BYTES, MAX_WALLPAPER_BYTES, ProfileError, ProfileInput, WallpaperInput,
+};
+pub use recordings::{
+    ABANDONED_DAYS, AzureBlobs, BlobError, Blobs, CHUNK_BYTES, DEFAULT_RETENTION_DAYS, Kind,
+    MAX_CHUNKS_PER_MINUTE, MAX_FILE_BYTES, MAX_RETENTION_DAYS, MAX_STICK_BYTES, MemoryBlobs,
+    Recording, RecordingError, RecordingView, UploadStatus, VIEW_LINK_HOURS, block_id,
 };
 pub use register::{NewStick, RegisterError, Registered, register_sticks};
 pub use registry::{Registry, RegistryError};
