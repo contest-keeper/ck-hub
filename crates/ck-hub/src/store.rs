@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use chrono::{DateTime, Utc};
 use ck_protocol::{Event, Heartbeat, StickId, Token};
 use serde::Deserialize;
+use time::OffsetDateTime;
 
 use crate::judge::{JudgeSubmission, SubmitEvent, submit_event};
 
@@ -95,8 +95,8 @@ pub struct User {
     pub email: String,
     pub password_hash: String,
     /// When the owner of the address confirmed it. `None` until then.
-    pub email_verified_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
+    pub email_verified_at: Option<OffsetDateTime>,
+    pub created_at: OffsetDateTime,
     /// Platform staff make organizations. They do not see inside them.
     pub is_platform_staff: bool,
 }
@@ -106,8 +106,8 @@ pub struct User {
 pub struct NewUser {
     pub email: String,
     pub password_hash: String,
-    pub email_verified_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
+    pub email_verified_at: Option<OffsetDateTime>,
+    pub created_at: OffsetDateTime,
 }
 
 /// What a mailed one-time token may be used for.
@@ -143,7 +143,7 @@ pub struct Invitation {
     pub email: String,
     pub role: Role,
     pub invited_by: Option<String>,
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: OffsetDateTime,
 }
 
 /// A person in an organization, with their role there.
@@ -165,14 +165,14 @@ pub struct Membership {
 #[derive(Debug, Clone)]
 pub struct SeenHeartbeat {
     pub heartbeat: Heartbeat,
-    pub received_at: DateTime<Utc>,
+    pub received_at: OffsetDateTime,
     pub count: u64,
 }
 
 /// An event as the Hub received it, with what was wrong with its place in the chain, if anything.
 #[derive(Debug, Clone)]
 pub struct StoredEvent {
-    pub received_at: DateTime<Utc>,
+    pub received_at: OffsetDateTime,
     pub event: Event,
     pub integrity: Option<String>,
 }
@@ -184,7 +184,7 @@ pub trait Store: Send + Sync {
         &self,
         organization: &str,
         heartbeat: Heartbeat,
-        received_at: DateTime<Utc>,
+        received_at: OffsetDateTime,
     ) -> Result<(), StoreError>;
 
     fn last_heartbeat(
@@ -206,7 +206,7 @@ pub trait Store: Send + Sync {
         &self,
         organization: &str,
         event: Event,
-        received_at: DateTime<Utc>,
+        received_at: OffsetDateTime,
         integrity: Option<String>,
     ) -> Result<(), StoreError>;
 
@@ -227,7 +227,7 @@ pub trait Store: Send + Sync {
         organization: &str,
         judge: &str,
         submissions: &[JudgeSubmission],
-        received_at: DateTime<Utc>,
+        received_at: OffsetDateTime,
     ) -> Result<usize, StoreError>;
 
     /// Every kept submission of one contest, oldest first.
@@ -281,18 +281,18 @@ pub trait Store: Send + Sync {
         &self,
         token_hash: &str,
         user_id: &str,
-        expires_at: DateTime<Utc>,
+        expires_at: OffsetDateTime,
     ) -> Result<(), StoreError>;
 
     /// The user id a session belongs to and when it ends, if there is such a session.
-    fn session(&self, token_hash: &str) -> Result<Option<(String, DateTime<Utc>)>, StoreError>;
+    fn session(&self, token_hash: &str) -> Result<Option<(String, OffsetDateTime)>, StoreError>;
 
     fn delete_session(&self, token_hash: &str) -> Result<(), StoreError>;
 
     /// Removes every session that ended at or before `now`.
-    fn delete_expired_sessions(&self, now: DateTime<Utc>) -> Result<(), StoreError>;
+    fn delete_expired_sessions(&self, now: OffsetDateTime) -> Result<(), StoreError>;
 
-    fn mark_email_verified(&self, user_id: &str, at: DateTime<Utc>) -> Result<(), StoreError>;
+    fn mark_email_verified(&self, user_id: &str, at: OffsetDateTime) -> Result<(), StoreError>;
 
     fn set_password_hash(&self, user_id: &str, password_hash: &str) -> Result<(), StoreError>;
 
@@ -305,7 +305,7 @@ pub trait Store: Send + Sync {
         token_hash: &str,
         user_id: &str,
         purpose: TokenPurpose,
-        expires_at: DateTime<Utc>,
+        expires_at: OffsetDateTime,
     ) -> Result<(), StoreError>;
 
     /// Uses up a token: the account it was made for, if it exists, has this purpose and has not
@@ -314,15 +314,15 @@ pub trait Store: Send + Sync {
         &self,
         token_hash: &str,
         purpose: TokenPurpose,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
     ) -> Result<Option<String>, StoreError>;
 
     /// Removes every token that ended at or before `now`.
-    fn delete_expired_email_tokens(&self, now: DateTime<Utc>) -> Result<(), StoreError>;
+    fn delete_expired_email_tokens(&self, now: OffsetDateTime) -> Result<(), StoreError>;
 
     /// Removes accounts nobody confirmed that were made before `before`, with their tokens and
     /// sessions.
-    fn delete_unverified_users_before(&self, before: DateTime<Utc>) -> Result<(), StoreError>;
+    fn delete_unverified_users_before(&self, before: OffsetDateTime) -> Result<(), StoreError>;
 
     /// Keeps an invitation. It replaces the open one for the same organization and address (capitals
     /// do not matter).
@@ -333,7 +333,7 @@ pub trait Store: Send + Sync {
         role: Role,
         token_hash: &str,
         invited_by: Option<&str>,
-        expires_at: DateTime<Utc>,
+        expires_at: OffsetDateTime,
     ) -> Result<Invitation, StoreError>;
 
     /// The invitation a token belongs to, without using it up. Ended ones are returned too.
@@ -343,7 +343,7 @@ pub trait Store: Send + Sync {
     fn take_invitation(
         &self,
         token_hash: &str,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
     ) -> Result<Option<Invitation>, StoreError>;
 
     /// The open invitations of an organization, ordered by address.
@@ -353,7 +353,7 @@ pub trait Store: Send + Sync {
     fn delete_invitation(&self, organization_id: &str, id: &str) -> Result<bool, StoreError>;
 
     /// Removes every invitation that ended at or before `now`.
-    fn delete_expired_invitations(&self, now: DateTime<Utc>) -> Result<(), StoreError>;
+    fn delete_expired_invitations(&self, now: OffsetDateTime) -> Result<(), StoreError>;
 
     /// Everyone in the organization, ordered by email.
     fn members_of(&self, organization_id: &str) -> Result<Vec<Member>, StoreError>;
@@ -385,7 +385,7 @@ pub trait Store: Send + Sync {
         &self,
         organization: &str,
         profile: NewProfile,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
     ) -> Result<(), StoreError>;
 
     /// The organization's profiles, by name.
@@ -427,21 +427,21 @@ pub struct Profile {
     pub name: String,
     pub settings: serde_json::Value,
     pub wallpaper_name: Option<String>,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: OffsetDateTime,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileSummary {
     pub id: String,
     pub name: String,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: OffsetDateTime,
 }
 
 /// A profile and when it was last saved.
-type KeptProfile = (NewProfile, DateTime<Utc>);
+type KeptProfile = (NewProfile, OffsetDateTime);
 
 /// A token's hash, the account it is for, what it is for, and when it ends.
-type MailedToken = (String, String, TokenPurpose, DateTime<Utc>);
+type MailedToken = (String, String, TokenPurpose, OffsetDateTime);
 
 /// Keeps everything in memory. Used by the tests, and by a Hub started without a database; the
 /// data is gone when the program stops.
@@ -452,7 +452,7 @@ pub struct MemoryStore {
     events: Mutex<HashMap<(String, StickId), Vec<StoredEvent>>>,
     judge_submissions: Mutex<Vec<(String, String, JudgeSubmission)>>,
     users: Mutex<Vec<User>>,
-    sessions: Mutex<HashMap<String, (String, DateTime<Utc>)>>,
+    sessions: Mutex<HashMap<String, (String, OffsetDateTime)>>,
     email_tokens: Mutex<Vec<MailedToken>>,
     invitations: Mutex<Vec<(Invitation, String)>>,
     organizations: Mutex<Vec<Organization>>,
@@ -473,7 +473,7 @@ impl Store for MemoryStore {
         &self,
         organization: &str,
         heartbeat: Heartbeat,
-        received_at: DateTime<Utc>,
+        received_at: OffsetDateTime,
     ) -> Result<(), StoreError> {
         {
             let mut boots = self.boot_seqs.lock().expect("boots lock");
@@ -546,7 +546,7 @@ impl Store for MemoryStore {
         &self,
         organization: &str,
         event: Event,
-        received_at: DateTime<Utc>,
+        received_at: OffsetDateTime,
         integrity: Option<String>,
     ) -> Result<(), StoreError> {
         self.events
@@ -577,7 +577,7 @@ impl Store for MemoryStore {
         organization: &str,
         judge: &str,
         submissions: &[JudgeSubmission],
-        _received_at: DateTime<Utc>,
+        _received_at: OffsetDateTime,
     ) -> Result<usize, StoreError> {
         let mut kept = self.judge_submissions.lock().expect("judge lock");
         let mut added = 0;
@@ -747,7 +747,7 @@ impl Store for MemoryStore {
         &self,
         token_hash: &str,
         user_id: &str,
-        expires_at: DateTime<Utc>,
+        expires_at: OffsetDateTime,
     ) -> Result<(), StoreError> {
         self.sessions
             .lock()
@@ -756,7 +756,7 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    fn session(&self, token_hash: &str) -> Result<Option<(String, DateTime<Utc>)>, StoreError> {
+    fn session(&self, token_hash: &str) -> Result<Option<(String, OffsetDateTime)>, StoreError> {
         Ok(self
             .sessions
             .lock()
@@ -773,7 +773,7 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    fn delete_expired_sessions(&self, now: DateTime<Utc>) -> Result<(), StoreError> {
+    fn delete_expired_sessions(&self, now: OffsetDateTime) -> Result<(), StoreError> {
         self.sessions
             .lock()
             .expect("sessions lock")
@@ -781,7 +781,7 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    fn mark_email_verified(&self, user_id: &str, at: DateTime<Utc>) -> Result<(), StoreError> {
+    fn mark_email_verified(&self, user_id: &str, at: OffsetDateTime) -> Result<(), StoreError> {
         let mut users = self.users.lock().expect("users lock");
         if let Some(user) = users.iter_mut().find(|user| user.id == user_id) {
             user.email_verified_at.get_or_insert(at);
@@ -810,7 +810,7 @@ impl Store for MemoryStore {
         token_hash: &str,
         user_id: &str,
         purpose: TokenPurpose,
-        expires_at: DateTime<Utc>,
+        expires_at: OffsetDateTime,
     ) -> Result<(), StoreError> {
         let mut tokens = self.email_tokens.lock().expect("tokens lock");
         tokens.retain(|(_, owner, kind, _)| !(owner == user_id && *kind == purpose));
@@ -827,7 +827,7 @@ impl Store for MemoryStore {
         &self,
         token_hash: &str,
         purpose: TokenPurpose,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
     ) -> Result<Option<String>, StoreError> {
         let mut tokens = self.email_tokens.lock().expect("tokens lock");
         // A token of another purpose is left alone, as in PostgreSQL.
@@ -841,7 +841,7 @@ impl Store for MemoryStore {
         Ok((ends > now).then_some(owner))
     }
 
-    fn delete_expired_email_tokens(&self, now: DateTime<Utc>) -> Result<(), StoreError> {
+    fn delete_expired_email_tokens(&self, now: OffsetDateTime) -> Result<(), StoreError> {
         self.email_tokens
             .lock()
             .expect("tokens lock")
@@ -849,7 +849,7 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    fn delete_unverified_users_before(&self, before: DateTime<Utc>) -> Result<(), StoreError> {
+    fn delete_unverified_users_before(&self, before: OffsetDateTime) -> Result<(), StoreError> {
         let mut users = self.users.lock().expect("users lock");
         let gone: Vec<String> = users
             .iter()
@@ -875,7 +875,7 @@ impl Store for MemoryStore {
         role: Role,
         token_hash: &str,
         invited_by: Option<&str>,
-        expires_at: DateTime<Utc>,
+        expires_at: OffsetDateTime,
     ) -> Result<Invitation, StoreError> {
         let mut invitations = self.invitations.lock().expect("invitations lock");
         invitations.retain(|(open, _)| {
@@ -904,7 +904,7 @@ impl Store for MemoryStore {
     fn take_invitation(
         &self,
         token_hash: &str,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
     ) -> Result<Option<Invitation>, StoreError> {
         let mut invitations = self.invitations.lock().expect("invitations lock");
         let Some(at) = invitations.iter().position(|(_, hash)| hash == token_hash) else {
@@ -934,7 +934,7 @@ impl Store for MemoryStore {
         Ok(invitations.len() < before)
     }
 
-    fn delete_expired_invitations(&self, now: DateTime<Utc>) -> Result<(), StoreError> {
+    fn delete_expired_invitations(&self, now: OffsetDateTime) -> Result<(), StoreError> {
         self.invitations
             .lock()
             .expect("invitations lock")
@@ -1024,7 +1024,7 @@ impl Store for MemoryStore {
         &self,
         organization: &str,
         profile: NewProfile,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
     ) -> Result<(), StoreError> {
         self.profiles.lock().expect("profiles lock").insert(
             (organization.to_owned(), profile.id.clone()),

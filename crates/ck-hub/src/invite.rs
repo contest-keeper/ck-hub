@@ -1,6 +1,6 @@
 //! Inviting people to an organization, accepting an invitation, and managing members.
 
-use chrono::Duration;
+use time::Duration;
 
 use crate::accounts::{AccessError, token_hash, unavailable, valid_email, valid_slug};
 use crate::hub::Hub;

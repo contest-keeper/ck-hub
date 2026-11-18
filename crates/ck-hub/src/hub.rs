@@ -5,10 +5,10 @@ use std::fs::File;
 use std::io::Write;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use chrono::{DateTime, Utc};
 use ck_protocol::{Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, StickId};
 use serde::Serialize;
 use serde_json::json;
+use time::{Duration, OffsetDateTime};
 
 use crate::accounts::{Accounts, PasswordCost};
 use crate::codeforces::Judge;
@@ -65,7 +65,8 @@ pub struct StickView {
     pub last: Option<LastHeartbeat>,
     /// Events received from this stick since the Hub started.
     pub events: usize,
-    pub last_event_at: Option<DateTime<Utc>>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub last_event_at: Option<OffsetDateTime>,
     /// Who logged in last during the stick's latest boot, if anyone did.
     pub current_user: Option<String>,
     /// What the stick's proxy carried, and how much of it was refused as a site not allowed.
@@ -82,7 +83,8 @@ pub struct StickView {
 /// rule of each platform, and a field a rule does not send is just left out.
 #[derive(Debug, Serialize, PartialEq)]
 pub struct SubmissionView {
-    pub received_at: DateTime<Utc>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub received_at: OffsetDateTime,
     pub problem: Option<String>,
     pub language: Option<String>,
     pub submission_id: Option<String>,
@@ -90,7 +92,8 @@ pub struct SubmissionView {
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct LastHeartbeat {
-    pub received_at: DateTime<Utc>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub received_at: OffsetDateTime,
     pub seconds_ago: i64,
     pub boot_id: String,
     pub seq: u64,
@@ -103,7 +106,7 @@ pub struct LastHeartbeat {
 }
 
 /// Per contest and handle: when the judge was asked and what it said.
-type JudgedCache = HashMap<(u64, String), (DateTime<Utc>, Vec<JudgeSubmission>)>;
+type JudgedCache = HashMap<(u64, String), (OffsetDateTime, Vec<JudgeSubmission>)>;
 
 pub struct Hub {
     pub(crate) registry: Mutex<Registry>,
@@ -113,7 +116,7 @@ pub struct Hub {
     /// pass the sequence check.
     write: Mutex<()>,
     /// Per stick: when the current minute started and how many messages it has seen.
-    rates: Mutex<HashMap<StickId, (DateTime<Utc>, u32)>>,
+    rates: Mutex<HashMap<StickId, (OffsetDateTime, u32)>>,
     log: Option<Mutex<File>>,
     default_org: OnceLock<String>,
     pub(crate) download: Option<Download>,
@@ -121,7 +124,7 @@ pub struct Hub {
     pub(crate) images: Option<Arc<dyn ImageSource>>,
     /// How mail is sent and the address its links start with, once set up.
     pub(crate) mailer: Option<(Arc<dyn Mailer>, String)>,
-    pub(crate) clock: Box<dyn Fn() -> DateTime<Utc> + Send + Sync>,
+    pub(crate) clock: Box<dyn Fn() -> OffsetDateTime + Send + Sync>,
     /// Where the submissions of a person in a contest are asked, once set up.
     judge: Option<Arc<dyn Judge>>,
     /// What the judge answered lately, so a page that refreshes does not ask again each time.
@@ -149,7 +152,7 @@ impl Hub {
         registry: Registry,
         store: Arc<dyn Store>,
         log: Option<File>,
-        clock: Box<dyn Fn() -> DateTime<Utc> + Send + Sync>,
+        clock: Box<dyn Fn() -> OffsetDateTime + Send + Sync>,
     ) -> Self {
         Self {
             registry: Mutex::new(registry),
@@ -251,7 +254,7 @@ impl Hub {
         let now = (self.clock)();
         let mut rates = self.rates.lock().expect("rates lock");
         let (since, count) = rates.entry(id.clone()).or_insert((now, 0));
-        if (now - *since).num_seconds() >= 60 {
+        if (now - *since).whole_seconds() >= 60 {
             (*since, *count) = (now, 0);
         }
         *count += 1;
@@ -399,7 +402,7 @@ impl Hub {
             let now = (self.clock)();
             if let Ok(cache) = self.judged.lock()
                 && let Some((at, found)) = cache.get(&key)
-                && now - *at < chrono::TimeDelta::seconds(30)
+                && now - *at < Duration::seconds(30)
             {
                 return Ok(found.clone());
             }
@@ -449,7 +452,7 @@ impl Hub {
             let boot = seen.as_ref().map(|s| s.heartbeat.boot_id.clone());
             let last = seen.map(|s| LastHeartbeat {
                 received_at: s.received_at,
-                seconds_ago: (now - s.received_at).num_seconds().max(0),
+                seconds_ago: (now - s.received_at).whole_seconds().max(0),
                 boot_id: s.heartbeat.boot_id.clone(),
                 seq: s.heartbeat.seq,
                 uptime_s: s.heartbeat.uptime_s,

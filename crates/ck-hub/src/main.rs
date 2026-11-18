@@ -7,7 +7,6 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
 use ck_hub::{
     AcsMailer, CodeforcesClient, ConsoleMailer, CreateUserError, Download, Hub,
     MIN_PASSWORD_LENGTH, Mailer, MemoryStore, NewStick, OrganizationError, PasswordCost,
@@ -15,6 +14,7 @@ use ck_hub::{
     create_organization, create_user, register_sticks, router,
 };
 use clap::{Args, Parser, Subcommand};
+use time::OffsetDateTime;
 
 #[derive(Parser)]
 #[command(
@@ -262,7 +262,7 @@ async fn make_user(args: CreateUserArgs) -> Result<(), String> {
         let result = create_user(
             &store,
             PasswordCost::default(),
-            Utc::now(),
+            OffsetDateTime::now_utc(),
             &email,
             &password,
         );
@@ -528,7 +528,7 @@ async fn run(args: ServeArgs) -> Result<(), String> {
             .zip(args.codeforces.codeforces_secret.clone());
         start_codeforces_watcher(&store, slug, contest, credentials).await?;
     }
-    let mut hub = Hub::new(registry, store, log, Box::new(Utc::now));
+    let mut hub = Hub::new(registry, store, log, Box::new(OffsetDateTime::now_utc));
     if let (Some(account), Some(key)) =
         (&args.download.download_account, &args.download.download_key)
     {

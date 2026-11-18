@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
+use time::OffsetDateTime;
 
 use crate::mail::{Mail, MailError, Mailer};
 
@@ -113,7 +113,11 @@ fn post(agent: &ureq::Agent, settings: &Settings, mail: &Mail) -> Result<(), Str
         "content": { "subject": mail.subject, "plainText": mail.body },
     })
     .to_string();
-    let date = Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+    let date = OffsetDateTime::now_utc()
+        .format(time::macros::format_description!(
+            "[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]:[second] GMT"
+        ))
+        .expect("a date formats");
     let hash = content_hash(body.as_bytes());
     let signature = sign(
         &settings.key,

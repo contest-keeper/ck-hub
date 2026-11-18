@@ -1,7 +1,7 @@
 //! What the Hub knows about a judge and about what sticks said they submitted.
 
-use chrono::{DateTime, Utc};
 use ck_protocol::EventKind;
+use time::OffsetDateTime;
 
 use crate::store::StoredEvent;
 
@@ -13,7 +13,7 @@ pub struct JudgeSubmission {
     /// Every member. A team submission has several; handles compare without regard to case.
     pub handles: Vec<String>,
     pub problem_index: String,
-    pub submitted_at: DateTime<Utc>,
+    pub submitted_at: OffsetDateTime,
 }
 
 /// Identifies a stick event: stick, boot and sequence number.
@@ -27,7 +27,7 @@ pub struct SubmitEvent {
     pub contest_id: u64,
     pub problem_index: String,
     /// By the stick's clock.
-    pub at: DateTime<Utc>,
+    pub at: OffsetDateTime,
     pub submission_id: Option<u64>,
 }
 
@@ -65,7 +65,7 @@ pub fn submit_event(stored: &StoredEvent) -> Option<SubmitEvent> {
         handle: text(["handle", "username"])?.to_owned(),
         contest_id,
         problem_index: text(["problem_index", "problem"])?.to_owned(),
-        at: event.sent_at,
+        at: event.sent_at.as_offset_date_time(),
         submission_id: payload
             .get("submission_id")
             .and_then(serde_json::Value::as_u64),
@@ -81,14 +81,16 @@ mod tests {
 
     fn stored(kind: EventKind, payload: Value) -> StoredEvent {
         StoredEvent {
-            received_at: DateTime::from_timestamp(1_800_000_100, 0).expect("time"),
+            received_at: OffsetDateTime::from_unix_timestamp(1_800_000_100).expect("time"),
             integrity: None,
             event: Event {
                 stick_id: StickId::parse("03c9f556").expect("id"),
                 boot_id: "boot-1".to_owned(),
                 seq: 7,
                 prev_hash: FIRST_PREV_HASH.to_owned(),
-                sent_at: DateTime::from_timestamp(1_800_000_000, 0).expect("time"),
+                sent_at: OffsetDateTime::from_unix_timestamp(1_800_000_000)
+                    .expect("time")
+                    .into(),
                 kind,
                 payload,
             },

@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex};
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use chrono::{DateTime, Duration, Utc};
 use ck_hub::{
     Download, Hub, Image, Judge, MemoryStore, ONLINE_WINDOW_SECONDS, PasswordCost, Registry, Role,
     StaticImages, router,
@@ -15,6 +14,7 @@ use ck_protocol::{
 };
 use http_body_util::BodyExt;
 use tempfile::TempDir;
+use time::{Duration, OffsetDateTime};
 use tower::ServiceExt;
 
 const TOKEN_A: &str = "token-of-stick-a";
@@ -24,7 +24,7 @@ const ORGANIZER_PASSWORD: &str = "correct horse battery";
 struct Setup {
     dir: TempDir,
     app: Router,
-    now: Arc<Mutex<DateTime<Utc>>>,
+    now: Arc<Mutex<OffsetDateTime>>,
 }
 
 fn registry_json(sticks: &[(&str, &str, &str, u32)]) -> String {
@@ -67,8 +67,9 @@ fn build(judge: Option<Arc<dyn Judge>>, with_images: bool) -> Setup {
         .expect("log");
     let now = Arc::new(Mutex::new(
         "2026-11-12T10:00:00Z"
-            .parse::<DateTime<Utc>>()
-            .expect("time"),
+            .parse::<ck_protocol::Timestamp>()
+            .expect("time")
+            .as_offset_date_time(),
     ));
     let clock = {
         let now = Arc::clone(&now);
@@ -630,7 +631,11 @@ impl Judge for FakeJudge {
         handle: &str,
     ) -> Result<Vec<ck_hub::JudgeSubmission>, ck_hub::CodeforcesError> {
         assert_eq!((contest_id, handle), (2285, "ana"));
-        let at = |text: &str| text.parse::<DateTime<Utc>>().expect("time");
+        let at = |text: &str| {
+            text.parse::<ck_protocol::Timestamp>()
+                .expect("time")
+                .as_offset_date_time()
+        };
         let row = |id, problem: &str, when: &str| ck_hub::JudgeSubmission {
             submission_id: id,
             contest_id: 2285,
@@ -1005,7 +1010,12 @@ async fn the_forge_download_sends_the_visitor_to_a_short_lived_link() {
         registry,
         Arc::new(MemoryStore::default()),
         None,
-        Box::new(|| "2026-11-14T12:00:00Z".parse().expect("a time")),
+        Box::new(|| {
+            "2026-11-14T12:00:00Z"
+                .parse::<ck_protocol::Timestamp>()
+                .expect("a time")
+                .as_offset_date_time()
+        }),
     )
     .with_download(download);
     let response = router(Arc::new(hub))

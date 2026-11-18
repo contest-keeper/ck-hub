@@ -3,7 +3,7 @@
 //! First by submission id, then by handle, problem and time. A stick event explains at most one
 //! judge submission, so one submit cannot cover two.
 
-use chrono::TimeDelta;
+use time::Duration;
 
 use crate::judge::{EventKey, JudgeSubmission, SubmitEvent};
 
@@ -20,7 +20,7 @@ pub enum Verdict {
 pub fn match_submissions(
     judge: &[JudgeSubmission],
     events: &[SubmitEvent],
-    window: TimeDelta,
+    window: Duration,
 ) -> Vec<Verdict> {
     let mut verdicts = vec![Verdict::Unmatched; judge.len()];
     let mut claimed = vec![false; events.len()];
@@ -46,7 +46,7 @@ pub fn match_submissions(
     rest.sort_by_key(|i| judge[*i].submitted_at);
     for i in rest {
         let submission = &judge[i];
-        let mut best: Option<(usize, TimeDelta)> = None;
+        let mut best: Option<(usize, Duration)> = None;
         for (e, event) in events.iter().enumerate() {
             if claimed[e]
                 || event.contest_id != submission.contest_id
@@ -73,12 +73,12 @@ pub fn match_submissions(
 
 #[cfg(test)]
 mod tests {
-    use chrono::{DateTime, Utc};
+    use time::OffsetDateTime;
 
     use super::*;
 
-    fn at(seconds: i64) -> DateTime<Utc> {
-        DateTime::from_timestamp(1_800_000_000 + seconds, 0).expect("time")
+    fn at(seconds: i64) -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(1_800_000_000 + seconds).expect("time")
     }
 
     fn judge(id: u64, handle: &str, problem: &str, seconds: i64) -> JudgeSubmission {
@@ -106,7 +106,7 @@ mod tests {
         Verdict::Matched(("stick".to_owned(), "boot".to_owned(), seq))
     }
 
-    const WINDOW: TimeDelta = TimeDelta::seconds(10);
+    const WINDOW: Duration = Duration::seconds(10);
 
     #[test]
     fn matches_by_id_even_far_apart_in_time() {

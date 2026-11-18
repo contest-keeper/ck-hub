@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use chrono::{DateTime, Utc};
+
 use ck_hub::{
     Hub, Mailer, MemoryMailer, MemoryStore, PasswordCost, Registry, Role, Store, router,
     token_after,
@@ -24,8 +24,9 @@ struct Setup {
 fn setup(with_mail: bool) -> Setup {
     let now = Arc::new(Mutex::new(
         "2026-11-15T10:00:00Z"
-            .parse::<DateTime<Utc>>()
-            .expect("time"),
+            .parse::<ck_protocol::Timestamp>()
+            .expect("time")
+            .as_offset_date_time(),
     ));
     let clock = Box::new(move || *now.lock().expect("clock"));
     let store = Arc::new(MemoryStore::default());

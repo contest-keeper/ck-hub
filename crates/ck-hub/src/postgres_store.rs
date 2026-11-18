@@ -2,9 +2,9 @@
 
 use std::sync::Mutex;
 
-use chrono::{DateTime, Utc};
 use ck_protocol::{Event, Heartbeat, StickId, Token};
 use postgres::Client;
+use time::OffsetDateTime;
 use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::judge::{JudgeSubmission, SubmitEvent, submit_event};
@@ -219,7 +219,7 @@ impl Store for PostgresStore {
         &self,
         organization: &str,
         heartbeat: Heartbeat,
-        received_at: DateTime<Utc>,
+        received_at: OffsetDateTime,
     ) -> Result<(), StoreError> {
         let json = serde_json::to_value(&heartbeat).map_err(failed)?;
         let seq = i64::try_from(heartbeat.seq).map_err(failed)?;
@@ -325,7 +325,7 @@ impl Store for PostgresStore {
         &self,
         organization: &str,
         event: Event,
-        received_at: DateTime<Utc>,
+        received_at: OffsetDateTime,
         integrity: Option<String>,
     ) -> Result<(), StoreError> {
         let json = serde_json::to_value(&event).map_err(failed)?;
@@ -374,7 +374,7 @@ impl Store for PostgresStore {
         organization: &str,
         judge: &str,
         submissions: &[JudgeSubmission],
-        received_at: DateTime<Utc>,
+        received_at: OffsetDateTime,
     ) -> Result<usize, StoreError> {
         let mut numbers = Vec::with_capacity(submissions.len());
         for submission in submissions {
@@ -590,7 +590,7 @@ impl Store for PostgresStore {
         &self,
         token_hash: &str,
         user_id: &str,
-        expires_at: DateTime<Utc>,
+        expires_at: OffsetDateTime,
     ) -> Result<(), StoreError> {
         self.run(|client| {
             client.execute(
@@ -601,7 +601,7 @@ impl Store for PostgresStore {
         Ok(())
     }
 
-    fn session(&self, token_hash: &str) -> Result<Option<(String, DateTime<Utc>)>, StoreError> {
+    fn session(&self, token_hash: &str) -> Result<Option<(String, OffsetDateTime)>, StoreError> {
         let row = self.run(|client| {
             client.query_opt(
                 "SELECT user_id, expires_at FROM sessions WHERE token_hash = $1",
@@ -618,12 +618,12 @@ impl Store for PostgresStore {
         Ok(())
     }
 
-    fn delete_expired_sessions(&self, now: DateTime<Utc>) -> Result<(), StoreError> {
+    fn delete_expired_sessions(&self, now: OffsetDateTime) -> Result<(), StoreError> {
         self.run(|client| client.execute("DELETE FROM sessions WHERE expires_at <= $1", &[&now]))?;
         Ok(())
     }
 
-    fn mark_email_verified(&self, user_id: &str, at: DateTime<Utc>) -> Result<(), StoreError> {
+    fn mark_email_verified(&self, user_id: &str, at: OffsetDateTime) -> Result<(), StoreError> {
         self.run(|client| {
             client.execute(
                 "UPDATE users SET email_verified_at = $2 WHERE id = $1 AND email_verified_at IS NULL",
@@ -653,7 +653,7 @@ impl Store for PostgresStore {
         token_hash: &str,
         user_id: &str,
         purpose: TokenPurpose,
-        expires_at: DateTime<Utc>,
+        expires_at: OffsetDateTime,
     ) -> Result<(), StoreError> {
         self.run(|client| {
             let mut transaction = client.transaction()?;
@@ -674,7 +674,7 @@ impl Store for PostgresStore {
         &self,
         token_hash: &str,
         purpose: TokenPurpose,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
     ) -> Result<Option<String>, StoreError> {
         let row = self.run(|client| {
             client.query_opt(
@@ -684,19 +684,19 @@ impl Store for PostgresStore {
             )
         })?;
         Ok(row.and_then(|row| {
-            let ends: DateTime<Utc> = row.get(1);
+            let ends: OffsetDateTime = row.get(1);
             (ends > now).then(|| row.get(0))
         }))
     }
 
-    fn delete_expired_email_tokens(&self, now: DateTime<Utc>) -> Result<(), StoreError> {
+    fn delete_expired_email_tokens(&self, now: OffsetDateTime) -> Result<(), StoreError> {
         self.run(|client| {
             client.execute("DELETE FROM email_tokens WHERE expires_at <= $1", &[&now])
         })?;
         Ok(())
     }
 
-    fn delete_unverified_users_before(&self, before: DateTime<Utc>) -> Result<(), StoreError> {
+    fn delete_unverified_users_before(&self, before: OffsetDateTime) -> Result<(), StoreError> {
         // Sessions and tokens of these accounts go with them (ON DELETE CASCADE).
         self.run(|client| {
             client.execute(
@@ -714,7 +714,7 @@ impl Store for PostgresStore {
         role: Role,
         token_hash: &str,
         invited_by: Option<&str>,
-        expires_at: DateTime<Utc>,
+        expires_at: OffsetDateTime,
     ) -> Result<Invitation, StoreError> {
         let row = self.run(|client| {
             let mut transaction = client.transaction()?;
@@ -755,7 +755,7 @@ impl Store for PostgresStore {
     fn take_invitation(
         &self,
         token_hash: &str,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
     ) -> Result<Option<Invitation>, StoreError> {
         let row = self.run(|client| {
             client.query_opt(
@@ -791,7 +791,7 @@ impl Store for PostgresStore {
         Ok(deleted > 0)
     }
 
-    fn delete_expired_invitations(&self, now: DateTime<Utc>) -> Result<(), StoreError> {
+    fn delete_expired_invitations(&self, now: OffsetDateTime) -> Result<(), StoreError> {
         self.run(|client| {
             client.execute("DELETE FROM invitations WHERE expires_at <= $1", &[&now])
         })?;
@@ -923,7 +923,7 @@ impl Store for PostgresStore {
         &self,
         organization: &str,
         profile: NewProfile,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
     ) -> Result<(), StoreError> {
         let (wallpaper_name, wallpaper_data) = match &profile.wallpaper {
             Some(wallpaper) => (Some(&wallpaper.name), Some(&wallpaper.data)),
