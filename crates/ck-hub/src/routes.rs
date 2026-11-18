@@ -731,7 +731,7 @@ async fn invitations_of(
                         "id": i.id,
                         "email": i.email,
                         "role": i.role.as_str(),
-                        "expires_at": i.expires_at,
+                        "expires_at": rfc3339(i.expires_at),
                     })
                 })
                 .collect::<Vec<_>>(),
@@ -902,6 +902,13 @@ fn session_token(headers: &HeaderMap) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// A time as the page and the admin tool read it: UTC, like 2026-11-12T10:00:00Z.
+fn rfc3339(at: time::OffsetDateTime) -> String {
+    at.to_offset(time::UtcOffset::UTC)
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("a stored time formats")
+}
+
 /// Why a request was not allowed: the status to answer with and a short text.
 type Denied = (StatusCode, &'static str);
 
@@ -1053,7 +1060,7 @@ async fn list_profiles(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Respo
         Ok(profiles) => Json(
             profiles
                 .into_iter()
-                .map(|p| json!({ "id": p.id, "name": p.name, "updated_at": p.updated_at }))
+                .map(|p| json!({ "id": p.id, "name": p.name, "updated_at": rfc3339(p.updated_at) }))
                 .collect::<Vec<_>>(),
         )
         .into_response(),
@@ -1072,7 +1079,7 @@ async fn read_profile(
             "name": p.name,
             "settings": p.settings,
             "wallpaper": p.wallpaper_name.map(|name| json!({ "name": name })),
-            "updated_at": p.updated_at,
+            "updated_at": rfc3339(p.updated_at),
         }))
         .into_response(),
         Ok(None) => no_such_profile(),

@@ -1,11 +1,11 @@
 use std::sync::{Arc, Mutex};
 
-use chrono::{DateTime, Duration, Utc};
 use ck_hub::{
     AcceptError, Hub, INVITATION_LIFETIME_DAYS, InviteError, MAX_MAILS_PER_ADDRESS, Mailer,
     MemberError, MemoryMailer, MemoryStore, PasswordCost, Registry, Role, StaffError, Store,
     token_after,
 };
+use time::{Duration, OffsetDateTime};
 
 const PASSWORD: &str = "correct horse battery";
 const SLUG: &str = "rcpc";
@@ -14,7 +14,7 @@ struct Setup {
     hub: Hub,
     store: Arc<MemoryStore>,
     mailer: Arc<MemoryMailer>,
-    now: Arc<Mutex<DateTime<Utc>>>,
+    now: Arc<Mutex<OffsetDateTime>>,
 }
 
 impl Setup {
@@ -40,8 +40,9 @@ impl Setup {
 fn setup() -> Setup {
     let now = Arc::new(Mutex::new(
         "2026-11-15T10:00:00Z"
-            .parse::<DateTime<Utc>>()
-            .expect("time"),
+            .parse::<ck_protocol::Timestamp>()
+            .expect("time")
+            .as_offset_date_time(),
     ));
     let clock = {
         let now = Arc::clone(&now);

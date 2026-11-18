@@ -6,7 +6,6 @@ use std::fs;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chrono::{DateTime, Utc};
 use ck_hub::{
     Hub, MemoryStore, NewUser, PasswordCost, PostgresStore, Registry, Rejection, Role, Store,
     TokenPurpose,
@@ -16,6 +15,7 @@ use ck_protocol::{
     StickId, Token,
 };
 use tempfile::TempDir;
+use time::OffsetDateTime;
 
 fn database_url() -> Option<String> {
     std::env::var("CK_TEST_DATABASE_URL").ok()
@@ -30,8 +30,8 @@ fn unique() -> String {
     format!("t{nanos}")
 }
 
-fn time(seconds: i64) -> DateTime<Utc> {
-    DateTime::from_timestamp(1_800_000_000 + seconds, 0).expect("time")
+fn time(seconds: i64) -> OffsetDateTime {
+    OffsetDateTime::from_unix_timestamp(1_800_000_000 + seconds).expect("time")
 }
 
 fn heartbeat(stick: &str, boot: &str, seq: u64) -> Heartbeat {
@@ -39,7 +39,7 @@ fn heartbeat(stick: &str, boot: &str, seq: u64) -> Heartbeat {
         stick_id: StickId::parse(stick).expect("id"),
         boot_id: boot.to_owned(),
         seq,
-        sent_at: time(0),
+        sent_at: time(0).into(),
         uptime_s: 10 * seq,
         hostname: "team-a-1".to_owned(),
         image_version: "ck-os-base development".to_owned(),
@@ -59,7 +59,7 @@ fn event(stick: &str, seq: u64, user: &str) -> Event {
         boot_id: "boot-1".to_owned(),
         seq,
         prev_hash: FIRST_PREV_HASH.to_owned(),
-        sent_at: time(0),
+        sent_at: time(0).into(),
         kind: EventKind::Login,
         payload: serde_json::json!({ "username": user, "nested": { "b": 1, "a": [1, 2] } }),
     }
@@ -302,7 +302,7 @@ fn identity_contract(store: &dyn Store) {
 
 fn verification_contract(store: &dyn Store) {
     let id = unique();
-    let made = |email: &str, verified: Option<DateTime<Utc>>| {
+    let made = |email: &str, verified: Option<OffsetDateTime>| {
         store
             .create_user(NewUser {
                 email: email.to_owned(),
@@ -928,7 +928,7 @@ fn a_restarted_hub_on_postgres_remembers_what_it_accepted() {
             Registry::open(dir.path().join("registry.json")).expect("registry"),
             Arc::new(PostgresStore::connect(&url).expect("connect")),
             None,
-            Box::new(Utc::now),
+            Box::new(OffsetDateTime::now_utc),
         )
     };
     let send_heartbeat = |hub: &Hub, seq: u64| {
@@ -990,7 +990,7 @@ async fn a_hub_on_postgres_answers_real_http_requests() {
         Registry::open(dir.path().join("registry.json")).expect("registry"),
         Arc::new(store),
         None,
-        Box::new(Utc::now),
+        Box::new(OffsetDateTime::now_utc),
     )
     .with_password_cost(PasswordCost {
         memory_kib: 8,

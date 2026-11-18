@@ -3,7 +3,7 @@
 use std::thread::sleep;
 use std::time::Duration;
 
-use chrono::Utc;
+use time::OffsetDateTime;
 
 use crate::codeforces::{Client, CodeforcesError};
 use crate::store::{Store, StoreError};
@@ -37,7 +37,12 @@ pub fn poll_once(
     let mut from = 1;
     loop {
         let page = client.status(contest_id, from, page_size)?;
-        let added = store.add_judge_submissions(organization, "codeforces", &page, Utc::now())?;
+        let added = store.add_judge_submissions(
+            organization,
+            "codeforces",
+            &page,
+            OffsetDateTime::now_utc(),
+        )?;
         total += added;
         let short = page.len() < usize::try_from(page_size).unwrap_or(usize::MAX);
         if added == 0 || short {

@@ -6,9 +6,10 @@ use std::fmt::Write;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
+use time::format_description::well_known::Rfc3339;
+use time::{Duration, OffsetDateTime};
 
 /// The storage REST version the link is signed for.
 const SAS_VERSION: &str = "2022-11-02";
@@ -64,9 +65,14 @@ impl Download {
     /// A read-only link to `blob` (a path inside the container) that works for
     /// [`LINK_LIFETIME_MINUTES`] from `now`.
     #[must_use]
-    pub fn link(&self, blob: &str, now: DateTime<Utc>) -> String {
-        let expiry = (now + Duration::minutes(LINK_LIFETIME_MINUTES))
-            .to_rfc3339_opts(SecondsFormat::Secs, true);
+    pub fn link(&self, blob: &str, now: OffsetDateTime) -> String {
+        let ends = (now + Duration::minutes(LINK_LIFETIME_MINUTES))
+            .replace_nanosecond(0)
+            .expect("zero is a valid nanosecond");
+        let expiry = ends
+            .to_offset(time::UtcOffset::UTC)
+            .format(&Rfc3339)
+            .expect("a time in range formats");
         let resource = format!("/blob/{}/{}/{}", self.account, self.container, blob);
         // The fields in the order Azure signs them: permissions, start, expiry, resource,
         // identifier, IP range, protocol, version, resource type, snapshot time, encryption scope
@@ -122,8 +128,8 @@ fn encode(value: &str) -> String {
 mod tests {
     use super::*;
 
-    fn at(text: &str) -> DateTime<Utc> {
-        text.parse().expect("a valid time")
+    fn at(text: &str) -> OffsetDateTime {
+        OffsetDateTime::parse(text, &Rfc3339).expect("a valid time")
     }
 
     #[test]

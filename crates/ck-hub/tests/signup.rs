@@ -1,11 +1,11 @@
 use std::sync::{Arc, Mutex};
 
-use chrono::{DateTime, Duration, Utc};
 use ck_hub::{
     Hub, LoginError, MAIL_WINDOW_SECONDS, MAX_FAILED_LOGINS, MAX_MAILS_PER_ADDRESS, Mail, Mailer,
     MemoryMailer, MemoryStore, PasswordCost, Registry, SignupError, TokenError,
     VERIFY_LIFETIME_HOURS, token_after,
 };
+use time::{Duration, OffsetDateTime};
 
 const PASSWORD: &str = "correct horse battery";
 const NEW: &str = "newcomer@example.org";
@@ -13,7 +13,7 @@ const NEW: &str = "newcomer@example.org";
 struct Setup {
     hub: Arc<Hub>,
     mailer: Arc<MemoryMailer>,
-    now: Arc<Mutex<DateTime<Utc>>>,
+    now: Arc<Mutex<OffsetDateTime>>,
 }
 
 impl Setup {
@@ -27,7 +27,7 @@ impl Setup {
     }
 }
 
-fn hub_with(now: &Arc<Mutex<DateTime<Utc>>>) -> Hub {
+fn hub_with(now: &Arc<Mutex<OffsetDateTime>>) -> Hub {
     let clock = {
         let now = Arc::clone(now);
         Box::new(move || *now.lock().expect("clock"))
@@ -47,8 +47,9 @@ fn hub_with(now: &Arc<Mutex<DateTime<Utc>>>) -> Hub {
 fn setup() -> Setup {
     let now = Arc::new(Mutex::new(
         "2026-11-12T10:00:00Z"
-            .parse::<DateTime<Utc>>()
-            .expect("time"),
+            .parse::<ck_protocol::Timestamp>()
+            .expect("time")
+            .as_offset_date_time(),
     ));
     let mailer = Arc::new(MemoryMailer::default());
     let hub = hub_with(&now).with_mail(
@@ -352,7 +353,7 @@ mod http {
 
     #[tokio::test]
     async fn without_mail_sign_up_and_reset_are_closed() {
-        let now = Arc::new(Mutex::new(Utc::now()));
+        let now = Arc::new(Mutex::new(OffsetDateTime::now_utc()));
         let app = ck_hub::router(Arc::new(hub_with(&now)));
         let (status, _, _) = post(
             &app,

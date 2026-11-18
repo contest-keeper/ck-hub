@@ -5,7 +5,7 @@
 //! and only for a minute. The forge trades the code for a session of its own, so the long-lived
 //! session never passes through the browser's address bar or history.
 
-use chrono::{DateTime, Duration, Utc};
+use time::{Duration, OffsetDateTime};
 
 use crate::accounts::{AccessError, Account, SESSION_LIFETIME_HOURS, token_hash, unavailable};
 use crate::hub::Hub;
@@ -19,7 +19,7 @@ const MIN_STATE_LENGTH: usize = 16;
 const MAX_STATE_LENGTH: usize = 128;
 
 /// An account and the time its code stops working.
-pub(crate) type OpenCodes = std::collections::HashMap<String, (String, DateTime<Utc>)>;
+pub(crate) type OpenCodes = std::collections::HashMap<String, (String, OffsetDateTime)>;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ForgeError {

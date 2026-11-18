@@ -1,6 +1,6 @@
 //! Sign-up, email confirmation and password reset.
 
-use chrono::{DateTime, Duration, Utc};
+use time::{Duration, OffsetDateTime};
 
 use crate::accounts::{MIN_PASSWORD_LENGTH, hash, token_hash, unavailable, valid_email};
 use crate::hub::Hub;
@@ -196,7 +196,7 @@ impl Hub {
     }
 
     /// For someone who tried to sign up with an address that already has an account.
-    fn mail_notice(&self, user: &User, now: DateTime<Utc>) {
+    fn mail_notice(&self, user: &User, now: OffsetDateTime) {
         if !self.accounts.mail_allowed(&user.email, now) {
             return;
         }
@@ -216,7 +216,7 @@ impl Hub {
         &self,
         user: &User,
         letter: &Letter,
-        now: DateTime<Utc>,
+        now: OffsetDateTime,
     ) -> Result<(), SignupError> {
         // Over the limit nothing is sent and nothing says so.
         if !self.accounts.mail_allowed(&user.email, now) {

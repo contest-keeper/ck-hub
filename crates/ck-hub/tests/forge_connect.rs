@@ -3,10 +3,10 @@ use std::sync::{Arc, Mutex};
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use chrono::{DateTime, Duration, Utc};
 use ck_hub::{Hub, MemoryStore, PasswordCost, Registry, Role, router};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use time::{Duration, OffsetDateTime};
 use tower::ServiceExt;
 
 const PASSWORD: &str = "correct horse battery";
@@ -14,11 +14,11 @@ const STATE: &str = "a-random-state-of-enough-length";
 
 struct Setup {
     app: Router,
-    now: Arc<Mutex<DateTime<Utc>>>,
+    now: Arc<Mutex<OffsetDateTime>>,
 }
 
 fn setup() -> Setup {
-    let now = Arc::new(Mutex::new(Utc::now()));
+    let now = Arc::new(Mutex::new(OffsetDateTime::now_utc()));
     let clock = {
         let now = Arc::clone(&now);
         Box::new(move || *now.lock().expect("clock"))

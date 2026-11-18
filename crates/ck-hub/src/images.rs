@@ -6,8 +6,8 @@ use std::io::Read;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 use crate::download::Download;
 
@@ -108,7 +108,7 @@ impl ImageSource for StorageImages {
             return Ok(images.clone());
         }
         // The link carries a signature, so it is never logged or put in an error.
-        let link = self.download.link(MANIFEST_BLOB, Utc::now());
+        let link = self.download.link(MANIFEST_BLOB, OffsetDateTime::now_utc());
         let response = self
             .agent
             .get(&link)

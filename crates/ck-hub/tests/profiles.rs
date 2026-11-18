@@ -25,7 +25,7 @@ async fn setup() -> Setup {
         Registry::empty(),
         Arc::new(MemoryStore::default()),
         None,
-        Box::new(chrono::Utc::now),
+        Box::new(time::OffsetDateTime::now_utc),
     )
     .with_password_cost(PasswordCost {
         memory_kib: 8,

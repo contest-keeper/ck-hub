@@ -6,10 +6,10 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, TimeDelta, Utc};
 use ck_protocol::EventKind;
 use serde::Serialize;
 use serde_json::Value;
+use time::{Duration, OffsetDateTime};
 
 use crate::codeforces::CodeforcesError;
 use crate::judge::{EventKey, JudgeSubmission, submit_event};
@@ -17,7 +17,7 @@ use crate::matcher::{Verdict, match_submissions};
 use crate::store::StoredEvent;
 
 /// How far apart the stick's report and the judge's clock may be for the same submit.
-const WINDOW: TimeDelta = TimeDelta::seconds(60);
+const WINDOW: Duration = Duration::seconds(60);
 /// The judge allows about one call every two seconds, so only the latest contests and people are
 /// asked about.
 const MAX_CONTESTS: usize = 2;
@@ -40,7 +40,8 @@ pub struct SubmissionsView {
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct StickSubmission {
-    pub received_at: DateTime<Utc>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub received_at: OffsetDateTime,
     pub handle: Option<String>,
     pub contest_id: Option<u64>,
     pub problem: Option<String>,
@@ -61,7 +62,8 @@ pub struct JudgeRow {
     pub contest_id: u64,
     pub problem: String,
     pub handles: Vec<String>,
-    pub submitted_at: DateTime<Utc>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub submitted_at: OffsetDateTime,
     pub from_stick: bool,
     pub suspect: bool,
 }
@@ -115,8 +117,8 @@ fn stick_submission(item: &StoredEvent, judge_id: Option<u64>) -> StickSubmissio
 
 /// Who logged in on the stick, with when they first did, and the contests it was used in, the most
 /// recent last.
-fn who_and_where(stored: &[StoredEvent]) -> (Vec<(String, DateTime<Utc>)>, Vec<u64>) {
-    let mut handles: Vec<(String, DateTime<Utc>)> = Vec::new();
+fn who_and_where(stored: &[StoredEvent]) -> (Vec<(String, OffsetDateTime)>, Vec<u64>) {
+    let mut handles: Vec<(String, OffsetDateTime)> = Vec::new();
     let mut contests: Vec<u64> = Vec::new();
     let mut seen = |contest: u64| {
         contests.retain(|known| *known != contest);
@@ -195,7 +197,7 @@ pub fn view(stored: &[StoredEvent], ask: Option<&Ask>) -> SubmissionsView {
                     match ask(*contest, handle) {
                         Ok(found) => {
                             // Only what was submitted after the person logged in on this stick.
-                            let from = *since - TimeDelta::seconds(120);
+                            let from = *since - Duration::seconds(120);
                             judged.extend(found.into_iter().filter(|s| {
                                 s.submitted_at >= from
                                     && s.handles.iter().any(|h| h.eq_ignore_ascii_case(handle))
@@ -274,8 +276,8 @@ mod tests {
 
     use super::*;
 
-    fn at(seconds: i64) -> DateTime<Utc> {
-        DateTime::from_timestamp(1_800_000_000 + seconds, 0).expect("time")
+    fn at(seconds: i64) -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(1_800_000_000 + seconds).expect("time")
     }
 
     fn stored(seq: u64, seconds: i64, kind: EventKind, payload: Value) -> StoredEvent {
@@ -287,7 +289,7 @@ mod tests {
                 boot_id: "boot-1".to_owned(),
                 seq,
                 prev_hash: FIRST_PREV_HASH.to_owned(),
-                sent_at: at(seconds),
+                sent_at: at(seconds).into(),
                 kind,
                 payload,
             },

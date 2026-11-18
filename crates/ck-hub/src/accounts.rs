@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use argon2::{Algorithm, Argon2, Params, Version};
-use chrono::{DateTime, Duration, Utc};
+use time::{Duration, OffsetDateTime};
 
 use crate::hub::Hub;
 use crate::store::{Membership, NewUser, Organization, Role, Store, StoreError, User};
@@ -107,7 +107,7 @@ pub struct Access {
 
 struct Failures {
     count: u32,
-    since: DateTime<Utc>,
+    since: OffsetDateTime,
 }
 
 /// What the Hub keeps for accounts besides the database.
@@ -131,14 +131,14 @@ impl Accounts {
         }
     }
 
-    fn blocked(&self, key: &str, now: DateTime<Utc>, max: u32, window: i64) -> bool {
+    fn blocked(&self, key: &str, now: OffsetDateTime, max: u32, window: i64) -> bool {
         let failures = self.failures.lock().expect("failures lock");
         failures
             .get(key)
             .is_some_and(|f| f.count >= max && now < f.since + Duration::seconds(window))
     }
 
-    fn fail(&self, key: &str, now: DateTime<Utc>, window: i64) {
+    fn fail(&self, key: &str, now: OffsetDateTime, window: i64) {
         let mut failures = self.failures.lock().expect("failures lock");
         // Failures older than the longest lockout no longer count, so they are dropped here and
         // the map cannot grow for ever.
@@ -162,7 +162,7 @@ impl Accounts {
     }
 
     /// Whether one more mail may go to `email`. Counts the mail when it may.
-    pub(crate) fn mail_allowed(&self, email: &str, now: DateTime<Utc>) -> bool {
+    pub(crate) fn mail_allowed(&self, email: &str, now: OffsetDateTime) -> bool {
         let key = format!("mail:{}", email.to_lowercase());
         if self.blocked(&key, now, MAX_MAILS_PER_ADDRESS, MAIL_WINDOW_SECONDS)
             || self.blocked("mail:*", now, MAX_MAILS_ALL, MAIL_ALL_WINDOW_SECONDS)
@@ -399,7 +399,7 @@ pub(crate) fn valid_slug(slug: &str) -> bool {
 pub fn create_user(
     store: &dyn Store,
     cost: PasswordCost,
-    now: DateTime<Utc>,
+    now: OffsetDateTime,
     email: &str,
     password: &str,
 ) -> Result<User, CreateUserError> {
@@ -492,7 +492,7 @@ mod tests {
     use crate::registry::Registry;
     use crate::store::MemoryStore;
 
-    fn hub(now: Arc<Mutex<DateTime<Utc>>>) -> Hub {
+    fn hub(now: Arc<Mutex<OffsetDateTime>>) -> Hub {
         let clock = Box::new(move || *now.lock().expect("clock"));
         Hub::new(
             Registry::empty(),
@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn wrong_logins_cannot_fill_the_memory_of_the_hub() {
-        let now = Arc::new(Mutex::new(Utc::now()));
+        let now = Arc::new(Mutex::new(OffsetDateTime::now_utc()));
         let hub = hub(Arc::clone(&now));
 
         // A name no account can have is refused like any other, but not remembered by name.

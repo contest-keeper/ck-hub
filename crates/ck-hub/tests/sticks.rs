@@ -4,11 +4,11 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use chrono::Utc;
 use ck_hub::{Hub, MemoryStore, PasswordCost, Registry, Role, router};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use time::OffsetDateTime;
 use tower::ServiceExt;
 
 const PASSWORD: &str = "correct horse battery";
@@ -31,7 +31,7 @@ fn setup_with_registry(registry_json: &str) -> Setup {
         registry,
         Arc::new(MemoryStore::default()),
         None,
-        Box::new(Utc::now),
+        Box::new(OffsetDateTime::now_utc),
     )
     .with_password_cost(PasswordCost {
         memory_kib: 8,
@@ -335,7 +335,7 @@ fn two_organizations() -> Router {
         Registry::empty(),
         Arc::new(MemoryStore::default()),
         None,
-        Box::new(Utc::now),
+        Box::new(OffsetDateTime::now_utc),
     )
     .with_password_cost(PasswordCost {
         memory_kib: 8,

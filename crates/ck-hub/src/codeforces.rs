@@ -3,9 +3,9 @@
 use std::fmt::Write;
 use std::time::Duration;
 
-use chrono::DateTime;
 use serde::Deserialize;
 use sha2::{Digest, Sha512};
+use time::OffsetDateTime;
 
 use crate::judge::JudgeSubmission;
 
@@ -68,7 +68,7 @@ pub fn parse_status(body: &str) -> Result<Vec<JudgeSubmission>, CodeforcesError>
     let mut submissions = Vec::with_capacity(answer.result.len());
     for row in answer.result {
         let submitted_at =
-            DateTime::from_timestamp(row.creation_time_seconds, 0).ok_or_else(|| {
+            OffsetDateTime::from_unix_timestamp(row.creation_time_seconds).map_err(|_| {
                 CodeforcesError::Malformed("a submission time is out of range".to_owned())
             })?;
         submissions.push(JudgeSubmission {
@@ -184,14 +184,14 @@ impl Client {
     ) -> Result<Vec<JudgeSubmission>, CodeforcesError> {
         let query = match &self.credentials {
             Some((key, secret)) => {
-                let now = chrono::Utc::now();
-                let rand = format!("{:06}", now.timestamp_subsec_nanos() % 1_000_000);
+                let now = OffsetDateTime::now_utc();
+                let rand = format!("{:06}", now.nanosecond() % 1_000_000);
                 signed_query(
                     "contest.status",
                     params,
                     key,
                     secret,
-                    now.timestamp(),
+                    now.unix_timestamp(),
                     &rand,
                 )
             }
@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(submissions[0].submission_id, 20);
         assert_eq!(submissions[0].handles, vec!["tourist", "petr"]);
         assert_eq!(submissions[0].problem_index, "B");
-        assert_eq!(submissions[1].submitted_at.timestamp(), 1_800_000_000);
+        assert_eq!(submissions[1].submitted_at.unix_timestamp(), 1_800_000_000);
     }
 
     #[test]

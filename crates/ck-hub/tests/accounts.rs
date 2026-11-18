@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex};
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use chrono::{DateTime, Duration, Utc};
 use ck_hub::{
     AccessError, CreateUserError, Hub, LoginError, MAX_FAILED_LOGINS, MemoryStore,
     NAME_LOCKOUT_SECONDS, OrganizationError, PasswordCost, Registry, Role, SESSION_LIFETIME_HOURS,
@@ -12,6 +11,7 @@ use ck_hub::{
 };
 use http_body_util::BodyExt;
 use tempfile::TempDir;
+use time::{Duration, OffsetDateTime};
 use tower::ServiceExt;
 
 const PASSWORD: &str = "correct horse battery";
@@ -20,7 +20,7 @@ struct Setup {
     _dir: TempDir,
     hub: Arc<Hub>,
     app: Router,
-    now: Arc<Mutex<DateTime<Utc>>>,
+    now: Arc<Mutex<OffsetDateTime>>,
 }
 
 fn setup() -> Setup {
@@ -28,8 +28,9 @@ fn setup() -> Setup {
     fs::write(dir.path().join("registry.json"), r#"{"sticks":[]}"#).expect("registry");
     let now = Arc::new(Mutex::new(
         "2026-11-12T10:00:00Z"
-            .parse::<DateTime<Utc>>()
-            .expect("time"),
+            .parse::<ck_protocol::Timestamp>()
+            .expect("time")
+            .as_offset_date_time(),
     ));
     let clock = {
         let now = Arc::clone(&now);
@@ -361,7 +362,7 @@ fn neither_the_password_nor_the_session_token_is_what_the_store_holds() {
         Registry::open(dir.path().join("registry.json")).expect("open"),
         Arc::clone(&store) as Arc<dyn Store>,
         None,
-        Box::new(Utc::now),
+        Box::new(OffsetDateTime::now_utc),
     )
     .with_password_cost(PasswordCost {
         memory_kib: 8,
