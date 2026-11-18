@@ -137,6 +137,9 @@ try { if (localStorage.getItem("ck-theme") === "classic") document.documentEleme
   .facts dd { margin: 0; font-weight: 500; overflow-wrap: anywhere; }
   .net { margin-top: 18px; }
   .net h3 { margin: 0 0 8px; font-size: 14px; }
+  .cmd-bar { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 10px; }
+  .cmd-confirm { margin: 0 0 10px; }
+  .cmd textarea { display: block; width: 100%; max-width: 520px; margin-bottom: 8px; padding: 8px 10px; font: inherit; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); }
   .net .scroll { max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); margin-bottom: 12px; }
   .net table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   .net th, .net td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
@@ -548,6 +551,149 @@ function networkPanel(stick) {
   return box;
 }
 
+// Commands to a stick: Message, Lock and Shutdown for admins and owners, and what became of each
+// command sent. The text typed and the step the person is at are kept here, because the list is
+// drawn again at every refresh.
+const commandLists = new Map();
+const commandDrafts = new Map();
+const ACTION_NAMES = { message: "Message", lock_screen: "Lock", shutdown: "Shutdown" };
+
+function commandPath(stick) {
+  return "/api/v1/orgs/" + encodeURIComponent(org) + "/sticks/" + encodeURIComponent(stick.stick_id) + "/commands";
+}
+
+function draftOf(stick) {
+  let draft = commandDrafts.get(stick.stick_id);
+  if (!draft) {
+    draft = { action: null, text: "", busy: false, note: "", bad: false };
+    commandDrafts.set(stick.stick_id, draft);
+  }
+  return draft;
+}
+
+async function fetchCommands(stick) {
+  const before = commandLists.get(stick.stick_id);
+  commandLists.set(stick.stick_id, { at: Date.now(), data: before ? before.data : null, failed: false });
+  let data = before ? before.data : null;
+  let failed = false;
+  try {
+    const response = await fetch(commandPath(stick), { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    data = await response.json();
+  } catch (error) {
+    failed = true;
+  }
+  commandLists.set(stick.stick_id, { at: Date.now(), data, failed });
+  render();
+}
+
+async function sendCommand(stick, draft) {
+  draft.busy = true;
+  render();
+  const action = draft.action === "message" ? { type: "message", text: draft.text.trim() } : { type: draft.action };
+  const result = await call("POST", commandPath(stick), { action });
+  draft.busy = false;
+  if (result.ok) {
+    draft.action = null;
+    draft.text = "";
+    draft.note = "Sent. The stick takes it with its next heartbeat.";
+    draft.bad = false;
+    commandLists.delete(stick.stick_id);
+  } else {
+    draft.note = (result.data && result.data.error) || "The command was not sent (HTTP " + result.status + ").";
+    draft.bad = true;
+  }
+  render();
+}
+
+function commandText(command) {
+  const action = command.action || {};
+  if (action.type === "message") return "Message: " + action.text;
+  return ACTION_NAMES[action.type] || String(action.type);
+}
+
+function commandState(command) {
+  return command.refusal ? command.state + " (" + command.refusal.replaceAll("_", " ") + ")" : command.state;
+}
+
+function commandPanel(stick) {
+  const box = el("div", "net cmd");
+  box.appendChild(el("h3", "", "Commands"));
+  const name = stick.team + " " + (stick.machine_number ?? "");
+  const draft = draftOf(stick);
+  if (myRole === "owner" || myRole === "admin") {
+    const bar = el("div", "cmd-bar");
+    for (const action of Object.keys(ACTION_NAMES)) {
+      const button = actionButton(ACTION_NAMES[action], "to " + name, () => {
+        draft.action = action;
+        draft.note = "";
+        render();
+      });
+      button.disabled = draft.busy;
+      button.setAttribute("aria-pressed", String(draft.action === action));
+      bar.appendChild(button);
+    }
+    box.appendChild(bar);
+    if (draft.action) {
+      const ask = el("div", "cmd-confirm");
+      if (draft.action === "message") {
+        const input = el("textarea");
+        input.maxLength = 500;
+        input.rows = 2;
+        input.value = draft.text;
+        input.dataset.cmd = stick.stick_id;
+        input.setAttribute("aria-label", "Message for " + name);
+        input.addEventListener("input", () => {
+          draft.text = input.value;
+          yes.disabled = draft.busy || !draft.text.trim();
+        });
+        ask.appendChild(input);
+      }
+      const what = { message: "Show this message on ", lock_screen: "Lock the screen of ", shutdown: "Shut down " }[draft.action];
+      ask.appendChild(el("p", draft.action === "shutdown" ? "bad" : "", what + name + "?" +
+        (draft.action === "shutdown" ? " The contestant loses any unsaved work." : "")));
+      var yes = el("button", "btn pri", "Confirm");
+      yes.type = "button";
+      yes.disabled = draft.busy || (draft.action === "message" && !draft.text.trim());
+      yes.addEventListener("click", () => sendCommand(stick, draft));
+      const no = el("button", "btn", "Cancel");
+      no.type = "button";
+      no.addEventListener("click", () => {
+        draft.action = null;
+        render();
+      });
+      const buttons = el("div", "cmd-bar");
+      buttons.appendChild(yes);
+      buttons.appendChild(no);
+      ask.appendChild(buttons);
+      box.appendChild(ask);
+    }
+    if (draft.note) box.appendChild(el("p", draft.bad ? "bad" : "hint", draft.note));
+  } else {
+    box.appendChild(el("p", "muted", "Only an admin or an owner can send commands."));
+  }
+
+  const cached = commandLists.get(stick.stick_id);
+  const open = cached && cached.data && cached.data.some((c) => c.state === "queued" || c.state === "delivered");
+  if (!cached || Date.now() - cached.at > (open ? 4000 : 30000)) fetchCommands(stick);
+  if (!cached || !cached.data) {
+    box.appendChild(el("p", "muted", cached && cached.failed ? "The commands could not be loaded." : "Loading…"));
+    return box;
+  }
+  if (!cached.data.length) {
+    box.appendChild(el("p", "muted", "No command has been sent to this stick."));
+    return box;
+  }
+  box.appendChild(table(["Time", "Command", "By", "State"],
+    cached.data.map((c) => [[
+      new Date(c.created_at).toLocaleTimeString(),
+      commandText(c),
+      c.sent_by,
+      commandState(c),
+    ], c.state === "refused" || c.state === "failed" ? "refused" : ""])));
+  return box;
+}
+
 function facts(stick) {
   const last = stick.last;
   const list = el("dl", "facts");
@@ -578,6 +724,8 @@ function facts(stick) {
 
 function render() {
   const body = document.getElementById("rows");
+  // The list is drawn again at every refresh: keep the cursor in a message being typed.
+  const typing = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.cmd : null;
   body.replaceChildren();
   const counts = { all: sticks.length, online: 0, offline: 0, attn: 0, new: 0 };
   for (const stick of sticks) {
@@ -628,10 +776,18 @@ function render() {
       const td = el("td");
       td.colSpan = 7;
       td.appendChild(facts(stick));
+      td.appendChild(commandPanel(stick));
       td.appendChild(proofPanel(stick));
       td.appendChild(networkPanel(stick));
       detail.appendChild(td);
       body.appendChild(detail);
+    }
+  }
+  if (typing) {
+    const again = Array.from(document.querySelectorAll("textarea[data-cmd]")).find((n) => n.dataset.cmd === typing);
+    if (again) {
+      again.focus();
+      again.setSelectionRange(again.value.length, again.value.length);
     }
   }
   document.getElementById("empty").style.display = shown.length ? "none" : "block";
