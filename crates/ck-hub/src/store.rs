@@ -9,10 +9,11 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use ck_protocol::{Event, Heartbeat, StickId, Token};
+use ck_protocol::{CommandAck, Event, Heartbeat, StickId, Token};
 use serde::Deserialize;
 use time::OffsetDateTime;
 
+use crate::commands::{CommandState, StoredCommand, settled};
 use crate::judge::{JudgeSubmission, SubmitEvent, submit_event};
 
 #[derive(Debug, thiserror::Error)]
@@ -402,6 +403,52 @@ pub trait Store: Send + Sync {
 
     /// Returns whether there was such a profile.
     fn delete_profile(&self, organization: &str, id: &str) -> Result<bool, StoreError>;
+
+    /// Keeps a signed command of the organization for its stick to pick up.
+    fn queue_command(&self, organization: &str, command: StoredCommand) -> Result<(), StoreError>;
+
+    /// The stick's commands that are not finished and not expired at `now`, oldest first.
+    fn pending_commands(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<StoredCommand>, StoreError>;
+
+    /// Marks queued commands as delivered. A command in another state is left as it is.
+    fn mark_commands_delivered(
+        &self,
+        organization: &str,
+        ids: &[String],
+        now: OffsetDateTime,
+    ) -> Result<(), StoreError>;
+
+    /// Settles the command an ack names, when it is the stick's and still open. Returns whether it
+    /// changed anything: the first ack decides, a later one changes nothing.
+    fn record_command_ack(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        ack: &CommandAck,
+        now: OffsetDateTime,
+    ) -> Result<bool, StoreError>;
+
+    /// The newest commands of a stick, newest first.
+    fn commands_of(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        limit: u32,
+    ) -> Result<Vec<StoredCommand>, StoreError>;
+
+    fn command(&self, organization: &str, id: &str) -> Result<Option<StoredCommand>, StoreError>;
+
+    /// Removes the organization's commands created before `before`.
+    fn delete_commands_before(
+        &self,
+        organization: &str,
+        before: OffsetDateTime,
+    ) -> Result<(), StoreError>;
 }
 
 /// A picture kept with a profile.
@@ -460,6 +507,7 @@ pub struct MemoryStore {
     next_id: AtomicU64,
     sticks: Mutex<HashMap<StickId, (String, Stick)>>,
     profiles: Mutex<HashMap<(String, String), KeptProfile>>,
+    commands: Mutex<Vec<(String, StoredCommand)>>,
 }
 
 impl MemoryStore {
@@ -1085,5 +1133,121 @@ impl Store for MemoryStore {
             .expect("profiles lock")
             .remove(&(organization.to_owned(), id.to_owned()))
             .is_some())
+    }
+
+    fn queue_command(&self, organization: &str, command: StoredCommand) -> Result<(), StoreError> {
+        self.commands
+            .lock()
+            .expect("commands lock")
+            .push((organization.to_owned(), command));
+        Ok(())
+    }
+
+    fn pending_commands(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<StoredCommand>, StoreError> {
+        let mut open: Vec<StoredCommand> = self
+            .commands
+            .lock()
+            .expect("commands lock")
+            .iter()
+            .filter(|(owner, c)| {
+                owner == organization
+                    && &c.signed.command.stick_id == stick
+                    && matches!(c.state, CommandState::Queued | CommandState::Delivered)
+                    && c.expires_at() > now
+            })
+            .map(|(_, c)| c.clone())
+            .collect();
+        open.sort_by_key(|c| c.created_at);
+        Ok(open)
+    }
+
+    fn mark_commands_delivered(
+        &self,
+        organization: &str,
+        ids: &[String],
+        now: OffsetDateTime,
+    ) -> Result<(), StoreError> {
+        for (owner, command) in self.commands.lock().expect("commands lock").iter_mut() {
+            if owner == organization
+                && command.state == CommandState::Queued
+                && ids.iter().any(|id| id == command.id())
+            {
+                command.state = CommandState::Delivered;
+                command.delivered_at = Some(now);
+            }
+        }
+        Ok(())
+    }
+
+    fn record_command_ack(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        ack: &CommandAck,
+        now: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        let mut commands = self.commands.lock().expect("commands lock");
+        let Some((_, command)) = commands.iter_mut().find(|(owner, c)| {
+            owner == organization && c.id() == ack.command_id && &c.signed.command.stick_id == stick
+        }) else {
+            return Ok(false);
+        };
+        if !matches!(
+            command.state,
+            CommandState::Queued | CommandState::Delivered
+        ) {
+            return Ok(false);
+        }
+        let (state, refusal) = settled(ack);
+        command.state = state;
+        command.refusal = refusal;
+        command.finished_at = Some(now);
+        Ok(true)
+    }
+
+    fn commands_of(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        limit: u32,
+    ) -> Result<Vec<StoredCommand>, StoreError> {
+        let mut all: Vec<StoredCommand> = self
+            .commands
+            .lock()
+            .expect("commands lock")
+            .iter()
+            .filter(|(owner, c)| owner == organization && &c.signed.command.stick_id == stick)
+            .map(|(_, c)| c.clone())
+            .collect();
+        all.sort_by_key(|c| std::cmp::Reverse(c.created_at));
+        all.truncate(limit as usize);
+        Ok(all)
+    }
+
+    fn command(&self, organization: &str, id: &str) -> Result<Option<StoredCommand>, StoreError> {
+        Ok(self
+            .commands
+            .lock()
+            .expect("commands lock")
+            .iter()
+            .find(|(owner, c)| owner == organization && c.id() == id)
+            .map(|(_, c)| c.clone()))
+    }
+
+    fn delete_commands_before(
+        &self,
+        organization: &str,
+        before: OffsetDateTime,
+    ) -> Result<(), StoreError> {
+        self.commands
+            .lock()
+            .expect("commands lock")
+            .retain(|(owner, c)| owner != organization || c.created_at >= before);
+        Ok(())
     }
 }

@@ -737,8 +737,235 @@ fn profiles_contract(store: &dyn Store) {
     assert!(store.profile(&two.id, "p-1").expect("read").is_some());
 }
 
+#[allow(clippy::too_many_lines)]
+fn commands_contract(store: &dyn Store) {
+    use ck_hub::{CommandState, StoredCommand};
+    use ck_protocol::{AckResult, Action, Command, CommandAck, Refusal};
+
+    let id = unique();
+    let make = |tag: &str| {
+        store
+            .create_organization(&format!("{id}-{tag}"), tag)
+            .expect("write")
+            .expect("a new organization")
+    };
+    let (one, two) = (make("one"), make("two"));
+    let stick = StickId::parse("stick-a").expect("id");
+    let other = StickId::parse("stick-b").expect("id");
+    let token = Token::new("secret");
+    let command = |name: &str, at: i64, ends: i64| StoredCommand {
+        signed: ck_crypto::sign_command(
+            &token,
+            Command {
+                id: format!("{id}{name}"),
+                stick_id: stick.clone(),
+                issued_at: time(at).into(),
+                expires_at: time(ends).into(),
+                action: Action::Message {
+                    text: "hello".to_owned(),
+                },
+            },
+        ),
+        sent_by_user_id: "u-1".to_owned(),
+        sent_by_email: "owner@example.org".to_owned(),
+        state: CommandState::Queued,
+        refusal: None,
+        created_at: time(at),
+        delivered_at: None,
+        finished_at: None,
+    };
+    let ack = |name: &str, result: AckResult, refusal: Option<Refusal>| CommandAck {
+        command_id: format!("{id}{name}"),
+        result,
+        refusal,
+    };
+
+    store
+        .queue_command(&one.id, command("a", 0, 300))
+        .expect("write");
+    store
+        .queue_command(&one.id, command("b", 10, 20))
+        .expect("write");
+
+    // Open and not expired: both at 15 s, only the first at 25 s.
+    let open = store
+        .pending_commands(&one.id, &stick, time(15))
+        .expect("read");
+    assert_eq!(open.len(), 2);
+    assert_eq!(open[0].id(), format!("{id}a"));
+    assert_eq!(open[0].state, CommandState::Queued);
+    assert_eq!(
+        open[0].signed,
+        command("a", 0, 300).signed,
+        "kept exactly as signed"
+    );
+    assert_eq!(
+        store
+            .pending_commands(&one.id, &stick, time(25))
+            .expect("read")
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .pending_commands(&one.id, &other, time(15))
+            .expect("read"),
+        Vec::new()
+    );
+    assert_eq!(
+        store
+            .pending_commands(&two.id, &stick, time(15))
+            .expect("read"),
+        Vec::new()
+    );
+
+    store
+        .mark_commands_delivered(&one.id, &[format!("{id}a")], time(16))
+        .expect("write");
+    let delivered = store
+        .command(&one.id, &format!("{id}a"))
+        .expect("read")
+        .expect("kept");
+    assert_eq!(delivered.state, CommandState::Delivered);
+    assert_eq!(delivered.delivered_at, Some(time(16)));
+    // Marking again, or from another organization, changes nothing.
+    store
+        .mark_commands_delivered(&one.id, &[format!("{id}a")], time(99))
+        .expect("write");
+    store
+        .mark_commands_delivered(&two.id, &[format!("{id}b")], time(99))
+        .expect("write");
+    assert_eq!(
+        store
+            .command(&one.id, &format!("{id}a"))
+            .expect("read")
+            .expect("kept")
+            .delivered_at,
+        Some(time(16))
+    );
+    assert_eq!(
+        store
+            .command(&one.id, &format!("{id}b"))
+            .expect("read")
+            .expect("kept")
+            .state,
+        CommandState::Queued
+    );
+
+    // Only the stick the command is for, in its own organization, can settle it, and once.
+    assert!(
+        !store
+            .record_command_ack(&one.id, &other, &ack("a", AckResult::Ok, None), time(20))
+            .expect("write")
+    );
+    assert!(
+        !store
+            .record_command_ack(&two.id, &stick, &ack("a", AckResult::Ok, None), time(20))
+            .expect("write")
+    );
+    assert!(
+        !store
+            .record_command_ack(&one.id, &stick, &ack("nope", AckResult::Ok, None), time(20))
+            .expect("write")
+    );
+    assert!(
+        store
+            .record_command_ack(&one.id, &stick, &ack("a", AckResult::Ok, None), time(21))
+            .expect("write")
+    );
+    assert!(
+        !store
+            .record_command_ack(
+                &one.id,
+                &stick,
+                &ack("a", AckResult::Failed, None),
+                time(22)
+            )
+            .expect("write")
+    );
+    let done = store
+        .command(&one.id, &format!("{id}a"))
+        .expect("read")
+        .expect("kept");
+    assert_eq!(done.state, CommandState::Done);
+    assert_eq!(done.finished_at, Some(time(21)));
+
+    assert!(
+        store
+            .record_command_ack(
+                &one.id,
+                &stick,
+                &ack("b", AckResult::Refused, Some(Refusal::Replayed)),
+                time(23)
+            )
+            .expect("write")
+    );
+    let refused = store
+        .command(&one.id, &format!("{id}b"))
+        .expect("read")
+        .expect("kept");
+    assert_eq!(
+        (refused.state, refused.refusal),
+        (CommandState::Refused, Some(Refusal::Replayed))
+    );
+    assert_eq!(
+        store
+            .pending_commands(&one.id, &stick, time(15))
+            .expect("read"),
+        Vec::new()
+    );
+
+    // The history is newest first, limited, and private to the organization.
+    let history = store.commands_of(&one.id, &stick, 10).expect("read");
+    assert_eq!(
+        history.iter().map(StoredCommand::id).collect::<Vec<_>>(),
+        [format!("{id}b"), format!("{id}a")]
+    );
+    assert_eq!(
+        store.commands_of(&one.id, &stick, 1).expect("read").len(),
+        1
+    );
+    assert_eq!(
+        store.commands_of(&two.id, &stick, 10).expect("read"),
+        Vec::new()
+    );
+    assert!(
+        store
+            .command(&two.id, &format!("{id}a"))
+            .expect("read")
+            .is_none()
+    );
+
+    // Old history is removed, and only the organization's own.
+    store
+        .queue_command(&two.id, command("c", 0, 300))
+        .expect("write");
+    store
+        .delete_commands_before(&one.id, time(5))
+        .expect("write");
+    assert!(
+        store
+            .command(&one.id, &format!("{id}a"))
+            .expect("read")
+            .is_none()
+    );
+    assert!(
+        store
+            .command(&one.id, &format!("{id}b"))
+            .expect("read")
+            .is_some()
+    );
+    assert!(
+        store
+            .command(&two.id, &format!("{id}c"))
+            .expect("read")
+            .is_some()
+    );
+}
+
 #[test]
 fn the_memory_store_keeps_its_contract() {
+    commands_contract(&MemoryStore::default());
     profiles_contract(&MemoryStore::default());
     the_store_contract(&MemoryStore::default());
     judge_contract(&MemoryStore::default());
@@ -752,6 +979,7 @@ fn the_postgres_store_keeps_its_contract() {
         return;
     };
     let store = PostgresStore::connect(&url).expect("connect");
+    commands_contract(&store);
     profiles_contract(&store);
     the_store_contract(&store);
     judge_contract(&store);

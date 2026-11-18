@@ -5,7 +5,9 @@ use std::fs::File;
 use std::io::Write;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use ck_protocol::{Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, StickId};
+use ck_protocol::{
+    Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, SignedCommand, StickId, Token,
+};
 use serde::Serialize;
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
@@ -29,7 +31,7 @@ pub const ONLINE_WINDOW_SECONDS: i64 = 60;
 const MAX_MESSAGES_PER_MINUTE: u32 = 120;
 
 /// Why a heartbeat was not accepted. The caller turns this into an HTTP answer.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rejection {
     /// The message itself is wrong: a missing header, unreadable JSON, or a heartbeat for another
     /// stick than the one that signed it.
@@ -117,6 +119,8 @@ pub struct Hub {
     write: Mutex<()>,
     /// Per stick: when the current minute started and how many messages it has seen.
     rates: Mutex<HashMap<StickId, (OffsetDateTime, u32)>>,
+    /// Per user: when the current minute of commands started and how many they sent in it.
+    pub(crate) command_rates: Mutex<HashMap<String, (OffsetDateTime, u32)>>,
     log: Option<Mutex<File>>,
     default_org: OnceLock<String>,
     pub(crate) download: Option<Download>,
@@ -160,6 +164,7 @@ impl Hub {
             accounts: Accounts::new(PasswordCost::default()),
             write: Mutex::new(()),
             rates: Mutex::new(HashMap::new()),
+            command_rates: Mutex::new(HashMap::new()),
             log: log.map(Mutex::new),
             default_org: OnceLock::new(),
             download: None,
@@ -209,9 +214,32 @@ impl Hub {
         signature: Option<&str>,
         body: &[u8],
     ) -> Result<u64, Rejection> {
+        self.accept_heartbeat_reply(stick_header, signature, body)
+            .map(|(seq, _)| seq)
+    }
+
+    /// Like [`accept_heartbeat`](Self::accept_heartbeat), and also the commands waiting for the stick,
+    /// signed, for the reply. They are marked as delivered, and sent again with every heartbeat until
+    /// the stick acknowledges them or they expire.
+    pub fn accept_heartbeat_reply(
+        &self,
+        stick_header: Option<&str>,
+        signature: Option<&str>,
+        body: &[u8],
+    ) -> Result<(u64, Vec<SignedCommand>), Rejection> {
         let result = self.check(stick_header, signature, body);
-        self.record(&result, "accepted", "sequence not newer", stick_header);
-        result
+        let logged = result
+            .as_ref()
+            .map(|(seq, _, _)| *seq)
+            .map_err(Clone::clone);
+        self.record(&logged, "accepted", "sequence not newer", stick_header);
+        let (seq, organization, id) = result?;
+        // A command the Hub cannot read is not worth refusing the heartbeat: the stick would then
+        // look offline. It is picked up with the next one.
+        let commands = self
+            .commands_for_reply(&organization, &id)
+            .unwrap_or_default();
+        Ok((seq, commands))
     }
 
     fn check(
@@ -219,7 +247,7 @@ impl Hub {
         stick_header: Option<&str>,
         signature: Option<&str>,
         body: &[u8],
-    ) -> Result<u64, Rejection> {
+    ) -> Result<(u64, String, StickId), Rejection> {
         let (organization, id) = self.authenticate(stick_header, signature, body)?;
         self.rate_limit(&id)?;
         let heartbeat: Heartbeat = serde_json::from_slice(body)
@@ -246,7 +274,7 @@ impl Hub {
         let seq = heartbeat.seq;
         self.store
             .record_heartbeat(&organization, heartbeat, (self.clock)())?;
-        Ok(seq)
+        Ok((seq, organization, id))
     }
 
     /// Counts a message of `id` in the current minute and refuses it past the limit.
@@ -277,24 +305,31 @@ impl Hub {
         };
         let id = StickId::parse(stick_header)
             .map_err(|_| Rejection::BadRequest("the stick header is not a stick id"))?;
-        let from_file = {
-            let mut registry = self.registry.lock().expect("registry lock");
-            registry.refresh();
-            registry.find(&id).map(|entry| entry.token.clone())
-        };
-        // A stick is known from the registry file or from the database, whichever has it. The
-        // registry file's sticks belong to the default organization.
-        let (organization, token) = match from_file {
-            Some(token) => (self.default_org_id()?, token),
-            None => match self.store.stick(&id)? {
-                Some((organization, stick)) => (organization, stick.token),
-                None => return Err(Rejection::Unauthorized),
-            },
+        let Some((organization, token)) = self.stick_secret(&id)? else {
+            return Err(Rejection::Unauthorized);
         };
         if !ck_crypto::verify(&token, body, signature) {
             return Err(Rejection::Unauthorized);
         }
         Ok((organization, id))
+    }
+
+    /// The organization a stick belongs to and its secret, if the Hub knows the stick. A stick is
+    /// known from the registry file or from the database, whichever has it. The registry file's
+    /// sticks belong to the default organization.
+    pub(crate) fn stick_secret(&self, id: &StickId) -> Result<Option<(String, Token)>, StoreError> {
+        let from_file = {
+            let mut registry = self.registry.lock().expect("registry lock");
+            registry.refresh();
+            registry.find(id).map(|entry| entry.token.clone())
+        };
+        Ok(match from_file {
+            Some(token) => Some((self.default_org_id()?, token)),
+            None => self
+                .store
+                .stick(id)?
+                .map(|(organization, stick)| (organization, stick.token)),
+        })
     }
 
     /// Takes in an event. A problem with the chain never makes the Hub refuse it: the stick would
@@ -360,12 +395,16 @@ impl Hub {
             Some(_) => None,
         };
         let seq = event.seq;
+        let ack_event = (event.kind == EventKind::CommandAck).then(|| event.clone());
         self.store.append_event(
             &organization,
             event,
             (self.clock)(),
             integrity.map(str::to_owned),
         )?;
+        if let Some(event) = ack_event {
+            self.apply_ack(&organization, &id, &event);
+        }
         Ok(seq)
     }
 
