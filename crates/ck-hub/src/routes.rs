@@ -19,6 +19,7 @@ use serde_json::json;
 use crate::accounts::{
     Access, AccessError, Account, LoginError, MIN_PASSWORD_LENGTH, SESSION_LIFETIME_HOURS,
 };
+use crate::commands::CommandError;
 use crate::forge::ForgeError;
 use crate::hub::{Hub, Rejection};
 use crate::invite::{AcceptError, InviteError, MemberError, StaffError};
@@ -84,6 +85,18 @@ pub fn router(hub: Arc<Hub>) -> Router {
         )
         .route("/api/v1/sticks/{id}/network", get(network))
         .route("/api/v1/sticks/{id}/submissions", get(submissions))
+        .route(
+            "/api/v1/sticks/{id}/commands",
+            get(commands).post(send_command),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/sticks/{id}/commands",
+            get(commands_of).post(send_command_in),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/commands/{command_id}",
+            get(one_command),
+        )
         .route(
             "/api/v1/orgs/{slug}/sticks/{id}/submissions",
             get(submissions_of),
@@ -237,10 +250,16 @@ async fn heartbeat(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes)
     // The store may talk to a database, which blocks. That belongs on a thread of its own, never
     // on the threads that serve requests.
     let result = tokio::task::spawn_blocking(move || {
-        hub.accept_heartbeat(stick.as_deref(), signature.as_deref(), &body)
+        hub.accept_heartbeat_reply(stick.as_deref(), signature.as_deref(), &body)
     })
     .await;
-    accepted(result)
+    // The commands waiting for the stick ride in the answer; with none the answer is as before.
+    match result {
+        Ok(Ok((seq, commands))) if !commands.is_empty() => {
+            Json(json!({ "accepted": seq, "commands": commands })).into_response()
+        }
+        other => accepted(other.map(|answer| answer.map(|(seq, _)| seq))),
+    }
 }
 
 async fn event(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) -> Response {
@@ -368,6 +387,138 @@ async fn show_submissions(hub: Arc<Hub>, access: Access, id: String) -> Response
         Ok(Ok(Some(view))) => Json(view).into_response(),
         Ok(Ok(None)) => (StatusCode::NOT_FOUND, "there is no such stick").into_response(),
         Ok(Err(error)) => {
+            tracing::error!("{error}");
+            unavailable()
+        }
+        Err(_) => unavailable(),
+    }
+}
+
+/// The commands sent to one stick of the only organization the caller belongs to.
+async fn commands(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    match require(&hub, &headers, Role::Viewer).await {
+        Ok(access) => show_commands(hub, access, id).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+async fn commands_of(
+    State(hub): State<Arc<Hub>>,
+    Path((slug, id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    match require_in(&hub, &headers, slug, Role::Viewer).await {
+        Ok(access) => show_commands(hub, access, id).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+async fn show_commands(hub: Arc<Hub>, access: Access, id: String) -> Response {
+    match tokio::task::spawn_blocking(move || hub.commands_of_stick(&access.organization.id, &id))
+        .await
+    {
+        Ok(Ok(Some(list))) => Json(list).into_response(),
+        Ok(Ok(None)) => (StatusCode::NOT_FOUND, "there is no such stick").into_response(),
+        Ok(Err(error)) => {
+            tracing::error!("{error}");
+            unavailable()
+        }
+        Err(_) => unavailable(),
+    }
+}
+
+async fn one_command(
+    State(hub): State<Arc<Hub>>,
+    Path((slug, command_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let access = match require_in(&hub, &headers, slug, Role::Viewer).await {
+        Ok(access) => access,
+        Err(reason) => return denied(reason),
+    };
+    match tokio::task::spawn_blocking(move || hub.command_of(&access.organization.id, &command_id))
+        .await
+    {
+        Ok(Ok(Some(command))) => Json(command).into_response(),
+        Ok(Ok(None)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no such command" })),
+        )
+            .into_response(),
+        Ok(Err(error)) => {
+            tracing::error!("{error}");
+            unavailable()
+        }
+        Err(_) => unavailable(),
+    }
+}
+
+/// Only an admin or an owner may send a command to a stick.
+async fn send_command(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    match require(&hub, &headers, Role::Admin).await {
+        Ok(access) => queue_command(hub, access, id, body).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+async fn send_command_in(
+    State(hub): State<Arc<Hub>>,
+    Path((slug, id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    match require_in(&hub, &headers, slug, Role::Admin).await {
+        Ok(access) => queue_command(hub, access, id, body).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+#[derive(Deserialize)]
+struct NewCommandBody {
+    action: ck_protocol::Action,
+    #[serde(default)]
+    lifetime_seconds: Option<i64>,
+}
+
+async fn queue_command(hub: Arc<Hub>, access: Access, id: String, body: Bytes) -> Response {
+    let bad =
+        |why: String| (StatusCode::BAD_REQUEST, Json(json!({ "error": why }))).into_response();
+    let body: NewCommandBody = match serde_json::from_slice(&body) {
+        Ok(body) => body,
+        Err(error) => return bad(format!("the command cannot be read: {error}")),
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        hub.send_command(
+            &access.organization.id,
+            &access.account,
+            &id,
+            body.action,
+            body.lifetime_seconds,
+        )
+    })
+    .await;
+    let refuse =
+        |status: StatusCode, why: String| (status, Json(json!({ "error": why }))).into_response();
+    match result {
+        Ok(Ok(command)) => (StatusCode::CREATED, Json(command)).into_response(),
+        Ok(Err(CommandError::BadRequest(why))) => bad(why),
+        Ok(Err(error @ CommandError::NotFound)) => refuse(StatusCode::NOT_FOUND, error.to_string()),
+        Ok(Err(error @ CommandError::TooManyOpen)) => {
+            refuse(StatusCode::CONFLICT, error.to_string())
+        }
+        Ok(Err(error @ CommandError::RateLimited)) => {
+            refuse(StatusCode::TOO_MANY_REQUESTS, error.to_string())
+        }
+        Ok(Err(CommandError::Store(error))) => {
             tracing::error!("{error}");
             unavailable()
         }

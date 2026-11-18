@@ -2,11 +2,12 @@
 
 use std::sync::Mutex;
 
-use ck_protocol::{Event, Heartbeat, StickId, Token};
+use ck_protocol::{CommandAck, Event, Heartbeat, StickId, Token};
 use postgres::Client;
 use time::OffsetDateTime;
 use tokio_postgres_rustls::MakeRustlsConnect;
 
+use crate::commands::{CommandState, StoredCommand, action_type, settled};
 use crate::judge::{JudgeSubmission, SubmitEvent, submit_event};
 
 use crate::store::{
@@ -16,7 +17,7 @@ use crate::store::{
 
 /// The schema, in the order it is applied. A migration that was applied is never run again and
 /// never edited: a change is a new file.
-const MIGRATIONS: [(&str, &str); 11] = [
+const MIGRATIONS: [(&str, &str); 12] = [
     (
         "0001_heartbeats_and_events",
         include_str!("../migrations/0001_heartbeats_and_events.sql"),
@@ -57,6 +58,10 @@ const MIGRATIONS: [(&str, &str); 11] = [
     (
         "0011_profiles",
         include_str!("../migrations/0011_profiles.sql"),
+    ),
+    (
+        "0012_commands",
+        include_str!("../migrations/0012_commands.sql"),
     ),
 ];
 
@@ -1015,6 +1020,181 @@ impl Store for PostgresStore {
         })
         .map(|deleted| deleted > 0)
     }
+
+    fn queue_command(&self, organization: &str, command: StoredCommand) -> Result<(), StoreError> {
+        let signed = serde_json::to_value(&command.signed).map_err(failed)?;
+        let refusal = refusal_text(command.refusal);
+        let stick = command.signed.command.stick_id.to_string();
+        let expires_at = command.expires_at();
+        self.in_org(organization, |transaction| {
+            transaction.execute(
+                "INSERT INTO commands
+                     (organization_id, id, stick_id, sent_by_user_id, sent_by_email, action_type,
+                      signed_command, state, refusal, created_at, delivered_at, finished_at,
+                      expires_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                &[
+                    &organization,
+                    &command.signed.command.id,
+                    &stick,
+                    &command.sent_by_user_id,
+                    &command.sent_by_email,
+                    &action_type(&command.signed.command.action),
+                    &signed,
+                    &command.state.as_str(),
+                    &refusal,
+                    &command.created_at,
+                    &command.delivered_at,
+                    &command.finished_at,
+                    &expires_at,
+                ],
+            )
+        })
+        .map(|_| ())
+    }
+
+    fn pending_commands(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<StoredCommand>, StoreError> {
+        let stick = stick.to_string();
+        let rows = self.in_org(organization, |transaction| {
+            transaction.query(
+                &format!(
+                    "SELECT {COMMAND_COLUMNS} FROM commands
+                     WHERE organization_id = $1 AND stick_id = $2
+                       AND state IN ('queued', 'delivered') AND expires_at > $3
+                     ORDER BY created_at, id"
+                ),
+                &[&organization, &stick, &now],
+            )
+        })?;
+        rows.iter().map(command_from).collect()
+    }
+
+    fn mark_commands_delivered(
+        &self,
+        organization: &str,
+        ids: &[String],
+        now: OffsetDateTime,
+    ) -> Result<(), StoreError> {
+        self.in_org(organization, |transaction| {
+            transaction.execute(
+                "UPDATE commands SET state = 'delivered', delivered_at = $3
+                 WHERE organization_id = $1 AND id = ANY($2) AND state = 'queued'",
+                &[&organization, &ids, &now],
+            )
+        })
+        .map(|_| ())
+    }
+
+    fn record_command_ack(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        ack: &CommandAck,
+        now: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        let (state, refusal) = settled(ack);
+        let refusal = refusal_text(refusal);
+        let stick = stick.to_string();
+        self.in_org(organization, |transaction| {
+            transaction.execute(
+                "UPDATE commands SET state = $4, refusal = $5, finished_at = $6
+                 WHERE organization_id = $1 AND id = $2 AND stick_id = $3
+                   AND state IN ('queued', 'delivered')",
+                &[
+                    &organization,
+                    &ack.command_id,
+                    &stick,
+                    &state.as_str(),
+                    &refusal,
+                    &now,
+                ],
+            )
+        })
+        .map(|changed| changed > 0)
+    }
+
+    fn commands_of(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        limit: u32,
+    ) -> Result<Vec<StoredCommand>, StoreError> {
+        let stick = stick.to_string();
+        let limit = i64::from(limit);
+        let rows = self.in_org(organization, |transaction| {
+            transaction.query(
+                &format!(
+                    "SELECT {COMMAND_COLUMNS} FROM commands
+                     WHERE organization_id = $1 AND stick_id = $2
+                     ORDER BY created_at DESC, id DESC LIMIT $3"
+                ),
+                &[&organization, &stick, &limit],
+            )
+        })?;
+        rows.iter().map(command_from).collect()
+    }
+
+    fn command(&self, organization: &str, id: &str) -> Result<Option<StoredCommand>, StoreError> {
+        let rows = self.in_org(organization, |transaction| {
+            transaction.query(
+                &format!(
+                    "SELECT {COMMAND_COLUMNS} FROM commands WHERE organization_id = $1 AND id = $2"
+                ),
+                &[&organization, &id],
+            )
+        })?;
+        rows.first().map(command_from).transpose()
+    }
+
+    fn delete_commands_before(
+        &self,
+        organization: &str,
+        before: OffsetDateTime,
+    ) -> Result<(), StoreError> {
+        self.in_org(organization, |transaction| {
+            transaction.execute(
+                "DELETE FROM commands WHERE organization_id = $1 AND created_at < $2",
+                &[&organization, &before],
+            )
+        })
+        .map(|_| ())
+    }
+}
+
+const COMMAND_COLUMNS: &str = "sent_by_user_id, sent_by_email, signed_command, state, refusal,
+     created_at, delivered_at, finished_at";
+
+fn refusal_text(refusal: Option<ck_protocol::Refusal>) -> Option<String> {
+    refusal.and_then(|r| {
+        serde_json::to_value(r)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+    })
+}
+
+fn command_from(row: &postgres::Row) -> Result<StoredCommand, StoreError> {
+    let signed: serde_json::Value = row.get(2);
+    let state: String = row.get(3);
+    let refusal: Option<String> = row.get(4);
+    Ok(StoredCommand {
+        signed: serde_json::from_value(signed).map_err(failed)?,
+        sent_by_user_id: row.get(0),
+        sent_by_email: row.get(1),
+        state: CommandState::parse(&state)
+            .ok_or_else(|| StoreError(format!("unknown command state {state}")))?,
+        refusal: refusal
+            .map(|text| serde_json::from_value(serde_json::Value::String(text)))
+            .transpose()
+            .map_err(failed)?,
+        created_at: row.get(5),
+        delivered_at: row.get(6),
+        finished_at: row.get(7),
+    })
 }
 
 fn stick_from(row: &postgres::Row) -> Result<Stick, StoreError> {
