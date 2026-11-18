@@ -106,6 +106,7 @@ fn build(judge: Option<Arc<dyn Judge>>, with_images: bool) -> Setup {
                 sha256: "a".repeat(64),
                 family: "ubuntu".to_owned(),
                 profile: "generic".to_owned(),
+                source_offer: Some("images/keeper-os-0.3.0.SOURCE-OFFER.txt".to_owned()),
             }])))
     } else {
         hub
@@ -1038,7 +1039,11 @@ async fn the_forge_download_sends_the_visitor_to_a_short_lived_link() {
 #[tokio::test]
 async fn the_image_list_and_download_need_a_login() {
     let setup = build(None, true);
-    for path in ["/api/v1/images", "/download/image/keeper-os-0.3.0"] {
+    for path in [
+        "/api/v1/images",
+        "/download/image/keeper-os-0.3.0",
+        "/download/image/keeper-os-0.3.0/source-offer",
+    ] {
         let (status, _) = call(
             &setup.app,
             Request::get(path).body(Body::empty()).expect("request"),
@@ -1086,6 +1091,10 @@ async fn an_organizer_sees_the_manifest_without_the_storage_path() {
     assert_eq!(image["sha256"], "a".repeat(64));
     assert_eq!(image["family"], "ubuntu");
     assert_eq!(image["profile"], "generic");
+    assert_eq!(
+        image["source_offer_url"],
+        "/download/image/keeper-os-0.3.0/source-offer"
+    );
     assert!(!text.contains("blob") && !text.contains("images/keeper"));
 }
 
@@ -1127,6 +1136,40 @@ async fn an_organizer_is_sent_to_a_five_minute_link_and_a_wrong_id_is_refused() 
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{id}");
     }
+}
+
+#[tokio::test]
+async fn the_source_offer_of_an_image_is_served_through_a_short_link_to_organizers() {
+    let setup = build(None, true);
+    let cookie = organizer_cookie(&setup.app).await;
+    let response = setup
+        .app
+        .clone()
+        .oneshot(
+            Request::get("/download/image/keeper-os-0.3.0/source-offer")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::FOUND);
+    let location = response.headers()["location"].to_str().expect("text");
+    assert!(
+        location.starts_with(
+            "https://ckdlabc12.blob.core.windows.net/downloads/images/keeper-os-0.3.0.SOURCE-OFFER.txt?sv="
+        ),
+        "{location}"
+    );
+    let (status, _) = call(
+        &setup.app,
+        Request::get("/download/image/nope/source-offer")
+            .header("cookie", &cookie)
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

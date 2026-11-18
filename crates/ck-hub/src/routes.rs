@@ -63,12 +63,18 @@ const CHUNK_SHA_HEADER: &str = "x-ck-chunk-sha256";
 /// A heartbeat is a few hundred bytes. Anything much bigger is not one.
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
+/// Every address the Hub answers, in one list.
+#[allow(clippy::too_many_lines)]
 pub fn router(hub: Arc<Hub>) -> Router {
     Router::new()
         .route("/", get(page))
         .route("/forge/connect", get(page))
         .route("/download/forge", get(download_forge))
         .route("/download/image/{id}", get(download_image))
+        .route(
+            "/download/image/{id}/source-offer",
+            get(download_source_offer),
+        )
         .route("/api/v1/images", get(list_images))
         .route(HEARTBEAT_PATH, post(heartbeat))
         .route(EVENTS_PATH, post(event))
@@ -222,6 +228,8 @@ async fn list_images(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Respons
                     "sha256": image.sha256,
                     "family": image.family,
                     "profile": image.profile,
+                    "source_offer_url": image.source_offer.as_ref()
+                        .map(|_| format!("/download/image/{}/source-offer", image.id)),
                 }))
                 .collect::<Vec<_>>()
         }))
@@ -234,6 +242,47 @@ fn image_list_unavailable() -> Denied {
         StatusCode::SERVICE_UNAVAILABLE,
         "the image list is not available right now",
     )
+}
+
+/// The written source offer of one image, for whoever may download that image.
+async fn download_source_offer(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let (Some(source), Some(_)) = (hub.images.clone(), hub.download.as_ref()) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let wanted = id;
+    let result = with_session(Arc::clone(&hub), &headers, move |hub, token| {
+        hub.account(token)
+            .map_err(|reason| denied_for(&reason))
+            .and_then(|_| source.list().map_err(|_| image_list_unavailable()))
+            .map(|images| {
+                images
+                    .into_iter()
+                    .find(|image| image.id == wanted)
+                    .and_then(|image| image.source_offer)
+            })
+    })
+    .await;
+    match result {
+        Err(reason) | Ok(Err(reason)) => denied(reason),
+        Ok(Ok(None)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no source offer for this image" })),
+        )
+            .into_response(),
+        Ok(Ok(Some(blob))) => {
+            let download = hub.download.as_ref().expect("checked above");
+            let link = download.link(&blob, (hub.clock)());
+            (
+                StatusCode::FOUND,
+                [(LOCATION, link), (CACHE_CONTROL, "no-store".to_owned())],
+            )
+                .into_response()
+        }
+    }
 }
 
 /// One image. Only a logged-in organizer is sent on, to a read-only link that works for a few
