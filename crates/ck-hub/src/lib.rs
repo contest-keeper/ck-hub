@@ -7,6 +7,7 @@ mod codeforces;
 mod download;
 mod forge;
 mod hub;
+mod images;
 mod invite;
 mod judge;
 mod mail;
@@ -35,6 +36,7 @@ pub use codeforces::{
 pub use download::{Download, DownloadError, LINK_LIFETIME_MINUTES};
 pub use forge::{FORGE_CODE_LIFETIME_SECONDS, ForgeError};
 pub use hub::{Hub, LastHeartbeat, ONLINE_WINDOW_SECONDS, Rejection, StickView};
+pub use images::{Image, ImageSource, ImagesError, MANIFEST_BLOB, StaticImages, StorageImages};
 pub use invite::{AcceptError, INVITATION_LIFETIME_DAYS, InviteError, MemberError, StaffError};
 pub use judge::{EventKey, JudgeSubmission, SubmitEvent, submit_event};
 pub use mail::{ConsoleMailer, Mail, MailError, Mailer, MemoryMailer, token_after};

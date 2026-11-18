@@ -11,7 +11,7 @@ use chrono::Utc;
 use ck_hub::{
     AcsMailer, CodeforcesClient, ConsoleMailer, CreateUserError, Download, Hub,
     MIN_PASSWORD_LENGTH, Mailer, MemoryStore, NewStick, OrganizationError, PasswordCost,
-    PostgresStore, RegisterError, Registry, Role, Store, StoreError, add_member,
+    PostgresStore, RegisterError, Registry, Role, StorageImages, Store, StoreError, add_member,
     create_organization, create_user, register_sticks, router,
 };
 use clap::{Args, Parser, Subcommand};
@@ -534,7 +534,9 @@ async fn run(args: ServeArgs) -> Result<(), String> {
     {
         let download = Download::new(account, &args.download.download_container, key)
             .map_err(|e| e.to_string())?;
-        hub = hub.with_download(download);
+        hub = hub
+            .with_images(Arc::new(StorageImages::new(download.clone())))
+            .with_download(download);
     }
     if let Some((mailer, url)) = mailer {
         hub = hub.with_mail(mailer, &url);

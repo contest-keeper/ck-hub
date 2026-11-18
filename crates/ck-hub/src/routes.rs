@@ -58,6 +58,8 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route("/", get(page))
         .route("/forge/connect", get(page))
         .route("/download/forge", get(download_forge))
+        .route("/download/image/{id}", get(download_image))
+        .route("/api/v1/images", get(list_images))
         .route(HEARTBEAT_PATH, post(heartbeat))
         .route(EVENTS_PATH, post(event))
         .route(
@@ -151,6 +153,83 @@ async fn download_forge(State(hub): State<Arc<Hub>>) -> Response {
         [(LOCATION, link), (CACHE_CONTROL, "no-store".to_owned())],
     )
         .into_response()
+}
+
+/// The images an organizer may download. Each one has a Hub address to ask for a short-lived link;
+/// the place in storage is never shown.
+async fn list_images(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Response {
+    let Some(source) = hub.images.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let result = with_session(hub, &headers, move |hub, token| {
+        hub.account(token)
+            .map_err(|reason| denied_for(&reason))
+            .and_then(|_| source.list().map_err(|_| image_list_unavailable()))
+    })
+    .await;
+    match result {
+        Err(reason) | Ok(Err(reason)) => denied(reason),
+        Ok(Ok(images)) => Json(json!({
+            "images": images
+                .iter()
+                .map(|image| json!({
+                    "id": image.id,
+                    "name": image.name,
+                    "version": image.version,
+                    "url": format!("/download/image/{}", image.id),
+                    "size": image.size,
+                    "sha256": image.sha256,
+                    "family": image.family,
+                    "profile": image.profile,
+                }))
+                .collect::<Vec<_>>()
+        }))
+        .into_response(),
+    }
+}
+
+fn image_list_unavailable() -> Denied {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the image list is not available right now",
+    )
+}
+
+/// One image. Only a logged-in organizer is sent on, to a read-only link that works for a few
+/// minutes. A browser can follow it because the session cookie travels with the request.
+async fn download_image(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let (Some(source), Some(_)) = (hub.images.clone(), hub.download.as_ref()) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let wanted = id;
+    let result = with_session(Arc::clone(&hub), &headers, move |hub, token| {
+        hub.account(token)
+            .map_err(|reason| denied_for(&reason))
+            .and_then(|_| source.list().map_err(|_| image_list_unavailable()))
+            .map(|images| images.into_iter().find(|image| image.id == wanted))
+    })
+    .await;
+    match result {
+        Err(reason) | Ok(Err(reason)) => denied(reason),
+        Ok(Ok(None)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "no such image" })),
+        )
+            .into_response(),
+        Ok(Ok(Some(image))) => {
+            let download = hub.download.as_ref().expect("checked above");
+            let link = download.link(&image.blob, (hub.clock)());
+            (
+                StatusCode::FOUND,
+                [(LOCATION, link), (CACHE_CONTROL, "no-store".to_owned())],
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn heartbeat(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) -> Response {
