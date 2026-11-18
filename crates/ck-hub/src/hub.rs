@@ -121,6 +121,10 @@ pub struct Hub {
     rates: Mutex<HashMap<StickId, (OffsetDateTime, u32)>>,
     /// Per user: when the current minute of commands started and how many they sent in it.
     pub(crate) command_rates: Mutex<HashMap<String, (OffsetDateTime, u32)>>,
+    /// Per user: enrolment codes made in the current minute.
+    pub(crate) enrol_mints: Mutex<HashMap<String, (OffsetDateTime, u32)>>,
+    /// Failed enrolments of everyone together: when the current minute started and how many.
+    pub(crate) enrol_failures: Mutex<(OffsetDateTime, u32)>,
     log: Option<Mutex<File>>,
     default_org: OnceLock<String>,
     pub(crate) download: Option<Download>,
@@ -165,6 +169,8 @@ impl Hub {
             write: Mutex::new(()),
             rates: Mutex::new(HashMap::new()),
             command_rates: Mutex::new(HashMap::new()),
+            enrol_mints: Mutex::new(HashMap::new()),
+            enrol_failures: Mutex::new((OffsetDateTime::UNIX_EPOCH, 0)),
             log: log.map(Mutex::new),
             default_org: OnceLock::new(),
             download: None,

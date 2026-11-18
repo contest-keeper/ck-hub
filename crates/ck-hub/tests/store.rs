@@ -963,8 +963,126 @@ fn commands_contract(store: &dyn Store) {
     );
 }
 
+fn enrolment_contract(store: &dyn Store) {
+    use ck_hub::{NewEnrolmentCode, Redemption};
+
+    let id = unique();
+    let make = |tag: &str| {
+        store
+            .create_organization(&format!("{id}-{tag}"), tag)
+            .expect("write")
+            .expect("a new organization")
+    };
+    let (one, two) = (make("one"), make("two"));
+    let code = |name: &str, ends: i64| NewEnrolmentCode {
+        code_hash: format!("{id}{name}"),
+        created_by_user_id: "u-1".to_owned(),
+        team: "Team Q".to_owned(),
+        site: "Lab".to_owned(),
+        contest: "Final".to_owned(),
+        machine_number: Some(4),
+        created_at: time(0),
+        expires_at: time(ends),
+    };
+    // Sticks are never deleted from a database, so ids from an earlier run must not come again.
+    let base = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos()
+        % 0xF00_0000;
+    let stick = |n: u32| StickId::parse(&format!("{:08x}", base + u128::from(n))).expect("id");
+    let token = Token::new("a-fresh-secret-for-the-stick");
+    let redeem = |hash: &str, at: i64, who: &StickId| {
+        store
+            .redeem_enrolment_code(&format!("{id}{hash}"), time(at), who, &token)
+            .expect("write")
+    };
+
+    store
+        .add_enrolment_code(&one.id, code("a", 600))
+        .expect("write");
+    store
+        .add_enrolment_code(&two.id, code("b", 600))
+        .expect("write");
+    store
+        .add_enrolment_code(&one.id, code("old", 60))
+        .expect("write");
+
+    // Unknown, expired: nothing happens.
+    assert_eq!(redeem("nope", 10, &stick(1)), Redemption::Invalid);
+    assert_eq!(redeem("old", 61, &stick(1)), Redemption::Invalid);
+    assert!(store.stick(&stick(1)).expect("read").is_none());
+
+    // A good code registers the stick in the code's own organization, with what it was made for.
+    let Redemption::Done(done) = redeem("a", 10, &stick(2)) else {
+        panic!("a valid code is redeemed");
+    };
+    assert_eq!(done.organization, one.id);
+    assert_eq!(
+        (
+            done.team.as_str(),
+            done.site.as_str(),
+            done.contest.as_str(),
+            done.machine_number
+        ),
+        ("Team Q", "Lab", "Final", Some(4))
+    );
+    let (org, kept) = store.stick(&stick(2)).expect("read").expect("registered");
+    assert_eq!(
+        (org, kept.team, kept.machine_number),
+        (one.id.clone(), "Team Q".to_owned(), Some(4))
+    );
+    assert_eq!(kept.token.expose(), "a-fresh-secret-for-the-stick");
+
+    // Once only.
+    assert_eq!(redeem("a", 11, &stick(3)), Redemption::Invalid);
+    assert!(store.stick(&stick(3)).expect("read").is_none());
+
+    // A taken stick id does not use the code up.
+    assert_eq!(redeem("b", 10, &stick(2)), Redemption::IdTaken);
+    let Redemption::Done(other) = redeem("b", 12, &stick(4)) else {
+        panic!("the code was not used up");
+    };
+    assert_eq!(other.organization, two.id);
+
+    // Two sticks racing for one code: exactly one gets it.
+    store
+        .add_enrolment_code(&one.id, code("race", 600))
+        .expect("write");
+    let results: Vec<Redemption> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (10..14)
+            .map(|n| scope.spawn(move || redeem("race", 20, &stick(n))))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("thread"))
+            .collect()
+    });
+    assert_eq!(
+        results
+            .iter()
+            .filter(|r| matches!(r, Redemption::Done(_)))
+            .count(),
+        1,
+        "{results:?}"
+    );
+
+    // Old codes are removed, and only the organization's own.
+    store
+        .add_enrolment_code(&one.id, code("c", 600))
+        .expect("write");
+    store
+        .add_enrolment_code(&two.id, code("d", 600))
+        .expect("write");
+    store
+        .delete_enrolment_codes_before(&one.id, time(1))
+        .expect("write");
+    assert_eq!(redeem("c", 30, &stick(20)), Redemption::Invalid);
+    assert!(matches!(redeem("d", 30, &stick(21)), Redemption::Done(_)));
+}
 #[test]
 fn the_memory_store_keeps_its_contract() {
+    enrolment_contract(&MemoryStore::default());
     commands_contract(&MemoryStore::default());
     profiles_contract(&MemoryStore::default());
     the_store_contract(&MemoryStore::default());
@@ -979,6 +1097,7 @@ fn the_postgres_store_keeps_its_contract() {
         return;
     };
     let store = PostgresStore::connect(&url).expect("connect");
+    enrolment_contract(&store);
     commands_contract(&store);
     profiles_contract(&store);
     the_store_contract(&store);

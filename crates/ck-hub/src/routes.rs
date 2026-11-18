@@ -20,6 +20,7 @@ use crate::accounts::{
     Access, AccessError, Account, LoginError, MIN_PASSWORD_LENGTH, SESSION_LIFETIME_HOURS,
 };
 use crate::commands::CommandError;
+use crate::enrol::{EnrolError, EnrolmentSpec};
 use crate::forge::ForgeError;
 use crate::hub::{Hub, Rejection};
 use crate::invite::{AcceptError, InviteError, MemberError, StaffError};
@@ -97,6 +98,9 @@ pub fn router(hub: Arc<Hub>) -> Router {
             "/api/v1/orgs/{slug}/commands/{command_id}",
             get(one_command),
         )
+        .route("/api/v1/enrolment-codes", post(mint_code))
+        .route("/api/v1/orgs/{slug}/enrolment-codes", post(mint_code_in))
+        .route("/api/v1/enrol", post(enrol))
         .route(
             "/api/v1/orgs/{slug}/sticks/{id}/submissions",
             get(submissions_of),
@@ -522,6 +526,124 @@ async fn queue_command(hub: Arc<Hub>, access: Access, id: String, body: Bytes) -
             tracing::error!("{error}");
             unavailable()
         }
+        Err(_) => unavailable(),
+    }
+}
+
+/// What an admin decides about the stick a code is made for.
+#[derive(Deserialize, Default)]
+struct MintBody {
+    #[serde(default)]
+    team: String,
+    #[serde(default)]
+    site: String,
+    #[serde(default)]
+    contest: String,
+    #[serde(default)]
+    machine_number: Option<u32>,
+    #[serde(default)]
+    lifetime_minutes: Option<i64>,
+}
+
+/// Only an admin or an owner may make an enrolment code.
+async fn mint_code(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) -> Response {
+    match require(&hub, &headers, Role::Admin).await {
+        Ok(access) => mint(hub, access, body).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+async fn mint_code_in(
+    State(hub): State<Arc<Hub>>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    match require_in(&hub, &headers, slug, Role::Admin).await {
+        Ok(access) => mint(hub, access, body).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+fn enrol_refusal(error: EnrolError) -> Response {
+    let refuse =
+        |status: StatusCode, why: String| (status, Json(json!({ "error": why }))).into_response();
+    match error {
+        EnrolError::BadRequest(why) => refuse(StatusCode::BAD_REQUEST, why),
+        EnrolError::RateLimited => refuse(StatusCode::TOO_MANY_REQUESTS, error.to_string()),
+        EnrolError::Invalid => refuse(StatusCode::UNAUTHORIZED, error.to_string()),
+        EnrolError::Store(error) => {
+            tracing::error!("{error}");
+            unavailable()
+        }
+    }
+}
+
+async fn mint(hub: Arc<Hub>, access: Access, body: Bytes) -> Response {
+    // An empty body is a code with nothing preset.
+    let spec: MintBody = if body.is_empty() {
+        MintBody::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(spec) => spec,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": format!("the request cannot be read: {error}") })),
+                )
+                    .into_response();
+            }
+        }
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        hub.mint_enrolment_code(
+            &access.organization.id,
+            &access.account,
+            EnrolmentSpec {
+                team: spec.team,
+                site: spec.site,
+                contest: spec.contest,
+                machine_number: spec.machine_number,
+                lifetime_minutes: spec.lifetime_minutes,
+            },
+        )
+    })
+    .await;
+    match result {
+        Ok(Ok(minted)) => (
+            StatusCode::CREATED,
+            [(CACHE_CONTROL, "no-store")],
+            Json(minted),
+        )
+            .into_response(),
+        Ok(Err(error)) => enrol_refusal(error),
+        Err(_) => unavailable(),
+    }
+}
+
+#[derive(Deserialize)]
+struct EnrolBody {
+    code: String,
+}
+
+/// A stick trades its one-time code for its id and secret. There is no login: the code is the proof.
+/// The answer carries the secret, so it is never cached.
+async fn enrol(State(hub): State<Arc<Hub>>, body: Bytes) -> Response {
+    let Ok(body) = serde_json::from_slice::<EnrolBody>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "the request must be {\"code\": \"...\"}" })),
+        )
+            .into_response();
+    };
+    match tokio::task::spawn_blocking(move || hub.enrol(&body.code)).await {
+        Ok(Ok(enrolment)) => (
+            StatusCode::OK,
+            [(CACHE_CONTROL, "no-store")],
+            Json(enrolment),
+        )
+            .into_response(),
+        Ok(Err(error)) => enrol_refusal(error),
         Err(_) => unavailable(),
     }
 }
