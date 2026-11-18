@@ -6,6 +6,7 @@ mod acs_mail;
 mod codeforces;
 mod commands;
 mod download;
+mod enrol;
 mod forge;
 mod hub;
 mod images;
@@ -39,6 +40,11 @@ pub use commands::{
     MAX_OPEN_PER_STICK, MAX_PER_MINUTE, MIN_LIFETIME_SECONDS, StoredCommand,
 };
 pub use download::{Download, DownloadError, LINK_LIFETIME_MINUTES};
+pub use enrol::{
+    DEFAULT_LIFETIME_MINUTES, EnrolError, EnrolledStick, Enrolment, EnrolmentSpec,
+    MAX_FAILED_PER_MINUTE, MAX_LIFETIME_MINUTES, MAX_MINTS_PER_MINUTE, MIN_LIFETIME_MINUTES,
+    MintedCode, NewEnrolmentCode, Redemption,
+};
 pub use forge::{FORGE_CODE_LIFETIME_SECONDS, ForgeError};
 pub use hub::{Hub, LastHeartbeat, ONLINE_WINDOW_SECONDS, Rejection, StickView};
 pub use images::{Image, ImageSource, ImagesError, MANIFEST_BLOB, StaticImages, StorageImages};

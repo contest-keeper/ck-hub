@@ -8,6 +8,7 @@ use time::OffsetDateTime;
 use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::commands::{CommandState, StoredCommand, action_type, settled};
+use crate::enrol::{EnrolledStick, NewEnrolmentCode, Redemption};
 use crate::judge::{JudgeSubmission, SubmitEvent, submit_event};
 
 use crate::store::{
@@ -17,7 +18,7 @@ use crate::store::{
 
 /// The schema, in the order it is applied. A migration that was applied is never run again and
 /// never edited: a change is a new file.
-const MIGRATIONS: [(&str, &str); 12] = [
+const MIGRATIONS: [(&str, &str); 13] = [
     (
         "0001_heartbeats_and_events",
         include_str!("../migrations/0001_heartbeats_and_events.sql"),
@@ -62,6 +63,10 @@ const MIGRATIONS: [(&str, &str); 12] = [
     (
         "0012_commands",
         include_str!("../migrations/0012_commands.sql"),
+    ),
+    (
+        "0013_enrolment_codes",
+        include_str!("../migrations/0013_enrolment_codes.sql"),
     ),
 ];
 
@@ -1159,6 +1164,108 @@ impl Store for PostgresStore {
         self.in_org(organization, |transaction| {
             transaction.execute(
                 "DELETE FROM commands WHERE organization_id = $1 AND created_at < $2",
+                &[&organization, &before],
+            )
+        })
+        .map(|_| ())
+    }
+
+    fn add_enrolment_code(
+        &self,
+        organization: &str,
+        code: NewEnrolmentCode,
+    ) -> Result<(), StoreError> {
+        let machine = code
+            .machine_number
+            .map(i32::try_from)
+            .transpose()
+            .map_err(failed)?;
+        self.in_org(organization, |transaction| {
+            transaction.execute(
+                "INSERT INTO enrolment_codes
+                     (code_hash, organization_id, created_by_user_id, team, site, contest,
+                      machine_number, created_at, expires_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                &[
+                    &code.code_hash,
+                    &organization,
+                    &code.created_by_user_id,
+                    &code.team,
+                    &code.site,
+                    &code.contest,
+                    &machine,
+                    &code.created_at,
+                    &code.expires_at,
+                ],
+            )
+        })
+        .map(|_| ())
+    }
+
+    fn redeem_enrolment_code(
+        &self,
+        code_hash: &str,
+        now: OffsetDateTime,
+        stick: &StickId,
+        token: &Token,
+    ) -> Result<Redemption, StoreError> {
+        // One transaction: the code is used up and the stick is registered, or neither happens.
+        // Row-level security lets this read and change exactly the one code it names.
+        self.run(|client| {
+            let mut transaction = client.transaction()?;
+            transaction.execute("SELECT set_config('ck.code_hash', $1, true)", &[&code_hash])?;
+            let used = transaction.query_opt(
+                "UPDATE enrolment_codes SET used_at = $2
+                 WHERE code_hash = $1 AND used_at IS NULL AND expires_at > $2
+                 RETURNING organization_id, team, site, contest, machine_number",
+                &[&code_hash, &now],
+            )?;
+            let Some(row) = used else {
+                transaction.commit()?;
+                return Ok(Redemption::Invalid);
+            };
+            let organization: String = row.get(0);
+            let machine: Option<i32> = row.get(4);
+            transaction.execute("SELECT set_config('ck.org_id', $1, true)", &[&organization])?;
+            let (team, site, contest): (String, String, String) =
+                (row.get(1), row.get(2), row.get(3));
+            let added = transaction.execute(
+                "INSERT INTO sticks
+                     (organization_id, stick_id, token, team, site, contest, machine_number)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (stick_id) DO NOTHING",
+                &[
+                    &organization,
+                    &stick.as_str(),
+                    &token.expose(),
+                    &team,
+                    &site,
+                    &contest,
+                    &machine,
+                ],
+            )?;
+            if added == 0 {
+                transaction.rollback()?;
+                return Ok(Redemption::IdTaken);
+            }
+            transaction.commit()?;
+            Ok(Redemption::Done(EnrolledStick {
+                organization,
+                team,
+                site,
+                contest,
+                machine_number: machine.and_then(|n| u32::try_from(n).ok()),
+            }))
+        })
+    }
+
+    fn delete_enrolment_codes_before(
+        &self,
+        organization: &str,
+        before: OffsetDateTime,
+    ) -> Result<(), StoreError> {
+        self.in_org(organization, |transaction| {
+            transaction.execute(
+                "DELETE FROM enrolment_codes WHERE organization_id = $1 AND created_at < $2",
                 &[&organization, &before],
             )
         })

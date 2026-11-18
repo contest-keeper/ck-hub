@@ -14,6 +14,7 @@ use serde::Deserialize;
 use time::OffsetDateTime;
 
 use crate::commands::{CommandState, StoredCommand, settled};
+use crate::enrol::{EnrolledStick, NewEnrolmentCode, Redemption};
 use crate::judge::{JudgeSubmission, SubmitEvent, submit_event};
 
 #[derive(Debug, thiserror::Error)]
@@ -449,6 +450,31 @@ pub trait Store: Send + Sync {
         organization: &str,
         before: OffsetDateTime,
     ) -> Result<(), StoreError>;
+
+    /// Keeps a one-time enrolment code (its hash) for a stick of the organization.
+    fn add_enrolment_code(
+        &self,
+        organization: &str,
+        code: NewEnrolmentCode,
+    ) -> Result<(), StoreError>;
+
+    /// Uses up the code with this hash and registers a new stick, in one step, in the organization
+    /// the code was made for. A code that is unknown, used or expired changes nothing. When the stick
+    /// id is taken the code is not used up.
+    fn redeem_enrolment_code(
+        &self,
+        code_hash: &str,
+        now: OffsetDateTime,
+        stick: &StickId,
+        token: &Token,
+    ) -> Result<Redemption, StoreError>;
+
+    /// Removes the organization's codes made before `before`.
+    fn delete_enrolment_codes_before(
+        &self,
+        organization: &str,
+        before: OffsetDateTime,
+    ) -> Result<(), StoreError>;
 }
 
 /// A picture kept with a profile.
@@ -508,6 +534,14 @@ pub struct MemoryStore {
     sticks: Mutex<HashMap<StickId, (String, Stick)>>,
     profiles: Mutex<HashMap<(String, String), KeptProfile>>,
     commands: Mutex<Vec<(String, StoredCommand)>>,
+    /// Per code hash: the organization, what it was minted for and whether it is used.
+    enrolment_codes: Mutex<HashMap<String, KeptCode>>,
+}
+
+struct KeptCode {
+    organization: String,
+    code: NewEnrolmentCode,
+    used: bool,
 }
 
 impl MemoryStore {
@@ -1248,6 +1282,71 @@ impl Store for MemoryStore {
             .lock()
             .expect("commands lock")
             .retain(|(owner, c)| owner != organization || c.created_at >= before);
+        Ok(())
+    }
+
+    fn add_enrolment_code(
+        &self,
+        organization: &str,
+        code: NewEnrolmentCode,
+    ) -> Result<(), StoreError> {
+        self.enrolment_codes.lock().expect("codes lock").insert(
+            code.code_hash.clone(),
+            KeptCode {
+                organization: organization.to_owned(),
+                code,
+                used: false,
+            },
+        );
+        Ok(())
+    }
+
+    fn redeem_enrolment_code(
+        &self,
+        code_hash: &str,
+        now: OffsetDateTime,
+        stick: &StickId,
+        token: &Token,
+    ) -> Result<Redemption, StoreError> {
+        let mut codes = self.enrolment_codes.lock().expect("codes lock");
+        let Some(kept) = codes.get_mut(code_hash) else {
+            return Ok(Redemption::Invalid);
+        };
+        if kept.used || kept.code.expires_at <= now {
+            return Ok(Redemption::Invalid);
+        }
+        let mut sticks = self.sticks.lock().expect("sticks lock");
+        if sticks.contains_key(stick) {
+            return Ok(Redemption::IdTaken);
+        }
+        kept.used = true;
+        let made = Stick {
+            stick_id: stick.clone(),
+            token: token.clone(),
+            team: kept.code.team.clone(),
+            site: kept.code.site.clone(),
+            contest: kept.code.contest.clone(),
+            machine_number: kept.code.machine_number,
+        };
+        sticks.insert(stick.clone(), (kept.organization.clone(), made));
+        Ok(Redemption::Done(EnrolledStick {
+            organization: kept.organization.clone(),
+            team: kept.code.team.clone(),
+            site: kept.code.site.clone(),
+            contest: kept.code.contest.clone(),
+            machine_number: kept.code.machine_number,
+        }))
+    }
+
+    fn delete_enrolment_codes_before(
+        &self,
+        organization: &str,
+        before: OffsetDateTime,
+    ) -> Result<(), StoreError> {
+        self.enrolment_codes
+            .lock()
+            .expect("codes lock")
+            .retain(|_, kept| kept.organization != organization || kept.code.created_at >= before);
         Ok(())
     }
 }
