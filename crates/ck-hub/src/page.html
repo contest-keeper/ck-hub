@@ -694,6 +694,57 @@ function commandPanel(stick) {
   return box;
 }
 
+// Recordings a stick uploaded: a list with a Watch link for each finished file. The link goes to the
+// Hub, which sends a member of the organization on to a read-only link that works for a couple of
+// hours; the file opens in its own tab.
+const recordingLists = new Map();
+
+async function fetchRecordings(stick) {
+  const before = recordingLists.get(stick.stick_id);
+  recordingLists.set(stick.stick_id, { at: Date.now(), data: before ? before.data : null, failed: false });
+  let data = before ? before.data : null;
+  let failed = false;
+  try {
+    const response = await fetch("/api/v1/orgs/" + encodeURIComponent(org) + "/sticks/" + encodeURIComponent(stick.stick_id) + "/recordings", { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    data = await response.json();
+  } catch (error) {
+    failed = true;
+  }
+  recordingLists.set(stick.stick_id, { at: Date.now(), data, failed });
+  render();
+}
+
+function recordingPanel(stick) {
+  const box = el("div", "net");
+  box.appendChild(el("h3", "", "Recordings"));
+  const cached = recordingLists.get(stick.stick_id);
+  if (!cached || Date.now() - cached.at > 30000) fetchRecordings(stick);
+  if (!cached || !cached.data) {
+    box.appendChild(el("p", "muted", cached && cached.failed ? "The recordings could not be loaded." : "Loading…"));
+    return box;
+  }
+  if (!cached.data.length) {
+    box.appendChild(el("p", "muted", "No recording has been uploaded from this stick. Recordings stay on the stick unless the profile says to upload them."));
+    return box;
+  }
+  const watch = (r) => {
+    if (!r.complete) return document.createTextNode("uploading " + r.chunks_received + " of " + r.chunks_total);
+    return link("Watch", "/api/v1/orgs/" + encodeURIComponent(org) + "/recordings/" + encodeURIComponent(r.id) + "/view");
+  };
+  box.appendChild(proofTable(["Time", "File", "Kind", "Length", "Size", "Kept until", ""],
+    cached.data.map((r) => [[
+      new Date(r.started_at || r.created_at).toLocaleString(),
+      r.file,
+      r.kind === "video" ? "video" : "picture",
+      r.duration_s ? span(r.duration_s) : "—",
+      bytesText(r.size),
+      r.expires_at ? new Date(r.expires_at).toLocaleDateString() : "—",
+      watch(r),
+    ], ""])));
+  return box;
+}
+
 function facts(stick) {
   const last = stick.last;
   const list = el("dl", "facts");
@@ -779,6 +830,7 @@ function render() {
       td.appendChild(commandPanel(stick));
       td.appendChild(proofPanel(stick));
       td.appendChild(networkPanel(stick));
+      td.appendChild(recordingPanel(stick));
       detail.appendChild(td);
       body.appendChild(detail);
     }
