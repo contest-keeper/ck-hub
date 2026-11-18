@@ -43,6 +43,11 @@ pub struct Image {
     pub family: String,
     /// The hardware profile the image is built for, for example `generic`.
     pub profile: String,
+    /// The written offer of the source code of the image's free software (GPL and similar), kept
+    /// next to the image. Its path inside the container never reaches an organizer; it is served at
+    /// `/download/image/<id>/source-offer`. Images made before the offer existed have none.
+    #[serde(default)]
+    pub source_offer: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -191,6 +196,13 @@ fn problem(image: &Image) -> Option<&'static str> {
     if !is_safe_blob(&image.blob) {
         return Some("the file path must be inside images/ with plain names only");
     }
+    if image
+        .source_offer
+        .as_deref()
+        .is_some_and(|b| !is_safe_blob(b))
+    {
+        return Some("the source offer path must be inside images/ with plain names only");
+    }
     if image.size == 0 {
         return Some("the size must be more than zero");
     }
@@ -236,6 +248,7 @@ mod tests {
             sha256: "a".repeat(64),
             family: "ubuntu".to_owned(),
             profile: "generic".to_owned(),
+            source_offer: Some(format!("images/{id}.SOURCE-OFFER.txt")),
         }
     }
 
@@ -244,6 +257,18 @@ mod tests {
         let text = serde_json::json!({ "images": [image("keeper-os-0.3.0")] }).to_string();
         let images = parse(text.as_bytes()).expect("valid");
         assert_eq!(images, [image("keeper-os-0.3.0")]);
+    }
+
+    #[test]
+    fn a_source_offer_outside_the_folder_is_refused_and_a_missing_one_is_fine() {
+        let mut bad = image("x");
+        bad.source_offer = Some("images/../secret".to_owned());
+        let text = serde_json::json!({ "images": [bad] }).to_string();
+        assert!(parse(text.as_bytes()).is_err());
+        let old = r#"{"images":[{"id":"x","name":"n","version":"1","blob":"images/x.img",
+            "size":1,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "family":"ubuntu","profile":"generic"}]}"#;
+        assert_eq!(parse(old.as_bytes()).expect("valid")[0].source_offer, None);
     }
 
     #[test]
