@@ -1128,3 +1128,28 @@ async fn an_organizer_is_sent_to_a_five_minute_link_and_a_wrong_id_is_refused() 
         assert_eq!(status, StatusCode::NOT_FOUND, "{id}");
     }
 }
+
+#[tokio::test]
+async fn the_page_has_the_command_buttons_with_a_confirm_step() {
+    let setup = setup();
+    let (status, page) = call(
+        &setup.app,
+        Request::get("/").body(Body::empty()).expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    for wanted in [
+        "commandPanel",
+        "/commands",
+        "Message",
+        "Lock",
+        "Shutdown",
+        "Confirm",
+        "Cancel",
+    ] {
+        assert!(page.contains(wanted), "{wanted}");
+    }
+    // Only admins and owners see the buttons, and nothing is put into the page as markup.
+    assert!(page.contains("myRole === \"owner\" || myRole === \"admin\""));
+    assert!(!page.contains("innerHTML"));
+}
