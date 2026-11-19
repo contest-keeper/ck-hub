@@ -61,7 +61,23 @@ Not measured on Azure yet.
    Hub CPU (0.33 core). Both were dropped, not merged. The cost is not in database waits: it is about 4 ms of
    Hub CPU per message. Find where it goes (a profile; per-message logging, JSON and signature work are the
    suspects) before changing anything else.
-4. Sampling or summarising network history on the stick (request to lane B).
+4. **Where the CPU goes (measured 2026-11-19, 500 sticks, 3 minutes, same PC):**
+
+   | Hub setup | Hub CPU | Heartbeat p50 / p99 |
+   |---|---|---|
+   | in-memory store, logging on | 0.08 core | 2.0 / 5.2 ms |
+   | in-memory store, logging off | 0.09 core | 2.1 / 19 ms |
+   | PostgreSQL, logging off | 0.29 core | 25.5 / 234 ms |
+
+   Per-message logging costs nothing measurable. Signing, JSON and the HTTP layer together are about 0.08 core.
+   The database path adds about 0.2 core, three quarters of the total, and does not come from waiting: it is
+   the cost of running each statement through the blocking `postgres` client (a heartbeat runs about 13
+   statements: sequence check, two inserts and the commands query, each as BEGIN, a setting, the query and
+   COMMIT, and each query prepared again every time). Trimming one statement (above) was too small to show.
+   Candidates, biggest first: one SQL statement for the heartbeat check and write; no commands query when none
+   are waiting; prepared statements kept per connection; batched event inserts. Try one at a time and re-run
+   the 500-stick test. On Azure the connection is also encrypted, which costs more CPU per statement than here.
+5. Sampling or summarising network history on the stick (request to lane B).
 
 ## How to repeat
 
