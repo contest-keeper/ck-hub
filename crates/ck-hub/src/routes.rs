@@ -70,6 +70,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route("/", get(page))
         .route("/forge/connect", get(page))
         .route("/download/forge", get(download_forge))
+        .route("/download/image", get(page))
         .route("/download/image/{id}", get(download_image))
         .route(
             "/download/image/{id}/source-offer",
@@ -219,18 +220,24 @@ async fn list_images(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Respons
         Ok(Ok(images)) => Json(json!({
             "images": images
                 .iter()
-                .map(|image| json!({
-                    "id": image.id,
-                    "name": image.name,
-                    "version": image.version,
-                    "url": format!("/download/image/{}", image.id),
-                    "size": image.size,
-                    "sha256": image.sha256,
-                    "family": image.family,
-                    "profile": image.profile,
-                    "source_offer_url": image.source_offer.as_ref()
-                        .map(|_| format!("/download/image/{}/source-offer", image.id)),
-                }))
+                .map(|image| {
+                    let mut entry = json!({
+                        "id": image.id,
+                        "name": image.name,
+                        "version": image.version,
+                        "url": format!("/download/image/{}", image.id),
+                        "size": image.size,
+                        "sha256": image.sha256,
+                        "family": image.family,
+                        "profile": image.profile,
+                        "source_offer_url": image.source_offer.as_ref()
+                            .map(|_| format!("/download/image/{}/source-offer", image.id)),
+                    });
+                    if let Some(filename) = &image.filename {
+                        entry["filename"] = json!(filename);
+                    }
+                    entry
+                })
                 .collect::<Vec<_>>()
         }))
         .into_response(),
@@ -535,8 +542,8 @@ fn accepted(result: Result<Result<u64, Rejection>, tokio::task::JoinError>) -> R
     }
 }
 
-async fn page() -> Html<&'static str> {
-    Html(PAGE)
+async fn page() -> impl IntoResponse {
+    ([(CACHE_CONTROL, "no-store")], Html(PAGE))
 }
 
 /// The sticks of the only organization the caller belongs to. The page and the admin tool used this

@@ -97,17 +97,32 @@ fn build(judge: Option<Arc<dyn Judge>>, with_images: bool) -> Setup {
         let download =
             Download::new("ckdlabc12", "downloads", "a2V5LWZvci10ZXN0cw==").expect("valid");
         hub.with_download(download)
-            .with_images(Arc::new(StaticImages(vec![Image {
-                id: "keeper-os-0.3.0".to_owned(),
-                name: "Keeper OS".to_owned(),
-                version: "0.3.0".to_owned(),
-                blob: "images/keeper-os-0.3.0.img.zst".to_owned(),
-                size: 1_500_000_000,
-                sha256: "a".repeat(64),
-                family: "ubuntu".to_owned(),
-                profile: "generic".to_owned(),
-                source_offer: Some("images/keeper-os-0.3.0.SOURCE-OFFER.txt".to_owned()),
-            }])))
+            .with_images(Arc::new(StaticImages(vec![
+                Image {
+                    id: "keeper-os-0.3.0".to_owned(),
+                    name: "Keeper OS".to_owned(),
+                    version: "0.3.0".to_owned(),
+                    filename: Some("keeper-os-public-0.3.0.img.zst".to_owned()),
+                    blob: "images/keeper-os-0.3.0.img.zst".to_owned(),
+                    size: 1_500_000_000,
+                    sha256: "a".repeat(64),
+                    family: "ubuntu".to_owned(),
+                    profile: "generic".to_owned(),
+                    source_offer: Some("images/keeper-os-0.3.0.SOURCE-OFFER.txt".to_owned()),
+                },
+                Image {
+                    id: "keeper-os-0.2.0".to_owned(),
+                    name: "Keeper OS".to_owned(),
+                    version: "0.2.0".to_owned(),
+                    filename: None,
+                    blob: "images/archive/private-legacy.img.zst".to_owned(),
+                    size: 1_400_000_000,
+                    sha256: "b".repeat(64),
+                    family: "ubuntu".to_owned(),
+                    profile: "generic".to_owned(),
+                    source_offer: None,
+                },
+            ])))
     } else {
         hub
     };
@@ -1071,6 +1086,39 @@ async fn images_are_not_found_until_they_are_set_up() {
 }
 
 #[tokio::test]
+async fn the_logged_out_image_page_has_the_same_headers_as_the_dashboard_and_no_image_data() {
+    let setup = build(None, true);
+    let get = |path| {
+        setup
+            .app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).expect("request"))
+    };
+    let dashboard = get("/").await.expect("dashboard");
+    let downloads = get("/download/image").await.expect("downloads");
+    assert_eq!(downloads.status(), StatusCode::OK);
+    assert_eq!(downloads.headers(), dashboard.headers());
+    assert_eq!(downloads.headers()["cache-control"], "no-store");
+    let csp = downloads.headers()["content-security-policy"]
+        .to_str()
+        .expect("text");
+    assert!(csp.contains("default-src 'none'"));
+    assert!(csp.contains("frame-ancestors 'none'"));
+    let body = downloads
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let page = String::from_utf8_lossy(&body);
+    assert!(page.contains("Log in to Keeper Hub"));
+    assert!(page.contains("Keeper OS downloads"));
+    assert!(!page.contains("keeper-os-0.3.0"));
+    assert!(!page.contains("keeper-os-public-0.3.0.img.zst"));
+    assert!(!page.contains(&"a".repeat(64)));
+}
+
+#[tokio::test]
 async fn an_organizer_sees_the_manifest_without_the_storage_path() {
     let setup = build(None, true);
     let cookie = organizer_cookie(&setup.app).await;
@@ -1087,6 +1135,7 @@ async fn an_organizer_sees_the_manifest_without_the_storage_path() {
     let image = &json["images"][0];
     assert_eq!(image["id"], "keeper-os-0.3.0");
     assert_eq!(image["url"], "/download/image/keeper-os-0.3.0");
+    assert_eq!(image["filename"], "keeper-os-public-0.3.0.img.zst");
     assert_eq!(image["size"], 1_500_000_000u64);
     assert_eq!(image["sha256"], "a".repeat(64));
     assert_eq!(image["family"], "ubuntu");
@@ -1095,7 +1144,11 @@ async fn an_organizer_sees_the_manifest_without_the_storage_path() {
         image["source_offer_url"],
         "/download/image/keeper-os-0.3.0/source-offer"
     );
+    let legacy = &json["images"][1];
+    assert_eq!(legacy["url"], "/download/image/keeper-os-0.2.0");
+    assert!(legacy.get("filename").is_none());
     assert!(!text.contains("blob") && !text.contains("images/keeper"));
+    assert!(!text.contains("private-legacy"));
 }
 
 #[tokio::test]
