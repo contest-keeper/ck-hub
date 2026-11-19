@@ -55,8 +55,12 @@ Not measured on Azure yet.
 1. Re-run on the Azure develop Hub at 100, 300, 500 sticks for 30 minutes each; replace the tables with those.
 2. If CPU is the limit there: raise the container to 0.5 or 1 vCPU for contest days (`cpu` in ck-infra), or
    cut messages: `heartbeat_s` 30 and an event every 20 s halves the load; turn down per-message logging.
-3. Cheaper per message: fewer round trips (each call is BEGIN, set_config, query, COMMIT), batched event inserts,
-   and no commands query on a heartbeat when the stick has none waiting.
+3. Fewer database round trips per message did **not** help when tried (2026-11-19, 500 sticks registered in the
+   database, 5 minutes, same PC): naming the organization in one simple query instead of two, and caching a
+   stick's secret for 30 s, gave the same latency (heartbeat p50 28.9 vs 28.1 ms, p99 45 vs 44 ms) and the same
+   Hub CPU (0.33 core). Both were dropped, not merged. The cost is not in database waits: it is about 4 ms of
+   Hub CPU per message. Find where it goes (a profile; per-message logging, JSON and signature work are the
+   suspects) before changing anything else.
 4. Sampling or summarising network history on the stick (request to lane B).
 
 ## How to repeat
