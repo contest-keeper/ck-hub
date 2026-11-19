@@ -119,6 +119,90 @@ async fn enrol(app: &Router, code: &str) -> (StatusCode, Value) {
     call(app, request).await
 }
 
+async fn claim(app: &Router, code: &str, stick_id: &str, token: &str) -> (StatusCode, Value) {
+    let request = Request::post("/api/v1/enrol/claim")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({ "code": code, "stick_id": stick_id, "token": token }).to_string(),
+        ))
+        .expect("request");
+    let response = app.clone().oneshot(request).await.expect("response");
+    let status = response.status();
+    if status == StatusCode::OK {
+        assert_eq!(response.headers()["cache-control"], "no-store");
+    }
+    let body = response.into_body().collect().await.expect("body");
+    (
+        status,
+        serde_json::from_slice(&body.to_bytes()).unwrap_or(Value::Null),
+    )
+}
+
+#[tokio::test]
+async fn an_exact_claim_can_be_recovered_after_the_minted_code_expires() {
+    let s = setup();
+    let owner = cookie(&s.app, "owner@example.org").await;
+    let (_, minted) = mint(&s.app, &owner, &json!({ "lifetime_minutes": 5 })).await;
+    let code = minted["code"].as_str().expect("code");
+    let id = "664ce6e2-d29d-4eb7-a3f3-e4e806382d7b";
+    let token = "an-unused-client-token-for-claim-tests";
+    let accepted = (StatusCode::OK, json!({ "stick_id": id }));
+    assert_eq!(claim(&s.app, code, id, token).await, accepted);
+    let now = *s.now.lock().expect("clock");
+    *s.now.lock().expect("clock") = now + Duration::minutes(6);
+    assert_eq!(claim(&s.app, code, id, token).await, accepted);
+    assert_eq!(heartbeat(&s.app, id, token).await, StatusCode::OK);
+
+    let invalid = (
+        StatusCode::UNAUTHORIZED,
+        json!({ "error": "the code is not valid" }),
+    );
+    assert_eq!(
+        claim(&s.app, code, id, "a-different-client-token-for-claim-tests").await,
+        invalid
+    );
+    assert_eq!(
+        claim(&s.app, code, "a-different-stick-id", token).await,
+        invalid
+    );
+    assert_eq!(enrol(&s.app, code).await, invalid);
+    *s.now.lock().expect("clock") = now + Duration::minutes(59) + Duration::seconds(59);
+    assert_eq!(claim(&s.app, code, id, token).await, accepted);
+    *s.now.lock().expect("clock") = now + Duration::hours(1);
+    assert_eq!(claim(&s.app, code, id, token).await, invalid);
+}
+
+#[tokio::test]
+async fn recovery_requires_a_claimed_credential_that_has_not_been_retired() {
+    let s = setup();
+    let owner = cookie(&s.app, "owner@example.org").await;
+    let (_, minted) = mint(&s.app, &owner, &json!({})).await;
+    let code = minted["code"].as_str().expect("code");
+    let (_, legacy) = enrol(&s.app, code).await;
+    let legacy_id = legacy["stick_id"].as_str().expect("id");
+    let legacy_token = legacy["token"].as_str().expect("token");
+    let invalid = (
+        StatusCode::UNAUTHORIZED,
+        json!({ "error": "the code is not valid" }),
+    );
+    assert_eq!(claim(&s.app, code, legacy_id, legacy_token).await, invalid);
+
+    let (_, minted) = mint(&s.app, &owner, &json!({})).await;
+    let code = minted["code"].as_str().expect("code");
+    let token = "an-unused-client-token-for-claim-tests";
+    let stick_id = "new-id-for-a-claim";
+    for taken in [legacy_id, "stick-a"] {
+        assert_eq!(claim(&s.app, code, taken, token).await, invalid);
+    }
+    assert_eq!(claim(&s.app, code, stick_id, token).await.0, StatusCode::OK);
+    let retire = Request::delete(format!("/api/v1/orgs/default/sticks/{stick_id}/credential"))
+        .header("cookie", &owner)
+        .body(Body::empty())
+        .expect("request");
+    assert_eq!(call(&s.app, retire).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(claim(&s.app, code, stick_id, token).await, invalid);
+}
+
 #[tokio::test]
 async fn a_redeemed_key_keeps_its_contest_window() {
     let setup = setup();

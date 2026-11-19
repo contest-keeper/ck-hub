@@ -137,6 +137,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/enrolment-codes", post(mint_code))
         .route("/api/v1/orgs/{slug}/enrolment-codes", post(mint_code_in))
         .route("/api/v1/enrol", post(enrol))
+        .route("/api/v1/enrol/claim", post(claim_enrolment))
         .route(
             "/api/v1/orgs/{slug}/sticks/{id}/submissions",
             get(submissions_of),
@@ -934,6 +935,34 @@ async fn enrol(State(hub): State<Arc<Hub>>, body: Bytes) -> Response {
             StatusCode::OK,
             [(CACHE_CONTROL, "no-store")],
             Json(enrolment),
+        )
+            .into_response(),
+        Ok(Err(error)) => enrol_refusal(error),
+        Err(_) => unavailable(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ClaimEnrolmentBody {
+    code: String,
+    stick_id: String,
+    token: String,
+}
+
+async fn claim_enrolment(State(hub): State<Arc<Hub>>, body: Bytes) -> Response {
+    let Ok(body) = serde_json::from_slice::<ClaimEnrolmentBody>(&body) else {
+        return enrol_refusal(EnrolError::BadRequest(
+            "the request must contain code, stick_id and token".to_owned(),
+        ));
+    };
+    match tokio::task::spawn_blocking(move || {
+        hub.claim_enrolment(&body.code, &body.stick_id, body.token)
+    })
+    .await
+    {
+        Ok(Ok(id)) => (
+            [(CACHE_CONTROL, "no-store")],
+            Json(json!({ "stick_id": id })),
         )
             .into_response(),
         Ok(Err(error)) => enrol_refusal(error),

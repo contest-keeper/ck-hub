@@ -1320,10 +1320,85 @@ fn scoped_enrolment_contract(store: &dyn Store) {
     assert_eq!(registered.credential_scope, Some(scope));
 }
 
+fn recoverable_enrolment_contract(store: &dyn Store) {
+    use ck_hub::{CredentialScope, NewEnrolmentCode, Redemption};
+
+    let code = unique();
+    let org = store
+        .create_organization(&code, "Recoverable contest")
+        .expect("write")
+        .expect("new organization");
+    let credential_scope = CredentialScope {
+        contest_id: "2042".to_owned(),
+        valid_from: time(60),
+        valid_until: time(90_000),
+    };
+    store
+        .add_enrolment_code(
+            &org.id,
+            NewEnrolmentCode {
+                code_hash: code.clone(),
+                created_by_user_id: "u-1".to_owned(),
+                team: "Team Q".to_owned(),
+                site: String::new(),
+                contest: "Final".to_owned(),
+                machine_number: Some(4),
+                created_at: time(0),
+                expires_at: time(86_400),
+                credential_scope: Some(credential_scope.clone()),
+            },
+        )
+        .expect("mint");
+    let stick = StickId::parse(&code).expect("stick ID");
+    let token = Token::new("fresh-and-persisted-client-token");
+    let claim = |at: i64, who: &StickId, key: &Token| {
+        store
+            .claim_enrolment_code(&code, time(at), who, key)
+            .expect("claim")
+    };
+
+    // Simultaneous exact retries all acknowledge the single registration.
+    std::thread::scope(|scope| {
+        let same_proof = || claim(86_300, &stick, &token);
+        let peers: Vec<_> = (0..3).map(|_| scope.spawn(same_proof)).collect();
+        for peer in peers {
+            assert!(matches!(peer.join().expect("thread"), Redemption::Done(_)));
+        }
+    });
+    let registered = store.sticks(&org.id).expect("registered");
+    assert_eq!(registered.len(), 1);
+    assert_eq!(registered[0].credential_scope, Some(credential_scope));
+    assert_eq!(registered[0].machine_number, Some(4));
+
+    // An earlier request can reach the code row after a concurrent retry claims it.
+    assert!(matches!(claim(86_299, &stick, &token), Redemption::Done(_)));
+
+    // A new mint's pruning must not shorten the older code's recovery period.
+    store
+        .delete_enrolment_codes_before(&org.id, time(20))
+        .expect("prune");
+    assert!(matches!(claim(86_420, &stick, &token), Redemption::Done(_)));
+    assert_eq!(
+        claim(
+            86_420,
+            &stick,
+            &Token::new("different-persisted-client-token")
+        ),
+        Redemption::Invalid
+    );
+    assert!(
+        store
+            .retire_stick(&org.id, &stick, None, time(86_430))
+            .expect("retire")
+    );
+    assert_eq!(claim(86_431, &stick, &token), Redemption::Invalid);
+}
+
 #[test]
 fn the_memory_store_keeps_its_contract() {
     enrolment_contract(&MemoryStore::default());
     scoped_enrolment_contract(&MemoryStore::default());
+    recoverable_enrolment_contract(&MemoryStore::default());
     commands_contract(&MemoryStore::default());
     recordings_contract(&MemoryStore::default());
     profiles_contract(&MemoryStore::default());
@@ -1341,6 +1416,7 @@ fn the_postgres_store_keeps_its_contract() {
     let store = PostgresStore::connect(&url).expect("connect");
     enrolment_contract(&store);
     scoped_enrolment_contract(&store);
+    recoverable_enrolment_contract(&store);
     commands_contract(&store);
     recordings_contract(&store);
     profiles_contract(&store);

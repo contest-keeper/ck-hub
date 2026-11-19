@@ -14,7 +14,7 @@ use serde::Deserialize;
 use time::OffsetDateTime;
 
 use crate::commands::{CommandState, StoredCommand, settled};
-use crate::enrol::{EnrolledStick, NewEnrolmentCode, Redemption};
+use crate::enrol::{CLAIM_RECOVERY, EnrolledStick, NewEnrolmentCode, Redemption};
 use crate::judge::{JudgeSubmission, SubmitEvent, submit_event};
 use crate::recordings::Recording;
 
@@ -484,7 +484,16 @@ pub trait Store: Send + Sync {
         token: &Token,
     ) -> Result<Redemption, StoreError>;
 
-    /// Removes the organization's codes made before `before`.
+    /// As in normal redemption, with a bounded retry for the same unretired credential.
+    fn claim_enrolment_code(
+        &self,
+        code_hash: &str,
+        now: OffsetDateTime,
+        stick: &StickId,
+        token: &Token,
+    ) -> Result<Redemption, StoreError>;
+
+    /// Removes the organization's old codes, keeping recent claims for recovery.
     fn delete_enrolment_codes_before(
         &self,
         organization: &str,
@@ -600,12 +609,80 @@ pub struct MemoryStore {
 struct KeptCode {
     organization: String,
     code: NewEnrolmentCode,
-    used: bool,
+    used_at: Option<OffsetDateTime>,
+    claimed_stick_id: Option<StickId>,
+}
+
+impl KeptCode {
+    fn enrolled(&self) -> EnrolledStick {
+        EnrolledStick {
+            organization: self.organization.clone(),
+            team: self.code.team.clone(),
+            site: self.code.site.clone(),
+            contest: self.code.contest.clone(),
+            machine_number: self.code.machine_number,
+        }
+    }
 }
 
 impl MemoryStore {
     fn id(&self, kind: &str) -> String {
         format!("{kind}-{}", self.next_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn use_enrolment_code(
+        &self,
+        code_hash: &str,
+        now: OffsetDateTime,
+        stick: &StickId,
+        token: &Token,
+        recoverable: bool,
+    ) -> Redemption {
+        let mut codes = self.enrolment_codes.lock().expect("codes lock");
+        let Some(kept) = codes.get_mut(code_hash) else {
+            return Redemption::Invalid;
+        };
+        if let Some(used_at) = kept.used_at {
+            let recovering = recoverable
+                && kept.claimed_stick_id.as_ref() == Some(stick)
+                && used_at > now - CLAIM_RECOVERY;
+            if recovering
+                && self
+                    .sticks
+                    .lock()
+                    .expect("sticks lock")
+                    .get(stick)
+                    .is_some_and(|(owner, stored)| {
+                        owner == &kept.organization
+                            && stored.retired_at.is_none()
+                            && &stored.token == token
+                    })
+            {
+                return Redemption::Done(kept.enrolled());
+            }
+            return Redemption::Invalid;
+        }
+        if kept.code.expires_at <= now {
+            return Redemption::Invalid;
+        }
+        let mut sticks = self.sticks.lock().expect("sticks lock");
+        if sticks.contains_key(stick) {
+            return Redemption::IdTaken;
+        }
+        kept.used_at = Some(now);
+        kept.claimed_stick_id = recoverable.then(|| stick.clone());
+        let made = Stick {
+            stick_id: stick.clone(),
+            token: token.clone(),
+            credential_scope: kept.code.credential_scope.clone(),
+            retired_at: None,
+            team: kept.code.team.clone(),
+            site: kept.code.site.clone(),
+            contest: kept.code.contest.clone(),
+            machine_number: kept.code.machine_number,
+        };
+        sticks.insert(stick.clone(), (kept.organization.clone(), made));
+        Redemption::Done(kept.enrolled())
     }
 }
 
@@ -1377,7 +1454,8 @@ impl Store for MemoryStore {
             KeptCode {
                 organization: organization.to_owned(),
                 code,
-                used: false,
+                used_at: None,
+                claimed_stick_id: None,
             },
         );
         Ok(())
@@ -1390,36 +1468,17 @@ impl Store for MemoryStore {
         stick: &StickId,
         token: &Token,
     ) -> Result<Redemption, StoreError> {
-        let mut codes = self.enrolment_codes.lock().expect("codes lock");
-        let Some(kept) = codes.get_mut(code_hash) else {
-            return Ok(Redemption::Invalid);
-        };
-        if kept.used || kept.code.expires_at <= now {
-            return Ok(Redemption::Invalid);
-        }
-        let mut sticks = self.sticks.lock().expect("sticks lock");
-        if sticks.contains_key(stick) {
-            return Ok(Redemption::IdTaken);
-        }
-        kept.used = true;
-        let made = Stick {
-            stick_id: stick.clone(),
-            token: token.clone(),
-            credential_scope: kept.code.credential_scope.clone(),
-            retired_at: None,
-            team: kept.code.team.clone(),
-            site: kept.code.site.clone(),
-            contest: kept.code.contest.clone(),
-            machine_number: kept.code.machine_number,
-        };
-        sticks.insert(stick.clone(), (kept.organization.clone(), made));
-        Ok(Redemption::Done(EnrolledStick {
-            organization: kept.organization.clone(),
-            team: kept.code.team.clone(),
-            site: kept.code.site.clone(),
-            contest: kept.code.contest.clone(),
-            machine_number: kept.code.machine_number,
-        }))
+        Ok(self.use_enrolment_code(code_hash, now, stick, token, false))
+    }
+
+    fn claim_enrolment_code(
+        &self,
+        code_hash: &str,
+        now: OffsetDateTime,
+        stick: &StickId,
+        token: &Token,
+    ) -> Result<Redemption, StoreError> {
+        Ok(self.use_enrolment_code(code_hash, now, stick, token, true))
     }
 
     fn delete_enrolment_codes_before(
@@ -1430,7 +1489,12 @@ impl Store for MemoryStore {
         self.enrolment_codes
             .lock()
             .expect("codes lock")
-            .retain(|_, kept| kept.organization != organization || kept.code.created_at >= before);
+            .retain(|_, kept| {
+                kept.organization != organization
+                    || kept.code.created_at >= before
+                    || (kept.claimed_stick_id.is_some()
+                        && kept.used_at.is_some_and(|used| used >= before))
+            });
         Ok(())
     }
 
