@@ -167,6 +167,7 @@ async fn heartbeat(app: &Router, stick: &str, token: &str) -> StatusCode {
             mode: RecordingMode::Low,
             state: RecorderState::Recording,
         },
+        screen_unlock: false,
     })
     .expect("json");
     let request = Request::post("/api/v1/heartbeat")

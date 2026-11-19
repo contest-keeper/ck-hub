@@ -568,12 +568,12 @@ function networkPanel(stick) {
   return box;
 }
 
-// Commands to a stick: Message, Lock and Shutdown for admins and owners, and what became of each
+// Commands to a stick for admins and owners, and what became of each
 // command sent. The text typed and the step the person is at are kept here, because the list is
 // drawn again at every refresh.
 const commandLists = new Map();
 const commandDrafts = new Map();
-const ACTION_NAMES = { message: "Message", lock_screen: "Lock", shutdown: "Shutdown" };
+const ACTION_NAMES = { message: "Message", lock_screen: "Lock", unlock_screen: "Unlock", shutdown: "Shutdown" };
 
 function commandPath(stick) {
   return "/api/v1/orgs/" + encodeURIComponent(org) + "/sticks/" + encodeURIComponent(stick.stick_id) + "/commands";
@@ -630,6 +630,9 @@ function commandText(command) {
 }
 
 function commandState(command) {
+  if (command.action?.type === "unlock_screen" && command.state === "expired") {
+    return command.delivered_at ? "expired without acknowledgement" : "expired before delivery";
+  }
   return command.refusal ? command.state + " (" + command.refusal.replaceAll("_", " ") + ")" : command.state;
 }
 
@@ -639,8 +642,11 @@ function commandPanel(stick) {
   const name = stick.team + " " + (stick.machine_number ?? "");
   const draft = draftOf(stick);
   if (myRole === "owner" || myRole === "admin") {
+    const supportsUnlock = stick.last?.screen_unlock === true;
+    if (!supportsUnlock && draft.action === "unlock_screen") draft.action = null;
     const bar = el("div", "cmd-bar");
     for (const action of Object.keys(ACTION_NAMES)) {
+      if (!supportsUnlock && action === "unlock_screen") continue;
       const button = actionButton(ACTION_NAMES[action], "to " + name, () => {
         draft.action = action;
         draft.note = "";
@@ -666,7 +672,12 @@ function commandPanel(stick) {
         });
         ask.appendChild(input);
       }
-      const what = { message: "Show this message on ", lock_screen: "Lock the screen of ", shutdown: "Shut down " }[draft.action];
+      const what = {
+        message: "Show this message on ",
+        lock_screen: "Lock the screen of ",
+        unlock_screen: "Unlock the screen of ",
+        shutdown: "Shut down ",
+      }[draft.action];
       ask.appendChild(el("p", draft.action === "shutdown" ? "bad" : "", what + name + "?" +
         (draft.action === "shutdown" ? " The contestant loses any unsaved work." : "")));
       var yes = el("button", "btn pri", "Confirm");

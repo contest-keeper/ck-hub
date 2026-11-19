@@ -202,6 +202,7 @@ fn stick(
                     mode: RecordingMode::Low,
                     state: RecorderState::Recording,
                 },
+                screen_unlock: false,
             })
             .expect("json");
             send(
