@@ -1,4 +1,4 @@
-//! Commands the Hub sends to a stick: a message, a screen lock or a shutdown. The data types and
+//! Commands the Hub sends to a stick. The data types and
 //! the signature are in `ck-protocol` and `ck-crypto`. This is the Hub's side: who may send, the
 //! queue, delivery in the heartbeat reply and the ack that closes a command. See
 //! `docs/superpowers/specs/2026-11-18-hub-commands-design.md`.
@@ -149,6 +149,7 @@ pub fn action_type(action: &Action) -> &'static str {
     match action {
         Action::Message { .. } => "message",
         Action::LockScreen => "lock_screen",
+        Action::UnlockScreen => "unlock_screen",
         Action::Shutdown => "shutdown",
         _ => "other",
     }
@@ -193,6 +194,16 @@ impl Hub {
             || scope.is_some_and(|scope| !scope.accepts_at(now, Duration::ZERO))
         {
             return Err(CommandError::NotFound);
+        }
+        if matches!(action, Action::UnlockScreen)
+            && !self
+                .store
+                .last_heartbeat(organization, &id)?
+                .is_some_and(|seen| seen.heartbeat.screen_unlock)
+        {
+            return Err(CommandError::BadRequest(
+                "This stick has not reported support for screen unlock.".to_owned(),
+            ));
         }
         let lifetime = lifetime_seconds.unwrap_or(DEFAULT_LIFETIME_SECONDS);
         if !(MIN_LIFETIME_SECONDS..=MAX_LIFETIME_S).contains(&lifetime) {
@@ -268,9 +279,14 @@ impl Hub {
         &self,
         organization: &str,
         stick: &StickId,
+        screen_unlock: bool,
     ) -> Result<Vec<SignedCommand>, StoreError> {
         let now = (self.clock)();
-        let open = self.store.pending_commands(organization, stick, now)?;
+        let mut open = self.store.pending_commands(organization, stick, now)?;
+        // An older agent would discard the whole reply if it contained an unknown action.
+        if !screen_unlock {
+            open.retain(|command| !matches!(command.signed.command.action, Action::UnlockScreen));
+        }
         let fresh: Vec<String> = open
             .iter()
             .filter(|c| c.state == CommandState::Queued)

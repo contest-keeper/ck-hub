@@ -118,6 +118,8 @@ pub struct LastHeartbeat {
     pub uptime_s: u64,
     pub hostname: String,
     pub image_version: String,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub screen_unlock: bool,
     pub recorder: String,
     /// How many heartbeats were accepted from this stick since the Hub started.
     pub heartbeats: u64,
@@ -259,14 +261,14 @@ impl Hub {
         let result = self.check(stick_header, signature, body);
         let logged = result
             .as_ref()
-            .map(|(seq, _, _)| *seq)
+            .map(|(seq, _, _, _)| *seq)
             .map_err(Clone::clone);
         self.record(&logged, "accepted", "sequence not newer", stick_header);
-        let (seq, organization, id) = result?;
+        let (seq, organization, id, screen_unlock) = result?;
         // A command the Hub cannot read is not worth refusing the heartbeat: the stick would then
         // look offline. It is picked up with the next one.
         let commands = self
-            .commands_for_reply(&organization, &id)
+            .commands_for_reply(&organization, &id, screen_unlock)
             .unwrap_or_default();
         Ok((seq, commands))
     }
@@ -276,7 +278,7 @@ impl Hub {
         stick_header: Option<&str>,
         signature: Option<&str>,
         body: &[u8],
-    ) -> Result<(u64, String, StickId), Rejection> {
+    ) -> Result<(u64, String, StickId, bool), Rejection> {
         let (organization, id, _) =
             self.authenticate(stick_header, signature, body, Duration::ZERO)?;
         self.rate_limit(&id)?;
@@ -302,9 +304,10 @@ impl Hub {
             )));
         }
         let seq = heartbeat.seq;
+        let screen_unlock = heartbeat.screen_unlock;
         self.store
             .record_heartbeat(&organization, heartbeat, (self.clock)())?;
-        Ok((seq, organization, id))
+        Ok((seq, organization, id, screen_unlock))
     }
 
     /// The lock that keeps messages of one stick in order. Another stick may share it; that only
@@ -586,6 +589,7 @@ impl Hub {
                 uptime_s: s.heartbeat.uptime_s,
                 hostname: s.heartbeat.hostname.clone(),
                 image_version: s.heartbeat.image_version.clone(),
+                screen_unlock: s.heartbeat.screen_unlock,
                 recorder: recorder_text(s.heartbeat.recording.state).to_owned(),
                 heartbeats: s.count,
             });

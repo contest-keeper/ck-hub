@@ -25,6 +25,7 @@ const PASSWORD: &str = "correct horse battery";
 struct Setup {
     _dir: TempDir,
     app: Router,
+    hub: Arc<Hub>,
     now: Arc<Mutex<OffsetDateTime>>,
 }
 
@@ -67,9 +68,11 @@ fn setup() -> Setup {
         .expect("an admin");
     hub.add_member("default", "viewer@example.org", Role::Viewer)
         .expect("a viewer");
+    let hub = Arc::new(hub);
     Setup {
         _dir: dir,
-        app: router(Arc::new(hub)),
+        app: router(Arc::clone(&hub)),
+        hub,
         now,
     }
 }
@@ -130,6 +133,16 @@ fn sign(token: &str, body: &[u8]) -> String {
 
 /// A heartbeat from a stick; returns the commands in the reply.
 async fn heartbeat(app: &Router, stick: &str, token: &str, seq: u64) -> Vec<SignedCommand> {
+    heartbeat_with_unlock(app, stick, token, seq, false).await
+}
+
+async fn heartbeat_with_unlock(
+    app: &Router,
+    stick: &str,
+    token: &str,
+    seq: u64,
+    screen_unlock: bool,
+) -> Vec<SignedCommand> {
     let body = serde_json::to_vec(&Heartbeat {
         stick_id: StickId::parse(stick).expect("id"),
         boot_id: "boot-1".to_owned(),
@@ -145,6 +158,7 @@ async fn heartbeat(app: &Router, stick: &str, token: &str, seq: u64) -> Vec<Sign
             mode: RecordingMode::Low,
             state: RecorderState::Recording,
         },
+        screen_unlock,
     })
     .expect("json");
     let request = Request::post("/api/v1/heartbeat")
@@ -187,6 +201,95 @@ async fn ack(app: &Router, stick: &str, token: &str, command_id: &str, result: &
 
 fn message(text: &str) -> Value {
     json!({ "action": { "type": "message", "text": text } })
+}
+
+#[tokio::test]
+async fn unlock_requires_the_right_admin_and_only_reaches_a_capable_stick() {
+    let s = setup();
+    let unlock = json!({ "action": { "type": "unlock_screen" } });
+    let admin = cookie(&s.app, "admin@example.org").await;
+    let viewer = cookie(&s.app, "viewer@example.org").await;
+    assert_eq!(
+        send(&s.app, &viewer, "stick-a", &unlock).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, answer) = send(&s.app, &admin, "stick-a", &unlock).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        answer["error"]
+            .as_str()
+            .expect("error")
+            .contains("has not reported support for screen unlock")
+    );
+    assert_eq!(
+        heartbeat_with_unlock(&s.app, "stick-a", TOKEN_A, 1, true).await,
+        Vec::new()
+    );
+
+    s.hub
+        .create_user("elsewhere@example.org", PASSWORD)
+        .expect("an account");
+    s.hub
+        .create_organization("elsewhere", "Elsewhere", "elsewhere@example.org")
+        .expect("another organization");
+    let other_admin = cookie(&s.app, "elsewhere@example.org").await;
+    let elsewhere = Request::post("/api/v1/orgs/elsewhere/sticks/stick-a/commands")
+        .header("cookie", other_admin)
+        .body(Body::from(unlock.to_string()))
+        .expect("request");
+    assert_eq!(call(&s.app, elsewhere).await.0, StatusCode::NOT_FOUND);
+
+    let (status, queued) = send(&s.app, &admin, "stick-a", &unlock).await;
+    assert_eq!(status, StatusCode::CREATED, "{queued}");
+    let id = queued["id"].as_str().expect("id");
+    assert_eq!(queued["action"]["type"], "unlock_screen");
+    assert_eq!(
+        send(&s.app, &admin, "stick-a", &message("Still works"))
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+
+    // After a downgrade, the old stick can still read normal commands in the reply.
+    let legacy_reply = heartbeat(&s.app, "stick-a", TOKEN_A, 2).await;
+    assert!(
+        matches!(legacy_reply.as_slice(), [one] if matches!(one.command.action, Action::Message { .. }))
+    );
+    let commands = history(&s.app, &viewer, "stick-a").await;
+    let held = commands
+        .as_array()
+        .expect("commands")
+        .iter()
+        .find(|command| command["id"] == id)
+        .expect("Unlock");
+    assert_eq!(held["state"], "queued");
+    assert_eq!(
+        send(&s.app, &admin, "stick-a", &unlock).await.0,
+        StatusCode::BAD_REQUEST
+    );
+
+    let current_reply = heartbeat_with_unlock(&s.app, "stick-a", TOKEN_A, 3, true).await;
+    let delivered = current_reply
+        .iter()
+        .find(|command| command.command.id == id)
+        .expect("Unlock");
+    assert_eq!(
+        serde_json::to_value(&delivered.command.action).expect("action"),
+        unlock["action"]
+    );
+    ck_crypto::verify_command(&Token::new(TOKEN_A), delivered).expect("valid signature");
+    assert_eq!(
+        ack(&s.app, "stick-a", TOKEN_A, id, "ok").await,
+        StatusCode::OK
+    );
+    let history = history(&s.app, &viewer, "stick-a").await;
+    let done = history
+        .as_array()
+        .expect("history")
+        .iter()
+        .find(|command| command["id"] == id)
+        .expect("Unlock");
+    assert_eq!(done["state"], "done");
 }
 
 #[tokio::test]

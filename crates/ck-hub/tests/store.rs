@@ -50,6 +50,7 @@ fn heartbeat(stick: &str, boot: &str, seq: u64) -> Heartbeat {
             mode: RecordingMode::Low,
             state: RecorderState::Recording,
         },
+        screen_unlock: false,
     }
 }
 
@@ -82,8 +83,10 @@ fn the_store_contract(store: &dyn Store) {
     store
         .record_heartbeat(&org, heartbeat(&a, "boot-1", 1), time(1))
         .expect("write");
+    let mut capable = heartbeat(&a, "boot-1", 2);
+    capable.screen_unlock = true;
     store
-        .record_heartbeat(&org, heartbeat(&a, "boot-1", 2), time(2))
+        .record_heartbeat(&org, capable.clone(), time(2))
         .expect("write");
     store
         .record_heartbeat(&org, heartbeat(&b, "boot-9", 7), time(3))
@@ -92,7 +95,7 @@ fn the_store_contract(store: &dyn Store) {
         .last_heartbeat(&org, &a_id)
         .expect("read")
         .expect("a heartbeat");
-    assert_eq!(seen.heartbeat, heartbeat(&a, "boot-1", 2));
+    assert_eq!(seen.heartbeat, capable);
     assert_eq!(seen.received_at, time(2));
     assert_eq!(seen.count, 2);
     let other = store

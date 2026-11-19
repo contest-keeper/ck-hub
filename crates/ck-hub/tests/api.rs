@@ -146,6 +146,7 @@ fn heartbeat_body(stick: &str, boot: &str, seq: u64) -> Vec<u8> {
             mode: RecordingMode::Low,
             state: RecorderState::Recording,
         },
+        screen_unlock: false,
     };
     serde_json::to_vec(&heartbeat).expect("json")
 }
@@ -1239,6 +1240,9 @@ async fn the_page_has_the_command_buttons_with_a_confirm_step() {
         "/commands",
         "Message",
         "Lock",
+        "unlock_screen: \"Unlock\"",
+        "Unlock the screen of ",
+        "stick.last?.screen_unlock === true",
         "Shutdown",
         "Confirm",
         "Cancel",
