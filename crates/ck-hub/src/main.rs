@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ck_hub::{
-    AcsMailer, AzureBlobs, CodeforcesClient, ConsoleMailer, CreateUserError,
+    AcsMailer, AzureBlobs, CodeforcesClient, ConsoleMailer, CreateUserError, DEFAULT_POOL_SIZE,
     DEFAULT_RETENTION_DAYS, Download, Hub, MIN_PASSWORD_LENGTH, Mailer, MemoryStore, NewStick,
     OrganizationError, PasswordCost, PostgresStore, RegisterError, Registry, Role, StorageImages,
     Store, StoreError, add_member, create_organization, create_user, register_sticks, router,
@@ -158,6 +158,9 @@ struct DatabaseArgs {
     /// keeps everything in memory and forgets it when it stops
     #[arg(long, env = "CK_DATABASE_URL", hide_env_values = true)]
     database_url: Option<String>,
+    /// How many database connections the Hub may use at the same time
+    #[arg(long, env = "CK_DATABASE_POOL", default_value_t = DEFAULT_POOL_SIZE)]
+    database_pool: usize,
 }
 
 #[derive(Args)]
@@ -238,8 +241,8 @@ async fn main() -> ExitCode {
 
 /// Connects to the database. The client blocks and starts a runtime of its own, so it must not
 /// connect on a thread that already runs async tasks.
-async fn connect(url: String) -> Result<PostgresStore, String> {
-    tokio::task::spawn_blocking(move || PostgresStore::connect(&url))
+async fn connect(url: String, pool: usize) -> Result<PostgresStore, String> {
+    tokio::task::spawn_blocking(move || PostgresStore::connect_with_pool(&url, pool))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())
@@ -263,7 +266,7 @@ async fn make_user(args: CreateUserArgs) -> Result<(), String> {
         return Err("the two passwords are not the same".to_owned());
     }
 
-    let store = connect(url).await?;
+    let store = connect(url, 1).await?;
     let email = args.email.clone();
     let result = tokio::task::spawn_blocking(move || {
         let result = create_user(
@@ -304,7 +307,7 @@ async fn with_store<T: Send + 'static>(
     let url = database
         .database_url
         .ok_or("this needs a database: pass --database-url or set CK_DATABASE_URL")?;
-    let store = connect(url).await?;
+    let store = connect(url, 1).await?;
     tokio::task::spawn_blocking(move || {
         let result = work(&store);
         // Dropped on this blocking thread, where closing the connection is safe.
@@ -407,7 +410,7 @@ async fn import_registry(args: ImportRegistryArgs) -> Result<(), String> {
     let file: File = serde_json::from_str(&text)
         .map_err(|e| format!("{} is not a registry file: {e}", args.file.display()))?;
 
-    let store = connect(url).await?;
+    let store = connect(url, 1).await?;
     let slug = args.org;
     let result = tokio::task::spawn_blocking(move || {
         let result = match store.organization_by_slug(&slug) {
@@ -498,7 +501,7 @@ async fn run(args: ServeArgs) -> Result<(), String> {
     };
     let has_database = args.database.database_url.is_some();
     let store: Arc<dyn Store> = if let Some(url) = args.database.database_url {
-        let store = Arc::new(connect(url).await?);
+        let store = Arc::new(connect(url, args.database.database_pool).await?);
         // The database client blocks, so it must not run on the threads that serve requests.
         let probe = Arc::clone(&store);
         let applies = tokio::task::spawn_blocking(move || probe.row_security_applies())

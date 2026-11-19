@@ -33,20 +33,31 @@ size given by the owner: **up to 500 sticks**.
   database), so the ceiling is higher, but it is the same single lane and is not measured.
 - Memory is not a concern at 500 sticks (64 MB of 512 MB).
 
-## Recommendation for 500 sticks (not built yet)
+## After the pool and per-stick locks (ck-hub, same test, same machine)
 
-1. **Do not run 500 sticks on the current Hub.** 83 messages per second is about twice what one connection served.
-2. Cheapest fixes, in order:
-   1. A connection pool (for example 8 connections) and take the global `write` lock out of the path: the per-stick
-      sequence check only needs a per-stick guard. Expected effect: roughly the pool size times more throughput
-      until the database is the limit.
-   2. Fewer messages: `heartbeat_s` 30 s and a network event every 20 s for large contests (settings only) halves
-      the load: 500 sticks then offer about 42 messages per second.
-   3. Batch event inserts (one statement per event today) and keep the heartbeat to one statement.
-   4. A non-burstable database tier on contest days. Sampling or summarising network history on the stick
-      (request to lane B) cuts event volume further.
-3. Re-run this test on the Azure develop Hub after 2.1, at 100, 300, 500 sticks for 30 minutes each, and replace the
-   table above with those numbers.
+The Hub now keeps up to 8 database connections (`CK_DATABASE_POOL`, default 8) and orders messages with
+a lock per stick (64 shared locks) instead of one global lock.
+
+| Sticks | Offered load | Heartbeat p50 / p95 / p99 | Event p50 / p95 / p99 | Errors | Hub CPU | Hub memory |
+|---|---|---|---|---|---|---|
+| 300 | 50 msg/s | 24 / 35 / 46 ms | 16 / 24 / 32 ms | 0 | 0.18 core | 17 MB |
+| 500 | 83 msg/s | 25 / 38 / 55 ms | 17 / 28 / 42 ms | 11 (simulator ran out of local ports, not the Hub) | 0.30 core | 14 MB |
+
+Latency at 500 sticks went from 14 s (median) to 25 ms. The limit moved from the single database lane to CPU:
+about 0.30 core at 500 sticks on this PC.
+
+**Open risk for Azure:** the Hub container there has 0.25 vCPU, less than the 0.30 core used here, and a
+`B1ms` burstable database. 500 sticks will probably need a bigger container (0.5 to 1 vCPU) or fewer messages.
+Not measured on Azure yet.
+
+## Next steps
+
+1. Re-run on the Azure develop Hub at 100, 300, 500 sticks for 30 minutes each; replace the tables with those.
+2. If CPU is the limit there: raise the container to 0.5 or 1 vCPU for contest days (`cpu` in ck-infra), or
+   cut messages: `heartbeat_s` 30 and an event every 20 s halves the load; turn down per-message logging.
+3. Cheaper per message: fewer round trips (each call is BEGIN, set_config, query, COMMIT), batched event inserts,
+   and no commands query on a heartbeat when the stick has none waiting.
+4. Sampling or summarising network history on the stick (request to lane B).
 
 ## How to repeat
 

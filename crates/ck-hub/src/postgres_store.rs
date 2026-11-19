@@ -1,6 +1,7 @@
 //! The store on PostgreSQL, so what sticks reported survives a restart of the Hub.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ck_protocol::{CommandAck, Event, Heartbeat, StickId, Token};
 use postgres::Client;
@@ -85,11 +86,18 @@ fn limit_to_hub_role(client: &mut Client) -> Result<(), StoreError> {
         .map_err(failed)
 }
 
+/// How many connections the Hub keeps by default. One connection served about 40 messages a
+/// second (docs/capacity.md); a managed database allows far more than this.
+pub const DEFAULT_POOL_SIZE: usize = 8;
+
 pub struct PostgresStore {
     url: String,
-    /// `None` while the store is being dropped, and after a connection was lost and not yet
-    /// opened again.
-    client: Mutex<Option<Client>>,
+    /// The connections. A slot is `None` before its first use, while the store is being dropped,
+    /// and after a connection was lost and not yet opened again. Each call uses one slot for the
+    /// whole of its transaction, so a call never sees another call's settings.
+    pool: Vec<Mutex<Option<Client>>>,
+    /// Where the next call starts looking for a free slot, so calls spread over the pool.
+    next: AtomicUsize,
 }
 
 /// TLS settings for every connection: the public web roots, no client certificate.
@@ -119,13 +127,22 @@ impl PostgresStore {
     /// roots. A managed database such as Azure Database for PostgreSQL requires it.
     /// `sslmode=disable` keeps the connection plain for a database on the same machine.
     pub fn connect(url: &str) -> Result<Self, StoreError> {
+        Self::connect_with_pool(url, DEFAULT_POOL_SIZE)
+    }
+
+    /// Like [`connect`](Self::connect), with up to `size` connections (at least one). Only the
+    /// first is opened now; the others are opened when calls overlap.
+    pub fn connect_with_pool(url: &str, size: usize) -> Result<Self, StoreError> {
         let mut client = Client::connect(url, tls()).map_err(failed)?;
         // Migrations need the account that logged in; everything after them runs as the Hub role.
         migrate(&mut client)?;
         limit_to_hub_role(&mut client)?;
+        let mut pool = vec![Mutex::new(Some(client))];
+        pool.extend((1..size.max(1)).map(|_| Mutex::new(None)));
         Ok(Self {
             url: url.to_owned(),
-            client: Mutex::new(Some(client)),
+            pool,
+            next: AtomicUsize::new(0),
         })
     }
 
@@ -133,7 +150,12 @@ impl PostgresStore {
         &self,
         query: impl FnOnce(&mut Client) -> Result<T, postgres::Error>,
     ) -> Result<T, StoreError> {
-        let mut slot = self.client.lock().expect("database lock");
+        // Take a free connection if there is one, starting where the last call left off; if all
+        // are busy, wait for the one this call would have started at.
+        let start = self.next.fetch_add(1, Ordering::Relaxed) % self.pool.len();
+        let mut slot = (0..self.pool.len())
+            .find_map(|i| self.pool[(start + i) % self.pool.len()].try_lock().ok())
+            .unwrap_or_else(|| self.pool[start].lock().expect("database lock"));
         // After the database restarted the old connection is closed for good, so open a new one
         // instead of failing every request until the Hub restarts.
         if slot.as_ref().is_none_or(Client::is_closed) {
@@ -182,10 +204,12 @@ impl Drop for PostgresStore {
     /// Closing the connection blocks and starts a runtime of its own, which panics on a thread that
     /// already runs async tasks, such as the Hub's at shutdown. A plain thread does it safely.
     fn drop(&mut self) {
-        if let Ok(slot) = self.client.get_mut()
-            && let Some(client) = slot.take()
-        {
-            let _ = std::thread::spawn(move || drop(client)).join();
+        for slot in &mut self.pool {
+            if let Ok(slot) = slot.get_mut()
+                && let Some(client) = slot.take()
+            {
+                let _ = std::thread::spawn(move || drop(client)).join();
+            }
         }
     }
 }
