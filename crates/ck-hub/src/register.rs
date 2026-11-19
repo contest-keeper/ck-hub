@@ -51,6 +51,11 @@ fn plain_text(text: &str) -> bool {
     text.chars().count() <= MAX_TEXT_LENGTH && !text.chars().any(char::is_control)
 }
 
+pub(crate) fn valid_token(token: &str) -> bool {
+    (MIN_TOKEN_LENGTH..=MAX_TOKEN_LENGTH).contains(&token.chars().count())
+        && !token.chars().any(|c| c.is_control() || c.is_whitespace())
+}
+
 fn check(stick: &NewStick) -> Result<(), String> {
     let id = stick.stick_id.as_str();
     if let Some(scope) = &stick.credential_scope {
@@ -58,12 +63,7 @@ fn check(stick: &NewStick) -> Result<(), String> {
             .validate()
             .map_err(|error| format!("stick {id}: {error}"))?;
     }
-    let token_ok = (MIN_TOKEN_LENGTH..=MAX_TOKEN_LENGTH).contains(&stick.token.chars().count())
-        && !stick
-            .token
-            .chars()
-            .any(|c| c.is_control() || c.is_whitespace());
-    if !token_ok {
+    if !valid_token(&stick.token) {
         return Err(format!(
             "stick {id}: the secret must be {MIN_TOKEN_LENGTH} to {MAX_TOKEN_LENGTH} characters without spaces"
         ));

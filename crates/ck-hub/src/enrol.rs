@@ -1,17 +1,18 @@
 //! One-time enrolment codes: how a new stick gets its own secret without one being written to its
-//! disk first. An admin mints a code for one stick; the stick trades it once at `/api/v1/enrol` for
-//! its id and secret. See `docs/superpowers/specs/2026-11-18-enrolment-code-design.md`.
+//! disk first. A stick can trade the code at `/api/v1/enrol` for a generated credential, or claim
+//! a credential it has already stored at `/api/v1/enrol/claim`.
 //!
-//! The code and the secret are never logged, never in an error and never kept: only a hash of the
-//! code is stored, and neither type has `Debug`.
+//! An enrolment record keeps the hash of the code and, after a claim, the public stick id.
+//! Logs and errors contain neither the code nor the token.
 
-use ck_protocol::StickId;
+use ck_protocol::{StickId, Token};
 use serde::Serialize;
 use time::{Duration, OffsetDateTime};
 
 use crate::accounts::Account;
 use crate::credentials::CredentialScope;
 use crate::hub::Hub;
+use crate::register::valid_token;
 use crate::store::StoreError;
 
 /// A code that is not used by then is worthless.
@@ -28,6 +29,9 @@ pub const MAX_FAILED_PER_MINUTE: u32 = 30;
 
 /// Codes made and used long ago are removed when a new one is made.
 const KEEP_DAYS: i64 = 1;
+
+/// Time after the first claim in which the same proof recovers a lost acknowledgement.
+pub(crate) const CLAIM_RECOVERY: Duration = Duration::hours(1);
 
 const MAX_TEXT_LENGTH: usize = 200;
 
@@ -231,11 +235,7 @@ impl Hub {
     /// [`EnrolError::RateLimited`] when too many attempts failed lately.
     pub fn enrol(&self, code: &str) -> Result<Enrolment, EnrolError> {
         let now = (self.clock)();
-        self.refuse_when_flooded(now)?;
-        let Some(plain) = normalized(code) else {
-            return Err(self.failed_attempt(now));
-        };
-        let hash = hash_of(&plain);
+        let hash = self.hash_for_attempt(code, now)?;
         let token = ck_crypto::generate_stick_token();
         // A taken id is a one in four billion chance; try again a few times before giving up.
         for _ in 0..3 {
@@ -258,6 +258,40 @@ impl Hub {
         Err(EnrolError::Store(StoreError(
             "no free stick id was found".to_owned(),
         )))
+    }
+
+    pub(crate) fn claim_enrolment(
+        &self,
+        code: &str,
+        stick_id: &str,
+        token: String,
+    ) -> Result<StickId, EnrolError> {
+        let now = (self.clock)();
+        let hash = self.hash_for_attempt(code, now)?;
+        let id = StickId::parse(stick_id).map_err(|_| self.failed_attempt(now))?;
+        if !valid_token(&token) {
+            return Err(self.failed_attempt(now));
+        }
+        {
+            let mut registry = self.registry.lock().expect("registry lock");
+            registry.refresh();
+            if registry.find(&id).is_some() {
+                return Err(self.failed_attempt(now));
+            }
+        }
+        match self
+            .store
+            .claim_enrolment_code(&hash, now, &id, &Token::new(token))?
+        {
+            Redemption::Done(_) => Ok(id),
+            Redemption::Invalid | Redemption::IdTaken => Err(self.failed_attempt(now)),
+        }
+    }
+
+    fn hash_for_attempt(&self, code: &str, now: OffsetDateTime) -> Result<String, EnrolError> {
+        self.refuse_when_flooded(now)?;
+        let plain = normalized(code).ok_or_else(|| self.failed_attempt(now))?;
+        Ok(hash_of(&plain))
     }
 
     fn refuse_when_flooded(&self, now: OffsetDateTime) -> Result<(), EnrolError> {

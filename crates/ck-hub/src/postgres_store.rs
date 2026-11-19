@@ -11,7 +11,7 @@ use time::OffsetDateTime;
 use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::commands::{CommandState, StoredCommand, action_type, settled};
-use crate::enrol::{EnrolledStick, NewEnrolmentCode, Redemption};
+use crate::enrol::{CLAIM_RECOVERY, EnrolledStick, NewEnrolmentCode, Redemption};
 use crate::judge::{JudgeSubmission, SubmitEvent, submit_event};
 
 use crate::recordings::{Kind, Recording};
@@ -22,7 +22,7 @@ use crate::store::{
 
 /// The schema, in the order it is applied. A migration that was applied is never run again and
 /// never edited: a change is a new file.
-const MIGRATIONS: [(&str, &str); 16] = [
+const MIGRATIONS: [(&str, &str); 17] = [
     (
         "0001_heartbeats_and_events",
         include_str!("../migrations/0001_heartbeats_and_events.sql"),
@@ -83,6 +83,10 @@ const MIGRATIONS: [(&str, &str); 16] = [
     (
         "0016_retired_stick_credentials",
         include_str!("../migrations/0016_retired_stick_credentials.sql"),
+    ),
+    (
+        "0017_enrolment_claims",
+        include_str!("../migrations/0017_enrolment_claims.sql"),
     ),
 ];
 
@@ -220,6 +224,44 @@ fn mark_retired(
         &[&organization, &id.as_str(), &now],
     )?;
     Ok(found == 1)
+}
+
+fn enrolled_stick(row: &Row) -> EnrolledStick {
+    let machine: Option<i32> = row.get(4);
+    EnrolledStick {
+        organization: row.get(0),
+        team: row.get(1),
+        site: row.get(2),
+        contest: row.get(3),
+        machine_number: machine.and_then(|n| u32::try_from(n).ok()),
+    }
+}
+
+fn recover_enrolment_claim(
+    transaction: &mut postgres::Transaction<'_>,
+    code_hash: &str,
+    now: OffsetDateTime,
+    stick: &StickId,
+    token: &Token,
+) -> Result<Redemption, postgres::Error> {
+    transaction.execute(
+        "SELECT set_config('ck.stick_id', $1, true)",
+        &[&stick.as_str()],
+    )?;
+    let row = transaction.query_opt(
+        "SELECT c.organization_id, c.team, c.site, c.contest, c.machine_number, s.token
+         FROM enrolment_codes c
+         JOIN sticks s ON s.stick_id = c.claimed_stick_id AND s.organization_id = c.organization_id
+         WHERE c.code_hash = $1 AND c.claimed_stick_id = $2
+           AND c.used_at > $3 AND s.retired_at IS NULL",
+        &[&code_hash, &stick.as_str(), &(now - CLAIM_RECOVERY)],
+    )?;
+    Ok(match row {
+        Some(row) if &Token::new(row.get::<_, String>(5)) == token => {
+            Redemption::Done(enrolled_stick(&row))
+        }
+        _ => Redemption::Invalid,
+    })
 }
 
 impl PostgresStore {
@@ -365,6 +407,65 @@ impl PostgresStore {
                 (0, Some(now)) => mark_retired(transaction, organization, &stick.stick_id, now),
                 _ => Ok(added == 1),
             }
+        })
+    }
+
+    fn use_enrolment_code(
+        &self,
+        code_hash: &str,
+        now: OffsetDateTime,
+        stick: &StickId,
+        token: &Token,
+        recoverable: bool,
+    ) -> Result<Redemption, StoreError> {
+        // One transaction: the code is used up and the stick is registered, or neither happens.
+        self.run(|client| {
+            let mut transaction = client.transaction()?;
+            transaction.execute("SELECT set_config('ck.code_hash', $1, true)", &[&code_hash])?;
+            let claimed = recoverable.then_some(stick.as_str());
+            let used = transaction.query_opt(
+                "UPDATE enrolment_codes SET used_at = $2, claimed_stick_id = $3
+                 WHERE code_hash = $1 AND used_at IS NULL AND expires_at > $2
+                 RETURNING organization_id, team, site, contest, machine_number, credential_scope",
+                &[&code_hash, &now, &claimed],
+            )?;
+            let Some(row) = used else {
+                let result = if recoverable {
+                    recover_enrolment_claim(&mut transaction, code_hash, now, stick, token)?
+                } else {
+                    Redemption::Invalid
+                };
+                transaction.commit()?;
+                return Ok(result);
+            };
+            let enrolled = enrolled_stick(&row);
+            let machine: Option<i32> = row.get(4);
+            let scope: Option<serde_json::Value> = row.get(5);
+            transaction.execute(
+                "SELECT set_config('ck.org_id', $1, true)",
+                &[&enrolled.organization],
+            )?;
+            let added = transaction.execute(
+                "INSERT INTO sticks
+                     (organization_id, stick_id, token, team, site, contest, machine_number, credential_scope)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (stick_id) DO NOTHING",
+                &[
+                    &enrolled.organization,
+                    &stick.as_str(),
+                    &token.expose(),
+                    &enrolled.team,
+                    &enrolled.site,
+                    &enrolled.contest,
+                    &machine,
+                    &scope,
+                ],
+            )?;
+            if added == 0 {
+                transaction.rollback()?;
+                return Ok(Redemption::IdTaken);
+            }
+            transaction.commit()?;
+            Ok(Redemption::Done(enrolled))
         })
     }
 }
@@ -1408,55 +1509,17 @@ impl Store for PostgresStore {
         stick: &StickId,
         token: &Token,
     ) -> Result<Redemption, StoreError> {
-        // One transaction: the code is used up and the stick is registered, or neither happens.
-        // Row-level security lets this read and change exactly the one code it names.
-        self.run(|client| {
-            let mut transaction = client.transaction()?;
-            transaction.execute("SELECT set_config('ck.code_hash', $1, true)", &[&code_hash])?;
-            let used = transaction.query_opt(
-                "UPDATE enrolment_codes SET used_at = $2
-                 WHERE code_hash = $1 AND used_at IS NULL AND expires_at > $2
-                 RETURNING organization_id, team, site, contest, machine_number, credential_scope",
-                &[&code_hash, &now],
-            )?;
-            let Some(row) = used else {
-                transaction.commit()?;
-                return Ok(Redemption::Invalid);
-            };
-            let organization: String = row.get(0);
-            let machine: Option<i32> = row.get(4);
-            let scope: Option<serde_json::Value> = row.get(5);
-            transaction.execute("SELECT set_config('ck.org_id', $1, true)", &[&organization])?;
-            let (team, site, contest): (String, String, String) =
-                (row.get(1), row.get(2), row.get(3));
-            let added = transaction.execute(
-                "INSERT INTO sticks
-                     (organization_id, stick_id, token, team, site, contest, machine_number, credential_scope)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (stick_id) DO NOTHING",
-                &[
-                    &organization,
-                    &stick.as_str(),
-                    &token.expose(),
-                    &team,
-                    &site,
-                    &contest,
-                    &machine,
-                    &scope,
-                ],
-            )?;
-            if added == 0 {
-                transaction.rollback()?;
-                return Ok(Redemption::IdTaken);
-            }
-            transaction.commit()?;
-            Ok(Redemption::Done(EnrolledStick {
-                organization,
-                team,
-                site,
-                contest,
-                machine_number: machine.and_then(|n| u32::try_from(n).ok()),
-            }))
-        })
+        self.use_enrolment_code(code_hash, now, stick, token, false)
+    }
+
+    fn claim_enrolment_code(
+        &self,
+        code_hash: &str,
+        now: OffsetDateTime,
+        stick: &StickId,
+        token: &Token,
+    ) -> Result<Redemption, StoreError> {
+        self.use_enrolment_code(code_hash, now, stick, token, true)
     }
 
     fn delete_enrolment_codes_before(
@@ -1466,7 +1529,8 @@ impl Store for PostgresStore {
     ) -> Result<(), StoreError> {
         self.in_org(organization, |transaction| {
             transaction.execute(
-                "DELETE FROM enrolment_codes WHERE organization_id = $1 AND created_at < $2",
+                "DELETE FROM enrolment_codes WHERE organization_id = $1 AND created_at < $2
+                   AND (claimed_stick_id IS NULL OR used_at < $2)",
                 &[&organization, &before],
             )
         })
