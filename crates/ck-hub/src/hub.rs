@@ -31,6 +31,9 @@ pub const ONLINE_WINDOW_SECONDS: i64 = 60;
 /// stops a stick with a leaked secret from filling the database.
 const MAX_MESSAGES_PER_MINUTE: u32 = 120;
 
+/// How many locks the sticks share to keep their own messages in order.
+const WRITE_LOCKS: usize = 64;
+
 /// Why a heartbeat was not accepted. The caller turns this into an HTTP answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rejection {
@@ -115,9 +118,10 @@ pub struct Hub {
     pub(crate) registry: Mutex<Registry>,
     pub(crate) store: Arc<dyn Store>,
     pub(crate) accounts: Accounts,
-    /// One message at a time is read, judged and kept, so two heartbeats of one stick cannot both
-    /// pass the sequence check.
-    write: Mutex<()>,
+    /// One message of a stick at a time is read, judged and kept, so two heartbeats of one stick
+    /// cannot both pass the sequence check. Sticks share a fixed set of locks by their id, so
+    /// different sticks are almost never held up by each other.
+    write: Vec<Mutex<()>>,
     /// Per stick: when the current minute started and how many messages it has seen.
     rates: Mutex<HashMap<StickId, (OffsetDateTime, u32)>>,
     /// Per user: when the current minute of commands started and how many they sent in it.
@@ -171,7 +175,7 @@ impl Hub {
             registry: Mutex::new(registry),
             store,
             accounts: Accounts::new(PasswordCost::default()),
-            write: Mutex::new(()),
+            write: (0..WRITE_LOCKS).map(|_| Mutex::new(())).collect(),
             rates: Mutex::new(HashMap::new()),
             command_rates: Mutex::new(HashMap::new()),
             enrol_mints: Mutex::new(HashMap::new()),
@@ -270,7 +274,7 @@ impl Hub {
         }
         storable(body, heartbeat.seq)?;
 
-        let _one_at_a_time = self.write.lock().expect("write lock");
+        let _one_at_a_time = self.write_lock(&id);
         // The sequence starts again at every boot, so only a message of the same boot is compared.
         // The highest one of each boot is kept, so an old boot cannot be replayed after a newer
         // one.
@@ -288,6 +292,15 @@ impl Hub {
         self.store
             .record_heartbeat(&organization, heartbeat, (self.clock)())?;
         Ok((seq, organization, id))
+    }
+
+    /// The lock that keeps messages of one stick in order. Another stick may share it; that only
+    /// makes it wait, never fail.
+    fn write_lock(&self, id: &StickId) -> std::sync::MutexGuard<'_, ()> {
+        use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
+        let hash = BuildHasherDefault::<DefaultHasher>::default().hash_one(id.as_str());
+        let at = usize::try_from(hash % self.write.len() as u64).unwrap_or(0);
+        self.write[at].lock().expect("write lock")
     }
 
     /// Counts a message of `id` in the current minute and refuses it past the limit.
@@ -381,7 +394,7 @@ impl Hub {
         }
         storable(body, event.seq)?;
 
-        let _one_at_a_time = self.write.lock().expect("write lock");
+        let _one_at_a_time = self.write_lock(&id);
         let last_of_boot = self
             .store
             .last_event_of_boot(&organization, &id, &event.boot_id)?;
