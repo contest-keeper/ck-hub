@@ -119,6 +119,37 @@ async fn enrol(app: &Router, code: &str) -> (StatusCode, Value) {
     call(app, request).await
 }
 
+#[tokio::test]
+async fn a_redeemed_key_keeps_its_contest_window() {
+    let setup = setup();
+    let admin = cookie(&setup.app, "admin@example.org").await;
+    let created = *setup.now.lock().expect("clock");
+    let valid_from = created + Duration::minutes(5);
+    let valid_until = created + Duration::minutes(10);
+    let scope = json!({
+        "contest_id": "2042",
+        "valid_from": valid_from.format(&time::format_description::well_known::Rfc3339).expect("time"),
+        "valid_until": valid_until.format(&time::format_description::well_known::Rfc3339).expect("time")
+    });
+    let (status, minted) = mint(&setup.app, &admin, &json!({"credential_scope": scope})).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, enrolled) = enrol(&setup.app, minted["code"].as_str().expect("code")).await;
+    assert_eq!(status, StatusCode::OK);
+    let stick = enrolled["stick_id"].as_str().expect("stick ID");
+    let token = enrolled["token"].as_str().expect("token");
+    assert_eq!(
+        heartbeat(&setup.app, stick, token).await,
+        StatusCode::UNAUTHORIZED
+    );
+    *setup.now.lock().expect("clock") = valid_from;
+    assert_eq!(heartbeat(&setup.app, stick, token).await, StatusCode::OK);
+    *setup.now.lock().expect("clock") = valid_until;
+    assert_eq!(
+        heartbeat(&setup.app, stick, token).await,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
 /// A heartbeat signed with `token`; returns the status.
 async fn heartbeat(app: &Router, stick: &str, token: &str) -> StatusCode {
     let body = serde_json::to_vec(&Heartbeat {

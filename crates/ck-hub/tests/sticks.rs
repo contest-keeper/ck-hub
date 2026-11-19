@@ -104,20 +104,117 @@ fn stick(id: &str, token: &str) -> Value {
             "contest": "Spring", "machine_number": 3 })
 }
 
-async fn heartbeat_status(app: &Router, id: &str, token: &str) -> StatusCode {
-    let body = serde_json::to_vec(&json!({
+#[tokio::test]
+async fn an_expired_credential_cannot_report_or_be_extended_with_the_same_key() {
+    let setup = setup();
+    let admin = cookie_for(&setup.app, "ana@example.org").await;
+    let mut expired = stick("stick-1", TOKEN);
+    expired["credential_scope"] = json!({
+        "contest_id": "2042", "valid_from": "2000-01-01T00:00:00Z",
+        "valid_until": "2000-01-02T00:00:00Z"
+    });
+    assert_eq!(
+        register(&setup.app, Some(&admin), &expired).await.1["added"],
+        1
+    );
+    assert_eq!(
+        heartbeat_status(&setup.app, "stick-1", TOKEN).await,
+        StatusCode::UNAUTHORIZED
+    );
+
+    expired["credential_scope"]["valid_until"] = json!("2099-01-01T00:00:00Z");
+    let (_, changed) = register(&setup.app, Some(&admin), &expired).await;
+    assert_eq!(changed["conflicts"], json!(["stick-1"]));
+    assert_eq!(
+        heartbeat_status(&setup.app, "stick-1", TOKEN).await,
+        StatusCode::UNAUTHORIZED
+    );
+    let mut fresh = stick("stick-2", "a-different-secret-for-the-next-contest");
+    fresh["credential_scope"] = json!({
+        "contest_id": "2043", "valid_from": "2001-01-01T00:00:00Z",
+        "valid_until": "2099-01-01T00:00:00Z"
+    });
+    assert_eq!(
+        register(&setup.app, Some(&admin), &fresh).await.1["added"],
+        1
+    );
+    assert_eq!(
+        heartbeat_status(&setup.app, "stick-2", TOKEN).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        heartbeat_status(
+            &setup.app,
+            "stick-2",
+            fresh["token"].as_str().expect("fixture token")
+        )
+        .await,
+        StatusCode::OK
+    );
+}
+
+fn heartbeat_body(id: &str) -> Value {
+    json!({
         "stick_id": id, "boot_id": "b", "seq": 1, "sent_at": "2026-11-13T10:00:00Z", "uptime_s": 5,
         "hostname": "h", "image_version": "v", "config_sha256": "0".repeat(64), "team": "t",
         "site": "s", "recording": { "mode": "low", "state": "recording" }
-    }))
-    .expect("json");
+    })
+}
+
+async fn heartbeat_status(app: &Router, id: &str, token: &str) -> StatusCode {
+    signed_report(app, "/api/v1/heartbeat", id, token, &heartbeat_body(id)).await
+}
+
+async fn signed_report(
+    app: &Router,
+    path: &str,
+    id: &str,
+    token: &str,
+    report: &Value,
+) -> StatusCode {
+    let body = serde_json::to_vec(report).expect("json");
     let signature = ck_crypto::sign(&ck_protocol::Token::new(token), &body);
-    let request = Request::post("/api/v1/heartbeat")
+    let request = Request::post(path)
         .header("X-CK-Stick", id)
         .header("X-CK-Signature", signature)
         .body(Body::from(body))
         .expect("request");
     call(app, request).await.0
+}
+
+#[tokio::test]
+async fn a_scoped_registry_credential_refuses_signed_assertions_for_another_contest() {
+    let id = "scoped-stick";
+    let mut scoped = stick(id, TOKEN);
+    scoped["credential_scope"] = json!({
+        "contest_id": "2042", "valid_from": "2001-01-01T00:00:00Z",
+        "valid_until": "2099-01-01T00:00:00Z"
+    });
+    let setup = setup_with_registry(&json!({"sticks": [scoped]}).to_string());
+    let mut heartbeat = heartbeat_body(id);
+    heartbeat["contest_id"] = json!(1337);
+    assert_eq!(
+        signed_report(&setup.app, "/api/v1/heartbeat", id, TOKEN, &heartbeat).await,
+        StatusCode::UNAUTHORIZED
+    );
+    heartbeat["contest_id"] = json!(2042);
+    assert_eq!(
+        signed_report(&setup.app, "/api/v1/heartbeat", id, TOKEN, &heartbeat).await,
+        StatusCode::OK
+    );
+
+    let mut event = json!({"stick_id": id, "boot_id": "b", "seq": 1,
+        "prev_hash": "", "sent_at": "2026-11-13T10:00:00Z", "kind": "submission",
+        "payload": {"platform": "codeforces", "contest_id": "1337"}});
+    assert_eq!(
+        signed_report(&setup.app, "/api/v1/events", id, TOKEN, &event).await,
+        StatusCode::UNAUTHORIZED
+    );
+    event["payload"]["contest_id"] = json!("2042");
+    assert_eq!(
+        signed_report(&setup.app, "/api/v1/events", id, TOKEN, &event).await,
+        StatusCode::OK
+    );
 }
 
 async fn list(app: &Router) -> Vec<Value> {

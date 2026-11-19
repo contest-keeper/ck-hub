@@ -793,6 +793,8 @@ struct MintBody {
     machine_number: Option<u32>,
     #[serde(default)]
     lifetime_minutes: Option<i64>,
+    #[serde(default)]
+    credential_scope: Option<crate::CredentialScope>,
 }
 
 /// Only an admin or an owner may make an enrolment code.
@@ -855,6 +857,7 @@ async fn mint(hub: Arc<Hub>, access: Access, body: Bytes) -> Response {
                 contest: spec.contest,
                 machine_number: spec.machine_number,
                 lifetime_minutes: spec.lifetime_minutes,
+                credential_scope: spec.credential_scope,
             },
         )
     })

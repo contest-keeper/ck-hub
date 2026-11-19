@@ -81,6 +81,8 @@ pub struct Stick {
     pub stick_id: StickId,
     pub token: Token,
     #[serde(default)]
+    pub credential_scope: Option<crate::CredentialScope>,
+    #[serde(default)]
     pub team: String,
     #[serde(default)]
     pub site: String,
@@ -1368,6 +1370,7 @@ impl Store for MemoryStore {
         let made = Stick {
             stick_id: stick.clone(),
             token: token.clone(),
+            credential_scope: kept.code.credential_scope.clone(),
             team: kept.code.team.clone(),
             site: kept.code.site.clone(),
             contest: kept.code.contest.clone(),

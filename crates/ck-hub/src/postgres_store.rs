@@ -22,7 +22,7 @@ use crate::store::{
 
 /// The schema, in the order it is applied. A migration that was applied is never run again and
 /// never edited: a change is a new file.
-const MIGRATIONS: [(&str, &str); 14] = [
+const MIGRATIONS: [(&str, &str); 15] = [
     (
         "0001_heartbeats_and_events",
         include_str!("../migrations/0001_heartbeats_and_events.sql"),
@@ -75,6 +75,10 @@ const MIGRATIONS: [(&str, &str); 14] = [
     (
         "0014_recordings",
         include_str!("../migrations/0014_recordings.sql"),
+    ),
+    (
+        "0015_credential_scopes",
+        include_str!("../migrations/0015_credential_scopes.sql"),
     ),
 ];
 
@@ -1000,6 +1004,12 @@ impl Store for PostgresStore {
     }
 
     fn add_stick(&self, organization: &str, stick: Stick) -> Result<bool, StoreError> {
+        let scope = stick
+            .credential_scope
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(failed)?;
         let machine = stick
             .machine_number
             .map(i32::try_from)
@@ -1010,8 +1020,8 @@ impl Store for PostgresStore {
         let added = self.in_org(organization, |transaction| {
             transaction.execute(
                 "INSERT INTO sticks
-                     (organization_id, stick_id, token, team, site, contest, machine_number)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (stick_id) DO NOTHING",
+                     (organization_id, stick_id, token, team, site, contest, machine_number, credential_scope)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (stick_id) DO NOTHING",
                 &[
                     &organization,
                     &stick.stick_id.as_str(),
@@ -1020,6 +1030,7 @@ impl Store for PostgresStore {
                     &stick.site,
                     &stick.contest,
                     &machine,
+                    &scope,
                 ],
             )
         })?;
@@ -1036,7 +1047,7 @@ impl Store for PostgresStore {
                 &[&id.as_str()],
             )?;
             let row = transaction.query_opt(
-                "SELECT stick_id, token, team, site, contest, machine_number, organization_id
+                "SELECT stick_id, token, team, site, contest, machine_number, organization_id, credential_scope
                  FROM sticks WHERE stick_id = $1",
                 &[&id.as_str()],
             )?;
@@ -1051,7 +1062,7 @@ impl Store for PostgresStore {
     fn sticks(&self, organization: &str) -> Result<Vec<Stick>, StoreError> {
         let rows = self.in_org(organization, |transaction| {
             transaction.query(
-                "SELECT stick_id, token, team, site, contest, machine_number FROM sticks
+                "SELECT stick_id, token, team, site, contest, machine_number, credential_scope FROM sticks
                  WHERE organization_id = $1",
                 &[&organization],
             )
@@ -1305,6 +1316,12 @@ impl Store for PostgresStore {
         organization: &str,
         code: NewEnrolmentCode,
     ) -> Result<(), StoreError> {
+        let scope = code
+            .credential_scope
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(failed)?;
         let machine = code
             .machine_number
             .map(i32::try_from)
@@ -1314,8 +1331,8 @@ impl Store for PostgresStore {
             transaction.execute(
                 "INSERT INTO enrolment_codes
                      (code_hash, organization_id, created_by_user_id, team, site, contest,
-                      machine_number, created_at, expires_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                      machine_number, created_at, expires_at, credential_scope)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                 &[
                     &code.code_hash,
                     &organization,
@@ -1326,6 +1343,7 @@ impl Store for PostgresStore {
                     &machine,
                     &code.created_at,
                     &code.expires_at,
+                    &scope,
                 ],
             )
         })
@@ -1347,7 +1365,7 @@ impl Store for PostgresStore {
             let used = transaction.query_opt(
                 "UPDATE enrolment_codes SET used_at = $2
                  WHERE code_hash = $1 AND used_at IS NULL AND expires_at > $2
-                 RETURNING organization_id, team, site, contest, machine_number",
+                 RETURNING organization_id, team, site, contest, machine_number, credential_scope",
                 &[&code_hash, &now],
             )?;
             let Some(row) = used else {
@@ -1356,13 +1374,14 @@ impl Store for PostgresStore {
             };
             let organization: String = row.get(0);
             let machine: Option<i32> = row.get(4);
+            let scope: Option<serde_json::Value> = row.get(5);
             transaction.execute("SELECT set_config('ck.org_id', $1, true)", &[&organization])?;
             let (team, site, contest): (String, String, String) =
                 (row.get(1), row.get(2), row.get(3));
             let added = transaction.execute(
                 "INSERT INTO sticks
-                     (organization_id, stick_id, token, team, site, contest, machine_number)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (stick_id) DO NOTHING",
+                     (organization_id, stick_id, token, team, site, contest, machine_number, credential_scope)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (stick_id) DO NOTHING",
                 &[
                     &organization,
                     &stick.as_str(),
@@ -1371,6 +1390,7 @@ impl Store for PostgresStore {
                     &site,
                     &contest,
                     &machine,
+                    &scope,
                 ],
             )?;
             if added == 0 {
@@ -1596,9 +1616,18 @@ fn stick_from(row: &Row) -> Result<Stick, StoreError> {
     let id: String = row.get(0);
     let token: String = row.get(1);
     let machine: Option<i32> = row.get(5);
+    let scope: Option<serde_json::Value> = row.get("credential_scope");
+    let credential_scope: Option<crate::CredentialScope> = scope
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(failed)?;
+    if let Some(scope) = &credential_scope {
+        scope.validate().map_err(failed)?;
+    }
     Ok(Stick {
         stick_id: StickId::parse(&id).map_err(failed)?,
         token: Token::new(token),
+        credential_scope,
         team: row.get(2),
         site: row.get(3),
         contest: row.get(4),

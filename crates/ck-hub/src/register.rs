@@ -5,6 +5,7 @@
 use ck_protocol::{StickId, Token};
 use serde::Deserialize;
 
+use crate::credentials::CredentialScope;
 use crate::hub::Hub;
 use crate::store::{Stick, Store};
 
@@ -18,6 +19,8 @@ const MAX_TEXT_LENGTH: usize = 200;
 pub struct NewStick {
     pub stick_id: StickId,
     pub token: String,
+    #[serde(default)]
+    pub credential_scope: Option<CredentialScope>,
     #[serde(default)]
     pub team: String,
     #[serde(default)]
@@ -50,6 +53,11 @@ fn plain_text(text: &str) -> bool {
 
 fn check(stick: &NewStick) -> Result<(), String> {
     let id = stick.stick_id.as_str();
+    if let Some(scope) = &stick.credential_scope {
+        scope
+            .validate()
+            .map_err(|error| format!("stick {id}: {error}"))?;
+    }
     let token_ok = (MIN_TOKEN_LENGTH..=MAX_TOKEN_LENGTH).contains(&stick.token.chars().count())
         && !stick
             .token
@@ -78,16 +86,18 @@ fn check(stick: &NewStick) -> Result<(), String> {
     Ok(())
 }
 
-/// Registers `sticks` in the organization. `in_file` names the organization and the secret of a
-/// stick the registry file already has.
-///
-/// Every stick is checked before any is written. A stick that is already known with the same
-/// secret is left alone, so sending the same registry twice is safe; one known with a different
-/// secret is reported and left alone, never overwritten.
+type KnownKey = (String, Token, Option<CredentialScope>);
+
+fn known_key((owner, stick): (String, Stick)) -> KnownKey {
+    (owner, stick.token, stick.credential_scope)
+}
+
+/// Registers the sticks in the organization after validating the whole batch.
+/// A known ID keeps its original secret and scope.
 pub fn register_sticks(
     store: &dyn Store,
     organization: &str,
-    in_file: &dyn Fn(&StickId) -> Option<(String, Token)>,
+    in_file: &dyn Fn(&StickId) -> Option<KnownKey>,
     sticks: Vec<NewStick>,
 ) -> Result<Registered, RegisterError> {
     for stick in &sticks {
@@ -105,31 +115,38 @@ pub fn register_sticks(
             None => store
                 .stick(&new.stick_id)
                 .map_err(unavailable)?
-                .map(|(owner, stick)| (owner, stick.token)),
+                .map(known_key),
         };
-        if let Some((owner, known)) = known {
-            // An id that belongs to another organization is reported like a different secret, so
-            // nothing tells this organization which ids exist elsewhere.
-            if owner == organization && known == token {
-                result.already_known += 1;
-            } else {
-                result.conflicts.push(new.stick_id.to_string());
-            }
-            continue;
-        }
-        let stick = Stick {
-            stick_id: new.stick_id,
-            token,
-            team: new.team,
-            site: new.site,
-            contest: new.contest,
-            machine_number: new.machine_number,
-        };
-        if store.add_stick(organization, stick).map_err(unavailable)? {
-            result.added += 1;
+        let known = if let Some(known) = known {
+            Some(known)
         } else {
-            // Another request registered it between the check and the write.
+            let stick = Stick {
+                stick_id: new.stick_id.clone(),
+                token: token.clone(),
+                credential_scope: new.credential_scope.clone(),
+                team: new.team,
+                site: new.site,
+                contest: new.contest,
+                machine_number: new.machine_number,
+            };
+            if store.add_stick(organization, stick).map_err(unavailable)? {
+                result.added += 1;
+                continue;
+            }
+            store
+                .stick(&new.stick_id)
+                .map_err(unavailable)?
+                .map(known_key)
+        };
+        // A legacy retry may omit the scope. The stored assignment is never extended or replaced.
+        if known.is_some_and(|(owner, known, scope)| {
+            owner == organization
+                && known == token
+                && (new.credential_scope.is_none() || scope == new.credential_scope)
+        }) {
             result.already_known += 1;
+        } else {
+            result.conflicts.push(new.stick_id.to_string());
         }
     }
     Ok(result)
@@ -151,9 +168,13 @@ impl Hub {
             self.store.as_ref(),
             organization,
             &|id| {
-                registry
-                    .find(id)
-                    .map(|stick| (file_organization.clone(), stick.token.clone()))
+                registry.find(id).map(|stick| {
+                    (
+                        file_organization.clone(),
+                        stick.token.clone(),
+                        stick.credential_scope.clone(),
+                    )
+                })
             },
             sticks,
         )

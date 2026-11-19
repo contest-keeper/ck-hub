@@ -8,12 +8,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 use ck_protocol::{
     Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, SignedCommand, StickId, Token,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
 
 use crate::accounts::{Accounts, PasswordCost};
 use crate::codeforces::Judge;
+use crate::credentials::CredentialScope;
 use crate::download::Download;
 use crate::images::ImageSource;
 use crate::judge::JudgeSubmission;
@@ -26,6 +27,11 @@ use crate::submissions::{self, SubmissionsView};
 
 /// A stick that has sent nothing for longer than this is shown as offline.
 pub const ONLINE_WINDOW_SECONDS: i64 = 60;
+
+#[derive(Deserialize)]
+struct ContestAssertion {
+    contest_id: Option<serde_json::Value>,
+}
 
 /// A stick sends a heartbeat every few seconds and a few events; this leaves room for a burst and
 /// stops a stick with a leaked secret from filling the database.
@@ -265,7 +271,8 @@ impl Hub {
         signature: Option<&str>,
         body: &[u8],
     ) -> Result<(u64, String, StickId), Rejection> {
-        let (organization, id) = self.authenticate(stick_header, signature, body)?;
+        let (organization, id, _) =
+            self.authenticate(stick_header, signature, body, Duration::ZERO)?;
         self.rate_limit(&id)?;
         let heartbeat: Heartbeat = serde_json::from_slice(body)
             .map_err(|_| Rejection::BadRequest("the heartbeat cannot be read"))?;
@@ -325,36 +332,56 @@ impl Hub {
         stick_header: Option<&str>,
         signature: Option<&str>,
         body: &[u8],
-    ) -> Result<(String, StickId), Rejection> {
+        grace: Duration,
+    ) -> Result<(String, StickId, Option<CredentialScope>), Rejection> {
         let (Some(stick_header), Some(signature)) = (stick_header, signature) else {
             return Err(Rejection::BadRequest("a header is missing"));
         };
         let id = StickId::parse(stick_header)
             .map_err(|_| Rejection::BadRequest("the stick header is not a stick id"))?;
-        let Some((organization, token)) = self.stick_secret(&id)? else {
+        let received_at = (self.clock)();
+        let Some((organization, token, scope)) = self.stick_secret(&id)? else {
             return Err(Rejection::Unauthorized);
         };
         if !ck_crypto::verify(&token, body, signature) {
             return Err(Rejection::Unauthorized);
         }
-        Ok((organization, id))
+        if let Some(scope) = &scope {
+            if !scope.accepts_at(received_at, grace) {
+                return Err(Rejection::Unauthorized);
+            }
+            // Recording chunks, status and completion sign fixed text, with no contest claim.
+            if body.trim_ascii_start().starts_with(b"{") {
+                let claim: ContestAssertion = serde_json::from_slice(body)
+                    .map_err(|_| Rejection::BadRequest("the contest identity cannot be read"))?;
+                if !scope.agrees_with(claim.contest_id.as_ref()) {
+                    return Err(Rejection::Unauthorized);
+                }
+            }
+        }
+        Ok((organization, id, scope))
     }
 
     /// The organization a stick belongs to and its secret, if the Hub knows the stick. A stick is
     /// known from the registry file or from the database, whichever has it. The registry file's
     /// sticks belong to the default organization.
-    pub(crate) fn stick_secret(&self, id: &StickId) -> Result<Option<(String, Token)>, StoreError> {
+    pub(crate) fn stick_secret(
+        &self,
+        id: &StickId,
+    ) -> Result<Option<(String, Token, Option<CredentialScope>)>, StoreError> {
         let from_file = {
             let mut registry = self.registry.lock().expect("registry lock");
             registry.refresh();
-            registry.find(id).map(|entry| entry.token.clone())
+            registry
+                .find(id)
+                .map(|entry| (entry.token.clone(), entry.credential_scope.clone()))
         };
         Ok(match from_file {
-            Some(token) => Some((self.default_org_id()?, token)),
+            Some((token, scope)) => Some((self.default_org_id()?, token, scope)),
             None => self
                 .store
                 .stick(id)?
-                .map(|(organization, stick)| (organization, stick.token)),
+                .map(|(organization, stick)| (organization, stick.token, stick.credential_scope)),
         })
     }
 
@@ -385,12 +412,16 @@ impl Hub {
         signature: Option<&str>,
         body: &[u8],
     ) -> Result<u64, Rejection> {
-        let (organization, id) = self.authenticate(stick_header, signature, body)?;
+        let (organization, id, scope) =
+            self.authenticate(stick_header, signature, body, Duration::ZERO)?;
         self.rate_limit(&id)?;
         let event: Event = serde_json::from_slice(body)
             .map_err(|_| Rejection::BadRequest("the event cannot be read"))?;
         if event.stick_id != id {
             return Err(Rejection::BadRequest("the event is for another stick"));
+        }
+        if scope.is_some_and(|scope| !scope.agrees_with(event.payload.get("contest_id"))) {
+            return Err(Rejection::Unauthorized);
         }
         storable(body, event.seq)?;
 

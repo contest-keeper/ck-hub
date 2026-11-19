@@ -10,6 +10,7 @@ use serde::Serialize;
 use time::{Duration, OffsetDateTime};
 
 use crate::accounts::Account;
+use crate::credentials::CredentialScope;
 use crate::hub::Hub;
 use crate::store::StoreError;
 
@@ -45,6 +46,7 @@ pub struct NewEnrolmentCode {
     pub machine_number: Option<u32>,
     pub created_at: OffsetDateTime,
     pub expires_at: OffsetDateTime,
+    pub credential_scope: Option<CredentialScope>,
 }
 
 /// What the Hub knows about the stick a code was made for.
@@ -94,6 +96,7 @@ pub struct EnrolmentSpec {
     pub contest: String,
     pub machine_number: Option<u32>,
     pub lifetime_minutes: Option<i64>,
+    pub credential_scope: Option<CredentialScope>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -167,6 +170,11 @@ impl Hub {
         creator: &Account,
         spec: EnrolmentSpec,
     ) -> Result<MintedCode, EnrolError> {
+        if let Some(scope) = &spec.credential_scope {
+            scope
+                .validate()
+                .map_err(|error| EnrolError::BadRequest(error.to_owned()))?;
+        }
         if ![&spec.team, &spec.site, &spec.contest]
             .iter()
             .all(|text| plain_text(text))
@@ -204,6 +212,7 @@ impl Hub {
                 machine_number: spec.machine_number,
                 created_at: now,
                 expires_at,
+                credential_scope: spec.credential_scope,
             },
         )?;
         self.store

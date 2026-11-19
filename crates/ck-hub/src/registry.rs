@@ -83,7 +83,15 @@ impl Registry {
             return;
         }
         match read(&self.path) {
-            Ok((version, sticks)) => {
+            Ok((version, mut sticks)) => {
+                for (id, old) in &self.sticks {
+                    if let Some(new) = sticks.get_mut(id)
+                        && (old.credential_scope.is_some() || new.credential_scope.is_some())
+                        && (old.token != new.token || old.credential_scope != new.credential_scope)
+                    {
+                        *new = old.clone();
+                    }
+                }
                 self.version = version;
                 self.sticks = sticks;
             }
@@ -121,9 +129,20 @@ fn read(path: &PathBuf) -> Result<(Version, HashMap<StickId, Stick>), RegistryEr
         source,
     })?;
     let file: File = serde_json::from_slice(&bytes).map_err(|source| RegistryError::Json {
-        path: shown,
+        path: shown.clone(),
         source,
     })?;
+    for entry in &file.sticks {
+        if let Some(scope) = &entry.credential_scope {
+            scope.validate().map_err(|error| RegistryError::Json {
+                path: shown.clone(),
+                source: serde_json::Error::io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    error,
+                )),
+            })?;
+        }
+    }
     let sticks = file
         .sticks
         .into_iter()
