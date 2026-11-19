@@ -22,7 +22,7 @@ use crate::store::{
 
 /// The schema, in the order it is applied. A migration that was applied is never run again and
 /// never edited: a change is a new file.
-const MIGRATIONS: [(&str, &str); 15] = [
+const MIGRATIONS: [(&str, &str); 16] = [
     (
         "0001_heartbeats_and_events",
         include_str!("../migrations/0001_heartbeats_and_events.sql"),
@@ -79,6 +79,10 @@ const MIGRATIONS: [(&str, &str); 15] = [
     (
         "0015_credential_scopes",
         include_str!("../migrations/0015_credential_scopes.sql"),
+    ),
+    (
+        "0016_retired_stick_credentials",
+        include_str!("../migrations/0016_retired_stick_credentials.sql"),
     ),
 ];
 
@@ -204,6 +208,20 @@ fn failed(error: impl std::fmt::Display) -> StoreError {
     StoreError(error.to_string())
 }
 
+fn mark_retired(
+    transaction: &mut Conn,
+    organization: &str,
+    id: &StickId,
+    now: OffsetDateTime,
+) -> Result<bool, postgres::Error> {
+    let found = transaction.execute(
+        "UPDATE sticks SET retired_at = COALESCE(retired_at, $3)
+         WHERE organization_id = $1 AND stick_id = $2",
+        &[&organization, &id.as_str(), &now],
+    )?;
+    Ok(found == 1)
+}
+
 impl PostgresStore {
     /// Connects and brings the schema up to date.
     ///
@@ -301,6 +319,52 @@ impl PostgresStore {
                 let _ = conn.batch_execute("ROLLBACK");
             }
             result
+        })
+    }
+
+    fn save_stick(
+        &self,
+        organization: &str,
+        stick: &Stick,
+        retired_at: Option<OffsetDateTime>,
+    ) -> Result<bool, StoreError> {
+        let scope = stick
+            .credential_scope
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(failed)?;
+        let machine = stick.machine_number.map(i32::try_from).transpose();
+        // The file supports unsigned numbers that the database cannot represent. The credential
+        // can still be retired, even if its file-only machine number cannot be carried over.
+        let machine = match retired_at {
+            Some(_) => machine.unwrap_or(None),
+            None => machine.map_err(failed)?,
+        };
+        self.in_org(organization, |transaction| {
+            // A stick ID belongs to one organization. On conflict, only retirement in the
+            // owning organization can write to the existing row.
+            let added = transaction.execute(
+                "INSERT INTO sticks
+                     (organization_id, stick_id, token, team, site, contest, machine_number,
+                      credential_scope, retired_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (stick_id) DO NOTHING",
+                &[
+                    &organization,
+                    &stick.stick_id.as_str(),
+                    &stick.token.expose(),
+                    &stick.team,
+                    &stick.site,
+                    &stick.contest,
+                    &machine,
+                    &scope,
+                    &retired_at,
+                ],
+            )?;
+            match (added, retired_at) {
+                (0, Some(now)) => mark_retired(transaction, organization, &stick.stick_id, now),
+                _ => Ok(added == 1),
+            }
         })
     }
 }
@@ -1004,37 +1068,22 @@ impl Store for PostgresStore {
     }
 
     fn add_stick(&self, organization: &str, stick: Stick) -> Result<bool, StoreError> {
-        let scope = stick
-            .credential_scope
-            .as_ref()
-            .map(serde_json::to_value)
-            .transpose()
-            .map_err(failed)?;
-        let machine = stick
-            .machine_number
-            .map(i32::try_from)
-            .transpose()
-            .map_err(failed)?;
-        // The conflict is on the stick id alone, so an id that belongs to another organization is
-        // refused too.
-        let added = self.in_org(organization, |transaction| {
-            transaction.execute(
-                "INSERT INTO sticks
-                     (organization_id, stick_id, token, team, site, contest, machine_number, credential_scope)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (stick_id) DO NOTHING",
-                &[
-                    &organization,
-                    &stick.stick_id.as_str(),
-                    &stick.token.expose(),
-                    &stick.team,
-                    &stick.site,
-                    &stick.contest,
-                    &machine,
-                    &scope,
-                ],
-            )
-        })?;
-        Ok(added == 1)
+        self.save_stick(organization, &stick, None)
+    }
+
+    fn retire_stick(
+        &self,
+        organization: &str,
+        id: &StickId,
+        file: Option<&Stick>,
+        now: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        if let Some(file) = file.filter(|file| &file.stick_id == id) {
+            return self.save_stick(organization, file, Some(now));
+        }
+        self.in_org(organization, |transaction| {
+            mark_retired(transaction, organization, id, now)
+        })
     }
 
     /// The one lookup that runs without an organization: a stick does not say which one it is in.
@@ -1047,7 +1096,8 @@ impl Store for PostgresStore {
                 &[&id.as_str()],
             )?;
             let row = transaction.query_opt(
-                "SELECT stick_id, token, team, site, contest, machine_number, organization_id, credential_scope
+                "SELECT stick_id, token, team, site, contest, machine_number, organization_id,
+                        credential_scope, retired_at
                  FROM sticks WHERE stick_id = $1",
                 &[&id.as_str()],
             )?;
@@ -1062,7 +1112,8 @@ impl Store for PostgresStore {
     fn sticks(&self, organization: &str) -> Result<Vec<Stick>, StoreError> {
         let rows = self.in_org(organization, |transaction| {
             transaction.query(
-                "SELECT stick_id, token, team, site, contest, machine_number, credential_scope FROM sticks
+                "SELECT stick_id, token, team, site, contest, machine_number, credential_scope,
+                        retired_at FROM sticks
                  WHERE organization_id = $1",
                 &[&organization],
             )
@@ -1628,6 +1679,7 @@ fn stick_from(row: &Row) -> Result<Stick, StoreError> {
         stick_id: StickId::parse(&id).map_err(failed)?,
         token: Token::new(token),
         credential_scope,
+        retired_at: row.get("retired_at"),
         team: row.get(2),
         site: row.get(3),
         contest: row.get(4),

@@ -159,6 +159,7 @@ fn the_store_contract(store: &dyn Store) {
     );
 
     sticks_contract(store, &org, &a_id);
+    retirement_contract(store, &org, &a_id);
     identity_contract(store);
 }
 
@@ -168,6 +169,7 @@ fn sticks_contract(store: &dyn Store, org: &str, a_id: &StickId) {
         stick_id: a_id.clone(),
         token: Token::new(token),
         credential_scope: None,
+        retired_at: None,
         team: "Alpha".to_owned(),
         site: "Lab 1".to_owned(),
         contest: "Spring".to_owned(),
@@ -300,6 +302,64 @@ fn identity_contract(store: &dyn Store) {
     sessions_contract(store, &id, &user.id);
     verification_contract(store);
     invitations_contract(store);
+}
+
+fn retirement_contract(store: &dyn Store, org: &str, existing: &StickId) {
+    let other = store
+        .ensure_organization(&unique(), "Unrelated organization")
+        .expect("organization");
+    let (_, kept) = store
+        .stick(existing)
+        .expect("read")
+        .expect("existing stick");
+    assert_eq!(kept.retired_at, None);
+    assert!(
+        !store
+            .retire_stick(&other.id, existing, Some(&kept), time(40))
+            .expect("wrong-organization retirement")
+    );
+    assert!(
+        store
+            .retire_stick(org, existing, None, time(41))
+            .expect("retirement")
+    );
+    assert!(
+        store
+            .retire_stick(org, existing, None, time(42))
+            .expect("retry")
+    );
+    let (_, retired) = store.stick(existing).expect("read").expect("retired stick");
+    assert_eq!(retired.retired_at, Some(time(41)));
+    assert_eq!(retired.team, kept.team);
+    assert_eq!(store.events(org, existing).expect("events").len(), 2);
+    assert!(
+        store
+            .last_heartbeat(org, existing)
+            .expect("heartbeat")
+            .is_some()
+    );
+
+    let mut file = kept;
+    let file_id = StickId::parse(&format!("{}-file", unique())).expect("id");
+    file.stick_id = file_id.clone();
+    assert!(store.stick(&file_id).expect("read").is_none());
+    assert!(
+        store
+            .retire_stick(org, &file_id, Some(&file), time(43))
+            .expect("file retirement")
+    );
+    assert!(
+        store
+            .retire_stick(org, &file_id, None, time(44))
+            .expect("retry without file")
+    );
+    let (owner, retired) = store
+        .stick(&file_id)
+        .expect("read")
+        .expect("retired file stick");
+    assert_eq!(owner, org);
+    assert_eq!(retired.retired_at, Some(time(43)));
+    assert_eq!(retired.machine_number, file.machine_number);
 }
 
 fn verification_contract(store: &dyn Store) {
@@ -505,6 +565,7 @@ fn organizations_are_kept_apart(store: &dyn Store) {
         stick_id: stick_id.clone(),
         token: Token::new("a-secret-of-some-length"),
         credential_scope: None,
+        retired_at: None,
         team: "Alpha".to_owned(),
         site: "Lab 1".to_owned(),
         contest: "Spring".to_owned(),
@@ -1307,6 +1368,7 @@ fn postgres_row_security_hides_other_organizations() {
                 stick_id: StickId::parse(&stick).expect("id"),
                 token: Token::new("a-secret-of-some-length"),
                 credential_scope: None,
+                retired_at: None,
                 team: String::new(),
                 site: String::new(),
                 contest: String::new(),

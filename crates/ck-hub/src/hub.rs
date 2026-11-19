@@ -72,8 +72,14 @@ pub struct StickView {
     pub site: String,
     pub contest: String,
     pub machine_number: Option<u32>,
-    /// `false` until the first heartbeat, and again after [`ONLINE_WINDOW_SECONDS`] of silence.
+    /// `false` until the first heartbeat, after [`ONLINE_WINDOW_SECONDS`] of silence, or after
+    /// the credential is retired.
     pub online: bool,
+    #[serde(
+        with = "time::serde::rfc3339::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub retired_at: Option<OffsetDateTime>,
     pub last: Option<LastHeartbeat>,
     /// Events received from this stick since the Hub started.
     pub events: usize,
@@ -362,13 +368,19 @@ impl Hub {
         Ok((organization, id, scope))
     }
 
-    /// The organization a stick belongs to and its secret, if the Hub knows the stick. A stick is
-    /// known from the registry file or from the database, whichever has it. The registry file's
-    /// sticks belong to the default organization.
+    /// The organization a stick belongs to and its credential. A stored retirement always blocks
+    /// an older copy in the trusted file. The file's sticks belong to the default organization.
     pub(crate) fn stick_secret(
         &self,
         id: &StickId,
     ) -> Result<Option<(String, Token, Option<CredentialScope>)>, StoreError> {
+        let stored = self.store.stick(id)?;
+        if stored
+            .as_ref()
+            .is_some_and(|(_, stick)| stick.retired_at.is_some())
+        {
+            return Ok(None);
+        }
         let from_file = {
             let mut registry = self.registry.lock().expect("registry lock");
             registry.refresh();
@@ -378,11 +390,26 @@ impl Hub {
         };
         Ok(match from_file {
             Some((token, scope)) => Some((self.default_org_id()?, token, scope)),
-            None => self
-                .store
-                .stick(id)?
+            None => stored
                 .map(|(organization, stick)| (organization, stick.token, stick.credential_scope)),
         })
+    }
+
+    pub(crate) fn retire_stick(&self, organization: &str, id: &str) -> Result<bool, StoreError> {
+        let Ok(id) = StickId::parse(id) else {
+            return Ok(false);
+        };
+        let file = {
+            let mut registry = self.registry.lock().expect("registry lock");
+            registry.refresh();
+            registry.find(&id).cloned()
+        };
+        let file = match file {
+            Some(entry) if organization == self.default_org_id()? => Some(entry),
+            _ => None,
+        };
+        self.store
+            .retire_stick(organization, &id, file.as_ref(), (self.clock)())
     }
 
     /// Takes in an event. A problem with the chain never makes the Hub refuse it: the stick would
@@ -528,7 +555,12 @@ impl Hub {
             Vec::new()
         };
         for stick in self.store.sticks(organization)? {
-            if !entries.iter().any(|e| e.stick_id == stick.stick_id) {
+            if let Some(entry) = entries
+                .iter_mut()
+                .find(|entry| entry.stick_id == stick.stick_id)
+            {
+                entry.retired_at = stick.retired_at;
+            } else {
                 entries.push(stick);
             }
         }
@@ -563,9 +595,11 @@ impl Hub {
                 site: entry.site.clone(),
                 contest: entry.contest.clone(),
                 machine_number: entry.machine_number,
-                online: last
-                    .as_ref()
-                    .is_some_and(|l| l.seconds_ago <= ONLINE_WINDOW_SECONDS),
+                online: entry.retired_at.is_none()
+                    && last
+                        .as_ref()
+                        .is_some_and(|l| l.seconds_ago <= ONLINE_WINDOW_SECONDS),
+                retired_at: entry.retired_at,
                 last,
                 events: stored.len(),
                 last_event_at: stored.last().map(|s| s.received_at),

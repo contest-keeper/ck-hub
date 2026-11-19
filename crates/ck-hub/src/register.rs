@@ -124,6 +124,7 @@ pub fn register_sticks(
                 stick_id: new.stick_id.clone(),
                 token: token.clone(),
                 credential_scope: new.credential_scope.clone(),
+                retired_at: None,
                 team: new.team,
                 site: new.site,
                 contest: new.contest,

@@ -438,13 +438,17 @@ fn two_organizations() -> Router {
         memory_kib: 8,
         passes: 1,
     });
-    for email in ["ana@example.org", "bo@example.org"] {
+    for email in ["ana@example.org", "bo@example.org", "carla@example.org"] {
         hub.create_user(email, PASSWORD).expect("an account");
     }
     hub.create_organization("default", "Default", "ana@example.org")
         .expect("default");
     hub.create_organization("other", "Other", "bo@example.org")
         .expect("other");
+    for slug in ["default", "other"] {
+        hub.add_member(slug, "carla@example.org", Role::Admin)
+            .expect("carla can administer both");
+    }
     router(Arc::new(hub))
 }
 
@@ -470,6 +474,71 @@ async fn send(
 }
 
 #[tokio::test]
+async fn retiring_a_file_key_is_idempotent_and_keeps_the_sticks_history() {
+    let id = "legacy-stick";
+    let registry = json!({ "sticks": [stick(id, TOKEN)] });
+    let setup = setup_with_registry(&registry.to_string());
+    let admin = cookie_for(&setup.app, "ana@example.org").await;
+    let viewer = cookie_for(&setup.app, "vera@example.org").await;
+    let path = "/api/v1/sticks/legacy-stick/credential";
+    assert_eq!(
+        heartbeat_status(&setup.app, id, TOKEN).await,
+        StatusCode::OK
+    );
+    let event = json!({"stick_id": id, "boot_id": "b", "seq": 1,
+        "prev_hash": "", "sent_at": "2026-11-13T10:00:00Z", "kind": "submission",
+        "payload": {"platform": "codeforces", "contest_id": "2042"}});
+    assert_eq!(
+        signed_report(&setup.app, "/api/v1/events", id, TOKEN, &event).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(&setup.app, "DELETE", path, &viewer, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (_, bearer) = admin.split_once('=').expect("session token");
+    let forge_request = Request::delete(path)
+        .header("authorization", format!("Bearer {bearer}"))
+        .body(Body::empty())
+        .expect("retirement request");
+    assert_eq!(
+        call(&setup.app, forge_request).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let first = list(&setup.app).await;
+    assert_eq!(first[0]["team"], "Alpha");
+    assert!(first[0]["retired_at"].is_string());
+    assert_eq!(
+        heartbeat_status(&setup.app, id, TOKEN).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        signed_report(&setup.app, "/api/v1/events", id, TOKEN, &event).await,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // The tombstone and previously received heartbeat survive removal of the original file entry.
+    fs::write(setup.dir.path().join("registry.json"), r#"{"sticks":[]}"#).expect("update registry");
+    let named_path = "/api/v1/orgs/default/sticks/legacy-stick/credential";
+    assert_eq!(
+        send(&setup.app, "DELETE", named_path, &admin, None).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let kept = list(&setup.app).await;
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0]["stick_id"], id);
+    assert_eq!(kept[0]["retired_at"], first[0]["retired_at"]);
+    assert_eq!(kept[0]["online"], false);
+    assert_eq!(kept[0]["last"]["seq"], 1);
+    assert_eq!(kept[0]["last"]["heartbeats"], 1);
+    assert_eq!(kept[0]["events"], 1);
+    assert_eq!(
+        heartbeat_status(&setup.app, id, TOKEN).await,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
 async fn sticks_and_heartbeats_of_one_organization_are_invisible_to_another() {
     let app = two_organizations();
     let ana = cookie_for(&app, "ana@example.org").await;
@@ -489,6 +558,17 @@ async fn sticks_and_heartbeats_of_one_organization_are_invisible_to_another() {
     let (status, answer) = send(&app, "POST", theirs, &bo, Some(&stick("stick-1", TOKEN))).await;
     assert_eq!(status, StatusCode::CONFLICT, "{answer}");
     assert_eq!(answer["conflicts"], json!(["stick-1"]));
+    let wrong_org = "/api/v1/orgs/other/sticks/stick-1/credential";
+    assert_eq!(
+        send(&app, "DELETE", wrong_org, &bo, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let carla = cookie_for(&app, "carla@example.org").await;
+    let no_org = "/api/v1/sticks/stick-1/credential";
+    assert_eq!(
+        send(&app, "DELETE", no_org, &carla, None).await.0,
+        StatusCode::CONFLICT
+    );
 
     // The stick reports once, and what it reports shows in its own organization only.
     assert_eq!(

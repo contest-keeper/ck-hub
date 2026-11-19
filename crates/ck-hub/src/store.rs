@@ -82,6 +82,8 @@ pub struct Stick {
     pub token: Token,
     #[serde(default)]
     pub credential_scope: Option<crate::CredentialScope>,
+    #[serde(skip)]
+    pub retired_at: Option<OffsetDateTime>,
     #[serde(default)]
     pub team: String,
     #[serde(default)]
@@ -377,6 +379,16 @@ pub trait Store: Send + Sync {
     /// already known to any organization: a stick's secret is never replaced, and an id belongs
     /// to one organization.
     fn add_stick(&self, organization: &str, stick: Stick) -> Result<bool, StoreError>;
+
+    /// Retires a credential in its own organization, preserving the first retirement time.
+    /// A matching entry from the trusted registry allows the store to retain a file-only stick.
+    fn retire_stick(
+        &self,
+        organization: &str,
+        id: &StickId,
+        file: Option<&Stick>,
+        now: OffsetDateTime,
+    ) -> Result<bool, StoreError>;
 
     /// The stick with this id and the organization it belongs to.
     fn stick(&self, id: &StickId) -> Result<Option<(String, Stick)>, StoreError>;
@@ -1134,6 +1146,29 @@ impl Store for MemoryStore {
         Ok(true)
     }
 
+    fn retire_stick(
+        &self,
+        organization: &str,
+        id: &StickId,
+        file: Option<&Stick>,
+        now: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        let mut sticks = self.sticks.lock().expect("sticks lock");
+        if let Some(file) = file.filter(|file| &file.stick_id == id) {
+            sticks
+                .entry(id.clone())
+                .or_insert_with(|| (organization.to_owned(), file.clone()));
+        }
+        let Some((owner, stick)) = sticks.get_mut(id) else {
+            return Ok(false);
+        };
+        if owner != organization {
+            return Ok(false);
+        }
+        stick.retired_at.get_or_insert(now);
+        Ok(true)
+    }
+
     fn stick(&self, id: &StickId) -> Result<Option<(String, Stick)>, StoreError> {
         Ok(self.sticks.lock().expect("sticks lock").get(id).cloned())
     }
@@ -1371,6 +1406,7 @@ impl Store for MemoryStore {
             stick_id: stick.clone(),
             token: token.clone(),
             credential_scope: kept.code.credential_scope.clone(),
+            retired_at: None,
             team: kept.code.team.clone(),
             site: kept.code.site.clone(),
             contest: kept.code.contest.clone(),
