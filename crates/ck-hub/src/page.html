@@ -869,15 +869,16 @@ function render() {
 // the Hub checks them and builds the address the browser goes back to.
 const forgeAsk = location.pathname === "/forge/connect" ? new URLSearchParams(location.search) : null;
 const imagesPage = location.pathname === "/download/image";
+const imageDownloads = document.getElementById("image-downloads");
 const imageList = document.getElementById("image-download-list");
 const imageStatus = document.getElementById("image-download-status");
 const imageRetry = document.getElementById("image-download-retry");
-let imageRequest = null;
 
 function imageItem(image) {
   const item = el("li", "tile");
   item.appendChild(el("h2", "", image.name + " · " + image.version));
-  item.appendChild(el("p", "muted", image.filename + " · " + image.profile + " · " + bytesText(image.size)));
+  const details = [image.filename, image.profile, bytesText(image.size)].filter(Boolean).join(" · ");
+  item.appendChild(el("p", "muted", details));
   const checksum = el("p", "");
   checksum.append("SHA-256 ", el("code", "", image.sha256));
   item.appendChild(checksum);
@@ -891,21 +892,17 @@ function imageItem(image) {
 async function loadImageDownloads() {
   imageRetry.hidden = true;
   imageStatus.textContent = "Loading images…";
-  const request = call("GET", "/api/v1/images");
-  imageRequest = request;
-  let images = null;
   try {
-    const result = await request;
-    if (result.ok && Array.isArray(result.data?.images)) images = result.data.images;
-  } catch (error) { /* the retry button handles a failed connection */ }
-  if (imageRequest !== request) return;
-  if (!images) {
+    const result = await call("GET", "/api/v1/images");
+    if (result.status === 401) { location.reload(); return; }
+    const images = result.data?.images;
+    if (!result.ok || !Array.isArray(images)) throw new Error("No image list");
+    imageStatus.textContent = images.length ? "" : "No Keeper OS images are available yet.";
+    imageList.replaceChildren(...images.map(imageItem));
+  } catch (error) {
     imageStatus.textContent = "Keeper OS images are unavailable right now.";
     imageRetry.hidden = false;
-    return;
   }
-  imageStatus.textContent = images.length ? "" : "No Keeper OS images are available yet.";
-  imageList.replaceChildren(...images.map(imageItem));
 }
 
 imageRetry.addEventListener("click", loadImageDownloads);
@@ -933,13 +930,9 @@ document.getElementById("forge-yes").addEventListener("click", async () => {
 function showLogin(visible) {
   document.getElementById("login").style.display = visible ? "flex" : "none";
   document.getElementById("content").style.display = visible || imagesPage ? "none" : "block";
-  document.getElementById("image-downloads").hidden = visible || !imagesPage;
+  imageDownloads.hidden = visible || !imagesPage;
   document.getElementById("who").style.display = visible ? "none" : "inline-flex";
   document.getElementById("live").hidden = visible || imagesPage;
-  if (visible && imageRequest) {
-    imageRequest = null;
-    imageList.replaceChildren();
-  }
 }
 
 const RANK = { owner: 3, admin: 2, viewer: 1 };
@@ -1056,7 +1049,12 @@ async function refresh() {
   const problem = document.getElementById("problem");
   try {
     let me = await fetch("/api/v1/me", { cache: "no-store" });
-    if (me.status === 401) { showLogin(true); problem.style.display = "none"; return; }
+    if (me.status === 401) {
+      if (imagesPage && !imageDownloads.hidden) { location.reload(); return; }
+      showLogin(true);
+      problem.style.display = "none";
+      return;
+    }
     if (me.ok && inviteToken) {
       const token = inviteToken;
       inviteToken = null;
@@ -1083,11 +1081,12 @@ async function refresh() {
     myRole = current ? current.role : null;
     myEmail = account.email;
     document.getElementById("who-name").textContent = account.email + (current ? " (" + current.role + ")" : "");
+    const openImageDownloads = imagesPage && imageDownloads.hidden;
     showLogin(false);
     if (forgeAsk) { showForge(account.email); return; }
     if (imagesPage) {
       problem.style.display = "none";
-      if (!imageRequest) await loadImageDownloads();
+      if (openImageDownloads) await loadImageDownloads();
       return;
     }
     await loadStaff(account.staff === true);

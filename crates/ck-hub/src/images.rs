@@ -33,6 +33,9 @@ pub struct Image {
     /// What organizers see.
     pub name: String,
     pub version: String,
+    /// Public name of the downloaded file. Older manifests omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
     /// The file's path inside the container. It never reaches an organizer.
     pub blob: String,
     /// Compressed size in bytes.
@@ -197,6 +200,13 @@ fn problem(image: &Image) -> Option<&'static str> {
         return Some("the file path must be inside images/ with plain names only");
     }
     if image
+        .filename
+        .as_deref()
+        .is_some_and(|filename| !is_safe_filename(filename))
+    {
+        return Some("the filename must be a plain basename of at most 200 bytes");
+    }
+    if image
         .source_offer
         .as_deref()
         .is_some_and(|b| !is_safe_blob(b))
@@ -215,6 +225,16 @@ fn problem(image: &Image) -> Option<&'static str> {
         return Some("the sha256 must be 64 lowercase hex digits");
     }
     None
+}
+
+fn is_safe_filename(filename: &str) -> bool {
+    let bytes = filename.as_bytes();
+    bytes.len() <= 200
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        && filename
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'))
 }
 
 /// A path under `images/` made of plain names, so it cannot climb out of the folder or add a query.
@@ -243,6 +263,7 @@ mod tests {
             id: id.to_owned(),
             name: "Keeper OS".to_owned(),
             version: "0.3.0".to_owned(),
+            filename: Some(format!("{id}.img.zst")),
             blob: format!("images/{id}.img.zst"),
             size: 1_500_000_000,
             sha256: "a".repeat(64),
@@ -260,6 +281,28 @@ mod tests {
     }
 
     #[test]
+    fn a_public_filename_must_be_one_plain_basename() {
+        let long = "x".repeat(201);
+        for filename in [
+            "",
+            "../keeper.img.zst",
+            "images/keeper.img.zst",
+            "images\\keeper.img.zst",
+            ".hidden.img.zst",
+            "keeper.img.zst.",
+            "keeper.img.zst?download",
+            "keeper image.img.zst",
+            "kéeper.img.zst",
+            &long,
+        ] {
+            let mut entry = serde_json::to_value(image("x")).expect("entry");
+            entry["filename"] = serde_json::json!(filename);
+            let manifest = serde_json::json!({ "images": [entry] }).to_string();
+            assert!(parse(manifest.as_bytes()).is_err(), "{filename:?}");
+        }
+    }
+
+    #[test]
     fn a_source_offer_outside_the_folder_is_refused_and_a_missing_one_is_fine() {
         let mut bad = image("x");
         bad.source_offer = Some("images/../secret".to_owned());
@@ -268,7 +311,9 @@ mod tests {
         let old = r#"{"images":[{"id":"x","name":"n","version":"1","blob":"images/x.img",
             "size":1,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "family":"ubuntu","profile":"generic"}]}"#;
-        assert_eq!(parse(old.as_bytes()).expect("valid")[0].source_offer, None);
+        let old_images = parse(old.as_bytes()).expect("valid legacy manifest");
+        assert_eq!(old_images[0].source_offer, None);
+        assert_eq!(old_images[0].filename, None);
     }
 
     #[test]
