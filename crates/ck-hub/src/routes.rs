@@ -70,6 +70,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route("/", get(page))
         .route("/forge/connect", get(page))
         .route("/download/forge", get(download_forge))
+        .route("/download/image", get(page))
         .route("/download/image/{id}", get(download_image))
         .route(
             "/download/image/{id}/source-offer",
@@ -224,6 +225,7 @@ async fn list_images(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Respons
                     "name": image.name,
                     "version": image.version,
                     "url": format!("/download/image/{}", image.id),
+                    "filename": image.blob.rsplit('/').next().unwrap_or(&image.blob),
                     "size": image.size,
                     "sha256": image.sha256,
                     "family": image.family,

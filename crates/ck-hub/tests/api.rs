@@ -1071,6 +1071,21 @@ async fn images_are_not_found_until_they_are_set_up() {
 }
 
 #[tokio::test]
+async fn the_image_download_address_opens_the_hub_sign_in_page() {
+    let setup = build(None, true);
+    let (status, page) = call(
+        &setup.app,
+        Request::get("/download/image")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("Log in to Keeper Hub"));
+    assert!(page.contains("Keeper OS downloads"));
+}
+
+#[tokio::test]
 async fn an_organizer_sees_the_manifest_without_the_storage_path() {
     let setup = build(None, true);
     let cookie = organizer_cookie(&setup.app).await;
@@ -1087,6 +1102,7 @@ async fn an_organizer_sees_the_manifest_without_the_storage_path() {
     let image = &json["images"][0];
     assert_eq!(image["id"], "keeper-os-0.3.0");
     assert_eq!(image["url"], "/download/image/keeper-os-0.3.0");
+    assert_eq!(image["filename"], "keeper-os-0.3.0.img.zst");
     assert_eq!(image["size"], 1_500_000_000u64);
     assert_eq!(image["sha256"], "a".repeat(64));
     assert_eq!(image["family"], "ubuntu");
