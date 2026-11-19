@@ -77,7 +77,13 @@ Not measured on Azure yet.
    Candidates, biggest first: one SQL statement for the heartbeat check and write; no commands query when none
    are waiting; prepared statements kept per connection; batched event inserts. Try one at a time and re-run
    the 500-stick test. On Azure the connection is also encrypted, which costs more CPU per statement than here.
-5. Sampling or summarising network history on the stick (request to lane B).
+5. **Prepared statements and a 3-round-trip transaction (ck-hub, 2026-11-19), measured:** each connection now keeps
+   the statements it prepared, and a call is BEGIN with the organization setting in one query, the statement, and
+   COMMIT (3 round trips instead of 6). 500 sticks registered in the database, 5 minutes: Hub CPU 0.33 to
+   0.25 core (-24%), heartbeat p50 29 to 20 ms, p99 45 to 42 ms, event p50 22 to 16 ms. Still open from the
+   list above: one statement for the heartbeat check and write, no commands query when none wait, batched
+   event inserts.
+6. Sampling or summarising network history on the stick (request to lane B).
 
 ## How to repeat
 

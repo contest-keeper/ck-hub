@@ -1,10 +1,12 @@
 //! The store on PostgreSQL, so what sticks reported survives a restart of the Hub.
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ck_protocol::{CommandAck, Event, Heartbeat, StickId, Token};
-use postgres::Client;
+use postgres::types::ToSql;
+use postgres::{Client, Row, Statement};
 use time::OffsetDateTime;
 use tokio_postgres_rustls::MakeRustlsConnect;
 
@@ -90,12 +92,91 @@ fn limit_to_hub_role(client: &mut Client) -> Result<(), StoreError> {
 /// second (docs/capacity.md); a managed database allows far more than this.
 pub const DEFAULT_POOL_SIZE: usize = 8;
 
+/// A connection that remembers the statements it prepared. Every query text the store uses is a
+/// constant, so each is prepared once per connection instead of on every call.
+struct Conn {
+    client: Client,
+    statements: HashMap<String, Statement>,
+}
+
+/// Far more than the store has query texts; only a bug that builds texts from data could reach it.
+const MAX_STATEMENTS: usize = 256;
+
+impl Conn {
+    fn new(client: Client) -> Self {
+        Self {
+            client,
+            statements: HashMap::new(),
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.client.is_closed()
+    }
+
+    fn statement(&mut self, sql: &str) -> Result<Statement, postgres::Error> {
+        if let Some(found) = self.statements.get(sql) {
+            return Ok(found.clone());
+        }
+        let prepared = self.client.prepare(sql)?;
+        if self.statements.len() >= MAX_STATEMENTS {
+            self.statements.clear();
+        }
+        self.statements.insert(sql.to_owned(), prepared.clone());
+        Ok(prepared)
+    }
+
+    fn query(
+        &mut self,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<Vec<Row>, postgres::Error> {
+        let statement = self.statement(sql)?;
+        self.client.query(&statement, params)
+    }
+
+    fn query_opt(
+        &mut self,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<Option<Row>, postgres::Error> {
+        let statement = self.statement(sql)?;
+        self.client.query_opt(&statement, params)
+    }
+
+    fn query_one(
+        &mut self,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<Row, postgres::Error> {
+        let statement = self.statement(sql)?;
+        self.client.query_one(&statement, params)
+    }
+
+    fn execute(
+        &mut self,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<u64, postgres::Error> {
+        let statement = self.statement(sql)?;
+        self.client.execute(&statement, params)
+    }
+
+    fn batch_execute(&mut self, sql: &str) -> Result<(), postgres::Error> {
+        self.client.batch_execute(sql)
+    }
+
+    fn transaction(&mut self) -> Result<postgres::Transaction<'_>, postgres::Error> {
+        self.client.transaction()
+    }
+}
+
 pub struct PostgresStore {
     url: String,
     /// The connections. A slot is `None` before its first use, while the store is being dropped,
     /// and after a connection was lost and not yet opened again. Each call uses one slot for the
     /// whole of its transaction, so a call never sees another call's settings.
-    pool: Vec<Mutex<Option<Client>>>,
+    pool: Vec<Mutex<Option<Conn>>>,
     /// Where the next call starts looking for a free slot, so calls spread over the pool.
     next: AtomicUsize,
 }
@@ -137,7 +218,7 @@ impl PostgresStore {
         // Migrations need the account that logged in; everything after them runs as the Hub role.
         migrate(&mut client)?;
         limit_to_hub_role(&mut client)?;
-        let mut pool = vec![Mutex::new(Some(client))];
+        let mut pool = vec![Mutex::new(Some(Conn::new(client)))];
         pool.extend((1..size.max(1)).map(|_| Mutex::new(None)));
         Ok(Self {
             url: url.to_owned(),
@@ -148,7 +229,7 @@ impl PostgresStore {
 
     fn run<T>(
         &self,
-        query: impl FnOnce(&mut Client) -> Result<T, postgres::Error>,
+        query: impl FnOnce(&mut Conn) -> Result<T, postgres::Error>,
     ) -> Result<T, StoreError> {
         // Take a free connection if there is one, starting where the last call left off; if all
         // are busy, wait for the one this call would have started at.
@@ -158,10 +239,10 @@ impl PostgresStore {
             .unwrap_or_else(|| self.pool[start].lock().expect("database lock"));
         // After the database restarted the old connection is closed for good, so open a new one
         // instead of failing every request until the Hub restarts.
-        if slot.as_ref().is_none_or(Client::is_closed) {
+        if slot.as_ref().is_none_or(Conn::is_closed) {
             let mut client = Client::connect(&self.url, tls()).map_err(failed)?;
             limit_to_hub_role(&mut client)?;
-            *slot = Some(client);
+            *slot = Some(Conn::new(client));
         }
         let client = slot.as_mut().expect("the connection was just opened");
         query(client).map_err(failed)
@@ -188,14 +269,34 @@ impl PostgresStore {
     fn in_org<T>(
         &self,
         organization: &str,
-        query: impl FnOnce(&mut postgres::Transaction<'_>) -> Result<T, postgres::Error>,
+        query: impl FnOnce(&mut Conn) -> Result<T, postgres::Error>,
     ) -> Result<T, StoreError> {
-        self.run(|client| {
-            let mut transaction = client.transaction()?;
-            transaction.execute("SELECT set_config('ck.org_id', $1, true)", &[&organization])?;
-            let result = query(&mut transaction)?;
-            transaction.commit()?;
-            Ok(result)
+        self.run(|conn| {
+            // BEGIN and the setting go in one simple query, and COMMIT in another: three round
+            // trips for a call instead of six. An id made of plain characters is put in the
+            // query text; anything else takes the parameterised way, so nothing is ever spliced
+            // into SQL.
+            let plain = !organization.is_empty()
+                && organization.len() <= 128
+                && organization
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+            let result = (|| {
+                if plain {
+                    conn.batch_execute(&format!("BEGIN; SET LOCAL ck.org_id = '{organization}'"))?;
+                } else {
+                    conn.batch_execute("BEGIN")?;
+                    conn.execute("SELECT set_config('ck.org_id', $1, true)", &[&organization])?;
+                }
+                let value = query(conn)?;
+                conn.batch_execute("COMMIT")?;
+                Ok(value)
+            })();
+            if result.is_err() {
+                // Leave no half-open transaction on a connection that will be used again.
+                let _ = conn.batch_execute("ROLLBACK");
+            }
+            result
         })
     }
 }
@@ -206,9 +307,9 @@ impl Drop for PostgresStore {
     fn drop(&mut self) {
         for slot in &mut self.pool {
             if let Ok(slot) = slot.get_mut()
-                && let Some(client) = slot.take()
+                && let Some(conn) = slot.take()
             {
-                let _ = std::thread::spawn(move || drop(client)).join();
+                let _ = std::thread::spawn(move || drop(conn)).join();
             }
         }
     }
@@ -1439,7 +1540,7 @@ impl Store for PostgresStore {
 const RECORDING_COLUMNS: &str = "id, stick_id, file, kind, size, sha256, started_at, duration_s, \
      next_chunk, created_at, completed_at, expires_at";
 
-fn recording_from_row(row: &postgres::Row) -> Result<Recording, StoreError> {
+fn recording_from_row(row: &Row) -> Result<Recording, StoreError> {
     let kind: String = row.get("kind");
     let size: i64 = row.get("size");
     let duration: Option<i64> = row.get("duration_s");
@@ -1471,7 +1572,7 @@ fn refusal_text(refusal: Option<ck_protocol::Refusal>) -> Option<String> {
     })
 }
 
-fn command_from(row: &postgres::Row) -> Result<StoredCommand, StoreError> {
+fn command_from(row: &Row) -> Result<StoredCommand, StoreError> {
     let signed: serde_json::Value = row.get(2);
     let state: String = row.get(3);
     let refusal: Option<String> = row.get(4);
@@ -1491,7 +1592,7 @@ fn command_from(row: &postgres::Row) -> Result<StoredCommand, StoreError> {
     })
 }
 
-fn stick_from(row: &postgres::Row) -> Result<Stick, StoreError> {
+fn stick_from(row: &Row) -> Result<Stick, StoreError> {
     let id: String = row.get(0);
     let token: String = row.get(1);
     let machine: Option<i32> = row.get(5);
@@ -1505,7 +1606,7 @@ fn stick_from(row: &postgres::Row) -> Result<Stick, StoreError> {
     })
 }
 
-fn user_from(row: &postgres::Row) -> User {
+fn user_from(row: &Row) -> User {
     User {
         id: row.get(0),
         email: row.get(1),
@@ -1516,7 +1617,7 @@ fn user_from(row: &postgres::Row) -> User {
     }
 }
 
-fn invitation_from(row: &postgres::Row) -> Result<Invitation, StoreError> {
+fn invitation_from(row: &Row) -> Result<Invitation, StoreError> {
     Ok(Invitation {
         id: row.get(0),
         organization_id: row.get(1),
@@ -1527,7 +1628,7 @@ fn invitation_from(row: &postgres::Row) -> Result<Invitation, StoreError> {
     })
 }
 
-fn organization_from(row: &postgres::Row) -> Organization {
+fn organization_from(row: &Row) -> Organization {
     Organization {
         id: row.get(0),
         slug: row.get(1),
