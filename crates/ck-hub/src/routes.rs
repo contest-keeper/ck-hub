@@ -91,6 +91,11 @@ pub fn router(hub: Arc<Hub>) -> Router {
                 .post(register_in)
                 .layer(DefaultBodyLimit::max(MAX_REGISTRY_BYTES)),
         )
+        .route("/api/v1/sticks/{id}/credential", delete(retire_credential))
+        .route(
+            "/api/v1/orgs/{slug}/sticks/{id}/credential",
+            delete(retire_credential_in),
+        )
         .route(
             "/api/v1/orgs/{slug}/invitations",
             get(invitations_of).post(invite),
@@ -577,6 +582,41 @@ async fn list_sticks(hub: Arc<Hub>, access: Access) -> Response {
     }
 }
 
+async fn retire_credential(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    match require(&hub, &headers, Role::Admin).await {
+        Ok(access) => retire_credential_of(hub, access, id).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+async fn retire_credential_in(
+    State(hub): State<Arc<Hub>>,
+    Path((slug, id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    match require_in(&hub, &headers, slug, Role::Admin).await {
+        Ok(access) => retire_credential_of(hub, access, id).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+async fn retire_credential_of(hub: Arc<Hub>, access: Access, id: String) -> Response {
+    match tokio::task::spawn_blocking(move || hub.retire_stick(&access.organization.id, &id)).await
+    {
+        Ok(Ok(true)) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Ok(false)) => denied((StatusCode::NOT_FOUND, "no such stick")),
+        Ok(Err(error)) => {
+            tracing::error!("{error}");
+            unavailable()
+        }
+        Err(_) => unavailable(),
+    }
+}
+
 /// The network history of one stick of the only organization the caller belongs to.
 async fn network(
     State(hub): State<Arc<Hub>>,
@@ -793,6 +833,8 @@ struct MintBody {
     machine_number: Option<u32>,
     #[serde(default)]
     lifetime_minutes: Option<i64>,
+    #[serde(default)]
+    credential_scope: Option<crate::CredentialScope>,
 }
 
 /// Only an admin or an owner may make an enrolment code.
@@ -855,6 +897,7 @@ async fn mint(hub: Arc<Hub>, access: Access, body: Bytes) -> Response {
                 contest: spec.contest,
                 machine_number: spec.machine_number,
                 lifetime_minutes: spec.lifetime_minutes,
+                credential_scope: spec.credential_scope,
             },
         )
     })

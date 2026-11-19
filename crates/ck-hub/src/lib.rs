@@ -5,6 +5,7 @@ mod accounts;
 mod acs_mail;
 mod codeforces;
 mod commands;
+mod credentials;
 mod download;
 mod enrol;
 mod forge;
@@ -40,6 +41,7 @@ pub use commands::{
     CommandError, CommandState, CommandView, DEFAULT_LIFETIME_SECONDS, HISTORY_DAYS, HISTORY_LIMIT,
     MAX_OPEN_PER_STICK, MAX_PER_MINUTE, MIN_LIFETIME_SECONDS, StoredCommand,
 };
+pub use credentials::CredentialScope;
 pub use download::{Download, DownloadError, LINK_LIFETIME_MINUTES};
 pub use enrol::{
     DEFAULT_LIFETIME_MINUTES, EnrolError, EnrolledStick, Enrolment, EnrolmentSpec,

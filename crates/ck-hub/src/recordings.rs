@@ -519,7 +519,8 @@ impl Hub {
         signature: Option<&str>,
         signed: &[u8],
     ) -> Result<(String, StickId), RecordingError> {
-        self.authenticate(stick_header, signature, signed)
+        self.authenticate(stick_header, signature, signed, Duration::hours(24))
+            .map(|(organization, stick, _)| (organization, stick))
             .map_err(|_| RecordingError::Unauthorized)
     }
 

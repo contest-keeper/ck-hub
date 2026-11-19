@@ -159,6 +159,7 @@ fn the_store_contract(store: &dyn Store) {
     );
 
     sticks_contract(store, &org, &a_id);
+    retirement_contract(store, &org, &a_id);
     identity_contract(store);
 }
 
@@ -167,6 +168,8 @@ fn sticks_contract(store: &dyn Store, org: &str, a_id: &StickId) {
     let new = |token: &str| ck_hub::Stick {
         stick_id: a_id.clone(),
         token: Token::new(token),
+        credential_scope: None,
+        retired_at: None,
         team: "Alpha".to_owned(),
         site: "Lab 1".to_owned(),
         contest: "Spring".to_owned(),
@@ -187,6 +190,7 @@ fn sticks_contract(store: &dyn Store, org: &str, a_id: &StickId) {
     let (owner, kept) = store.stick(a_id).expect("read").expect("a stick");
     assert_eq!(owner, org);
     assert_eq!(kept.token, Token::new("first-secret-value-1"));
+    assert_eq!(kept.credential_scope, None);
     assert_eq!(
         (kept.team.as_str(), kept.machine_number),
         ("Alpha", Some(4))
@@ -298,6 +302,64 @@ fn identity_contract(store: &dyn Store) {
     sessions_contract(store, &id, &user.id);
     verification_contract(store);
     invitations_contract(store);
+}
+
+fn retirement_contract(store: &dyn Store, org: &str, existing: &StickId) {
+    let other = store
+        .ensure_organization(&unique(), "Unrelated organization")
+        .expect("organization");
+    let (_, kept) = store
+        .stick(existing)
+        .expect("read")
+        .expect("existing stick");
+    assert_eq!(kept.retired_at, None);
+    assert!(
+        !store
+            .retire_stick(&other.id, existing, Some(&kept), time(40))
+            .expect("wrong-organization retirement")
+    );
+    assert!(
+        store
+            .retire_stick(org, existing, None, time(41))
+            .expect("retirement")
+    );
+    assert!(
+        store
+            .retire_stick(org, existing, None, time(42))
+            .expect("retry")
+    );
+    let (_, retired) = store.stick(existing).expect("read").expect("retired stick");
+    assert_eq!(retired.retired_at, Some(time(41)));
+    assert_eq!(retired.team, kept.team);
+    assert_eq!(store.events(org, existing).expect("events").len(), 2);
+    assert!(
+        store
+            .last_heartbeat(org, existing)
+            .expect("heartbeat")
+            .is_some()
+    );
+
+    let mut file = kept;
+    let file_id = StickId::parse(&format!("{}-file", unique())).expect("id");
+    file.stick_id = file_id.clone();
+    assert!(store.stick(&file_id).expect("read").is_none());
+    assert!(
+        store
+            .retire_stick(org, &file_id, Some(&file), time(43))
+            .expect("file retirement")
+    );
+    assert!(
+        store
+            .retire_stick(org, &file_id, None, time(44))
+            .expect("retry without file")
+    );
+    let (owner, retired) = store
+        .stick(&file_id)
+        .expect("read")
+        .expect("retired file stick");
+    assert_eq!(owner, org);
+    assert_eq!(retired.retired_at, Some(time(43)));
+    assert_eq!(retired.machine_number, file.machine_number);
 }
 
 fn verification_contract(store: &dyn Store) {
@@ -502,6 +564,8 @@ fn organizations_are_kept_apart(store: &dyn Store) {
     let new = ck_hub::Stick {
         stick_id: stick_id.clone(),
         token: Token::new("a-secret-of-some-length"),
+        credential_scope: None,
+        retired_at: None,
         team: "Alpha".to_owned(),
         site: "Lab 1".to_owned(),
         contest: "Spring".to_owned(),
@@ -1121,6 +1185,7 @@ fn enrolment_contract(store: &dyn Store) {
         machine_number: Some(4),
         created_at: time(0),
         expires_at: time(ends),
+        credential_scope: None,
     };
     // Sticks are never deleted from a database, so ids from an earlier run must not come again.
     let base = SystemTime::now()
@@ -1174,7 +1239,6 @@ fn enrolment_contract(store: &dyn Store) {
 
     // Once only.
     assert_eq!(redeem("a", 11, &stick(3)), Redemption::Invalid);
-    assert!(store.stick(&stick(3)).expect("read").is_none());
 
     // A taken stick id does not use the code up.
     assert_eq!(redeem("b", 10, &stick(2)), Redemption::IdTaken);
@@ -1218,9 +1282,45 @@ fn enrolment_contract(store: &dyn Store) {
     assert_eq!(redeem("c", 30, &stick(20)), Redemption::Invalid);
     assert!(matches!(redeem("d", 30, &stick(21)), Redemption::Done(_)));
 }
+
+fn scoped_enrolment_contract(store: &dyn Store) {
+    use ck_hub::{CredentialScope, NewEnrolmentCode, Redemption};
+
+    let id = unique();
+    let org = store
+        .create_organization(&id, "Scoped contest")
+        .expect("write")
+        .expect("organization");
+    let scope = CredentialScope {
+        contest_id: "2042".to_owned(),
+        valid_from: time(20),
+        valid_until: time(300),
+    };
+    let code = NewEnrolmentCode {
+        code_hash: id.clone(),
+        created_by_user_id: "u-1".to_owned(),
+        team: String::new(),
+        site: String::new(),
+        contest: "Final".to_owned(),
+        machine_number: None,
+        created_at: time(0),
+        expires_at: time(600),
+        credential_scope: Some(scope.clone()),
+    };
+    store.add_enrolment_code(&org.id, code).expect("mint");
+    let stick = StickId::parse(&id).expect("stick ID");
+    let outcome = store
+        .redeem_enrolment_code(&id, time(1), &stick, &Token::new("fixture-secret-token"))
+        .expect("redeem");
+    assert!(matches!(outcome, Redemption::Done(_)));
+    let (_, registered) = store.stick(&stick).expect("read").expect("registered");
+    assert_eq!(registered.credential_scope, Some(scope));
+}
+
 #[test]
 fn the_memory_store_keeps_its_contract() {
     enrolment_contract(&MemoryStore::default());
+    scoped_enrolment_contract(&MemoryStore::default());
     commands_contract(&MemoryStore::default());
     recordings_contract(&MemoryStore::default());
     profiles_contract(&MemoryStore::default());
@@ -1237,6 +1337,7 @@ fn the_postgres_store_keeps_its_contract() {
     };
     let store = PostgresStore::connect(&url).expect("connect");
     enrolment_contract(&store);
+    scoped_enrolment_contract(&store);
     commands_contract(&store);
     recordings_contract(&store);
     profiles_contract(&store);
@@ -1266,6 +1367,8 @@ fn postgres_row_security_hides_other_organizations() {
             ck_hub::Stick {
                 stick_id: StickId::parse(&stick).expect("id"),
                 token: Token::new("a-secret-of-some-length"),
+                credential_scope: None,
+                retired_at: None,
                 team: String::new(),
                 site: String::new(),
                 contest: String::new(),

@@ -185,10 +185,13 @@ impl Hub {
         lifetime_seconds: Option<i64>,
     ) -> Result<CommandView, CommandError> {
         let id = StickId::parse(stick).map_err(|_| CommandError::NotFound)?;
-        let Some((owner, token)) = self.stick_secret(&id)? else {
+        let Some((owner, token, scope)) = self.stick_secret(&id)? else {
             return Err(CommandError::NotFound);
         };
-        if owner != organization {
+        let now = (self.clock)();
+        if owner != organization
+            || scope.is_some_and(|scope| !scope.accepts_at(now, Duration::ZERO))
+        {
             return Err(CommandError::NotFound);
         }
         let lifetime = lifetime_seconds.unwrap_or(DEFAULT_LIFETIME_SECONDS);
@@ -197,7 +200,6 @@ impl Hub {
                 "the lifetime must be {MIN_LIFETIME_SECONDS} to {MAX_LIFETIME_S} seconds"
             )));
         }
-        let now = (self.clock)();
         let issued_at = now.replace_nanosecond(0).unwrap_or(now);
         let command = Command {
             id: new_command_id(),

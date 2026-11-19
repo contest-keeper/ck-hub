@@ -21,7 +21,7 @@ use tower::ServiceExt;
 const PASSWORD: &str = "correct horse battery";
 
 struct Setup {
-    _dir: TempDir,
+    dir: TempDir,
     app: Router,
     hub: Arc<Hub>,
     blobs: Arc<MemoryBlobs>,
@@ -66,7 +66,7 @@ fn setup(with_storage: bool) -> Setup {
         .expect("a viewer");
     let hub = Arc::new(hub);
     Setup {
-        _dir: dir,
+        dir,
         app: router(Arc::clone(&hub)),
         hub,
         blobs,
@@ -192,6 +192,56 @@ async fn complete(app: &Router, stick: &str, token: &str, id: &str) -> (StatusCo
         .expect("request");
     let (status, json, _) = call(app, request).await;
     (status, json)
+}
+
+#[tokio::test]
+async fn a_scoped_recording_can_finish_during_its_day_of_grace() {
+    let setup = setup(true);
+    let path = setup.dir.path().join("registry.json");
+    let mut registry: Value =
+        serde_json::from_slice(&fs::read(&path).expect("fixture registry")).expect("json");
+    let expiry = *setup.now.lock().expect("clock");
+    let utc = |instant: OffsetDateTime| {
+        instant
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("utc")
+    };
+    let mut scoped = registry["sticks"][0].clone();
+    scoped["stick_id"] = json!("scoped-stick");
+    scoped["token"] = json!("a-distinct-scoped-stick-secret");
+    scoped["credential_scope"] = json!({
+        "contest_id": "2042", "valid_from": utc(expiry - Duration::hours(2)), "valid_until": utc(expiry),
+    });
+    registry["sticks"]
+        .as_array_mut()
+        .expect("sticks")
+        .push(scoped);
+    fs::write(path, registry.to_string()).expect("scoped registry");
+    let app = &setup.app;
+    let stick = "scoped-stick";
+    let token = "a-distinct-scoped-stick-secret";
+    let bytes = bytes_of(100);
+    *setup.now.lock().expect("clock") = expiry - Duration::hours(3);
+    assert_eq!(
+        start(app, stick, token, "finish.mkv", &bytes).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    *setup.now.lock().expect("clock") = expiry;
+    let (status, begun) = start(app, stick, token, "finish.mkv", &bytes).await;
+    assert_eq!(status, StatusCode::OK);
+    let id = begun["id"].as_str().expect("recording ID");
+    assert_eq!(status_of(app, stick, token, id).await.0, StatusCode::OK);
+    assert_eq!(
+        chunk(app, stick, token, id, 0, &bytes).await.0,
+        StatusCode::OK
+    );
+    *setup.now.lock().expect("clock") = expiry + Duration::hours(24) - Duration::seconds(1);
+    assert_eq!(complete(app, stick, token, id).await.0, StatusCode::OK);
+    *setup.now.lock().expect("clock") = expiry + Duration::hours(24);
+    assert_eq!(
+        status_of(app, stick, token, id).await.0,
+        StatusCode::UNAUTHORIZED
+    );
 }
 
 /// A file of two chunks and a bit, uploaded in full.

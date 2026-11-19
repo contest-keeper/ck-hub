@@ -104,20 +104,117 @@ fn stick(id: &str, token: &str) -> Value {
             "contest": "Spring", "machine_number": 3 })
 }
 
-async fn heartbeat_status(app: &Router, id: &str, token: &str) -> StatusCode {
-    let body = serde_json::to_vec(&json!({
+#[tokio::test]
+async fn an_expired_credential_cannot_report_or_be_extended_with_the_same_key() {
+    let setup = setup();
+    let admin = cookie_for(&setup.app, "ana@example.org").await;
+    let mut expired = stick("stick-1", TOKEN);
+    expired["credential_scope"] = json!({
+        "contest_id": "2042", "valid_from": "2000-01-01T00:00:00Z",
+        "valid_until": "2000-01-02T00:00:00Z"
+    });
+    assert_eq!(
+        register(&setup.app, Some(&admin), &expired).await.1["added"],
+        1
+    );
+    assert_eq!(
+        heartbeat_status(&setup.app, "stick-1", TOKEN).await,
+        StatusCode::UNAUTHORIZED
+    );
+
+    expired["credential_scope"]["valid_until"] = json!("2099-01-01T00:00:00Z");
+    let (_, changed) = register(&setup.app, Some(&admin), &expired).await;
+    assert_eq!(changed["conflicts"], json!(["stick-1"]));
+    assert_eq!(
+        heartbeat_status(&setup.app, "stick-1", TOKEN).await,
+        StatusCode::UNAUTHORIZED
+    );
+    let mut fresh = stick("stick-2", "a-different-secret-for-the-next-contest");
+    fresh["credential_scope"] = json!({
+        "contest_id": "2043", "valid_from": "2001-01-01T00:00:00Z",
+        "valid_until": "2099-01-01T00:00:00Z"
+    });
+    assert_eq!(
+        register(&setup.app, Some(&admin), &fresh).await.1["added"],
+        1
+    );
+    assert_eq!(
+        heartbeat_status(&setup.app, "stick-2", TOKEN).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        heartbeat_status(
+            &setup.app,
+            "stick-2",
+            fresh["token"].as_str().expect("fixture token")
+        )
+        .await,
+        StatusCode::OK
+    );
+}
+
+fn heartbeat_body(id: &str) -> Value {
+    json!({
         "stick_id": id, "boot_id": "b", "seq": 1, "sent_at": "2026-11-13T10:00:00Z", "uptime_s": 5,
         "hostname": "h", "image_version": "v", "config_sha256": "0".repeat(64), "team": "t",
         "site": "s", "recording": { "mode": "low", "state": "recording" }
-    }))
-    .expect("json");
+    })
+}
+
+async fn heartbeat_status(app: &Router, id: &str, token: &str) -> StatusCode {
+    signed_report(app, "/api/v1/heartbeat", id, token, &heartbeat_body(id)).await
+}
+
+async fn signed_report(
+    app: &Router,
+    path: &str,
+    id: &str,
+    token: &str,
+    report: &Value,
+) -> StatusCode {
+    let body = serde_json::to_vec(report).expect("json");
     let signature = ck_crypto::sign(&ck_protocol::Token::new(token), &body);
-    let request = Request::post("/api/v1/heartbeat")
+    let request = Request::post(path)
         .header("X-CK-Stick", id)
         .header("X-CK-Signature", signature)
         .body(Body::from(body))
         .expect("request");
     call(app, request).await.0
+}
+
+#[tokio::test]
+async fn a_scoped_registry_credential_refuses_signed_assertions_for_another_contest() {
+    let id = "scoped-stick";
+    let mut scoped = stick(id, TOKEN);
+    scoped["credential_scope"] = json!({
+        "contest_id": "2042", "valid_from": "2001-01-01T00:00:00Z",
+        "valid_until": "2099-01-01T00:00:00Z"
+    });
+    let setup = setup_with_registry(&json!({"sticks": [scoped]}).to_string());
+    let mut heartbeat = heartbeat_body(id);
+    heartbeat["contest_id"] = json!(1337);
+    assert_eq!(
+        signed_report(&setup.app, "/api/v1/heartbeat", id, TOKEN, &heartbeat).await,
+        StatusCode::UNAUTHORIZED
+    );
+    heartbeat["contest_id"] = json!(2042);
+    assert_eq!(
+        signed_report(&setup.app, "/api/v1/heartbeat", id, TOKEN, &heartbeat).await,
+        StatusCode::OK
+    );
+
+    let mut event = json!({"stick_id": id, "boot_id": "b", "seq": 1,
+        "prev_hash": "", "sent_at": "2026-11-13T10:00:00Z", "kind": "submission",
+        "payload": {"platform": "codeforces", "contest_id": "1337"}});
+    assert_eq!(
+        signed_report(&setup.app, "/api/v1/events", id, TOKEN, &event).await,
+        StatusCode::UNAUTHORIZED
+    );
+    event["payload"]["contest_id"] = json!("2042");
+    assert_eq!(
+        signed_report(&setup.app, "/api/v1/events", id, TOKEN, &event).await,
+        StatusCode::OK
+    );
 }
 
 async fn list(app: &Router) -> Vec<Value> {
@@ -341,13 +438,17 @@ fn two_organizations() -> Router {
         memory_kib: 8,
         passes: 1,
     });
-    for email in ["ana@example.org", "bo@example.org"] {
+    for email in ["ana@example.org", "bo@example.org", "carla@example.org"] {
         hub.create_user(email, PASSWORD).expect("an account");
     }
     hub.create_organization("default", "Default", "ana@example.org")
         .expect("default");
     hub.create_organization("other", "Other", "bo@example.org")
         .expect("other");
+    for slug in ["default", "other"] {
+        hub.add_member(slug, "carla@example.org", Role::Admin)
+            .expect("carla can administer both");
+    }
     router(Arc::new(hub))
 }
 
@@ -373,6 +474,71 @@ async fn send(
 }
 
 #[tokio::test]
+async fn retiring_a_file_key_is_idempotent_and_keeps_the_sticks_history() {
+    let id = "legacy-stick";
+    let registry = json!({ "sticks": [stick(id, TOKEN)] });
+    let setup = setup_with_registry(&registry.to_string());
+    let admin = cookie_for(&setup.app, "ana@example.org").await;
+    let viewer = cookie_for(&setup.app, "vera@example.org").await;
+    let path = "/api/v1/sticks/legacy-stick/credential";
+    assert_eq!(
+        heartbeat_status(&setup.app, id, TOKEN).await,
+        StatusCode::OK
+    );
+    let event = json!({"stick_id": id, "boot_id": "b", "seq": 1,
+        "prev_hash": "", "sent_at": "2026-11-13T10:00:00Z", "kind": "submission",
+        "payload": {"platform": "codeforces", "contest_id": "2042"}});
+    assert_eq!(
+        signed_report(&setup.app, "/api/v1/events", id, TOKEN, &event).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        send(&setup.app, "DELETE", path, &viewer, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (_, bearer) = admin.split_once('=').expect("session token");
+    let forge_request = Request::delete(path)
+        .header("authorization", format!("Bearer {bearer}"))
+        .body(Body::empty())
+        .expect("retirement request");
+    assert_eq!(
+        call(&setup.app, forge_request).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let first = list(&setup.app).await;
+    assert_eq!(first[0]["team"], "Alpha");
+    assert!(first[0]["retired_at"].is_string());
+    assert_eq!(
+        heartbeat_status(&setup.app, id, TOKEN).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        signed_report(&setup.app, "/api/v1/events", id, TOKEN, &event).await,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // The tombstone and previously received heartbeat survive removal of the original file entry.
+    fs::write(setup.dir.path().join("registry.json"), r#"{"sticks":[]}"#).expect("update registry");
+    let named_path = "/api/v1/orgs/default/sticks/legacy-stick/credential";
+    assert_eq!(
+        send(&setup.app, "DELETE", named_path, &admin, None).await.0,
+        StatusCode::NO_CONTENT
+    );
+    let kept = list(&setup.app).await;
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0]["stick_id"], id);
+    assert_eq!(kept[0]["retired_at"], first[0]["retired_at"]);
+    assert_eq!(kept[0]["online"], false);
+    assert_eq!(kept[0]["last"]["seq"], 1);
+    assert_eq!(kept[0]["last"]["heartbeats"], 1);
+    assert_eq!(kept[0]["events"], 1);
+    assert_eq!(
+        heartbeat_status(&setup.app, id, TOKEN).await,
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
 async fn sticks_and_heartbeats_of_one_organization_are_invisible_to_another() {
     let app = two_organizations();
     let ana = cookie_for(&app, "ana@example.org").await;
@@ -392,6 +558,17 @@ async fn sticks_and_heartbeats_of_one_organization_are_invisible_to_another() {
     let (status, answer) = send(&app, "POST", theirs, &bo, Some(&stick("stick-1", TOKEN))).await;
     assert_eq!(status, StatusCode::CONFLICT, "{answer}");
     assert_eq!(answer["conflicts"], json!(["stick-1"]));
+    let wrong_org = "/api/v1/orgs/other/sticks/stick-1/credential";
+    assert_eq!(
+        send(&app, "DELETE", wrong_org, &bo, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let carla = cookie_for(&app, "carla@example.org").await;
+    let no_org = "/api/v1/sticks/stick-1/credential";
+    assert_eq!(
+        send(&app, "DELETE", no_org, &carla, None).await.0,
+        StatusCode::CONFLICT
+    );
 
     // The stick reports once, and what it reports shows in its own organization only.
     assert_eq!(

@@ -8,12 +8,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 use ck_protocol::{
     Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, SignedCommand, StickId, Token,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::{Duration, OffsetDateTime};
 
 use crate::accounts::{Accounts, PasswordCost};
 use crate::codeforces::Judge;
+use crate::credentials::CredentialScope;
 use crate::download::Download;
 use crate::images::ImageSource;
 use crate::judge::JudgeSubmission;
@@ -26,6 +27,11 @@ use crate::submissions::{self, SubmissionsView};
 
 /// A stick that has sent nothing for longer than this is shown as offline.
 pub const ONLINE_WINDOW_SECONDS: i64 = 60;
+
+#[derive(Deserialize)]
+struct ContestAssertion {
+    contest_id: Option<serde_json::Value>,
+}
 
 /// A stick sends a heartbeat every few seconds and a few events; this leaves room for a burst and
 /// stops a stick with a leaked secret from filling the database.
@@ -66,8 +72,14 @@ pub struct StickView {
     pub site: String,
     pub contest: String,
     pub machine_number: Option<u32>,
-    /// `false` until the first heartbeat, and again after [`ONLINE_WINDOW_SECONDS`] of silence.
+    /// `false` until the first heartbeat, after [`ONLINE_WINDOW_SECONDS`] of silence, or after
+    /// the credential is retired.
     pub online: bool,
+    #[serde(
+        with = "time::serde::rfc3339::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub retired_at: Option<OffsetDateTime>,
     pub last: Option<LastHeartbeat>,
     /// Events received from this stick since the Hub started.
     pub events: usize,
@@ -265,7 +277,8 @@ impl Hub {
         signature: Option<&str>,
         body: &[u8],
     ) -> Result<(u64, String, StickId), Rejection> {
-        let (organization, id) = self.authenticate(stick_header, signature, body)?;
+        let (organization, id, _) =
+            self.authenticate(stick_header, signature, body, Duration::ZERO)?;
         self.rate_limit(&id)?;
         let heartbeat: Heartbeat = serde_json::from_slice(body)
             .map_err(|_| Rejection::BadRequest("the heartbeat cannot be read"))?;
@@ -325,37 +338,78 @@ impl Hub {
         stick_header: Option<&str>,
         signature: Option<&str>,
         body: &[u8],
-    ) -> Result<(String, StickId), Rejection> {
+        grace: Duration,
+    ) -> Result<(String, StickId, Option<CredentialScope>), Rejection> {
         let (Some(stick_header), Some(signature)) = (stick_header, signature) else {
             return Err(Rejection::BadRequest("a header is missing"));
         };
         let id = StickId::parse(stick_header)
             .map_err(|_| Rejection::BadRequest("the stick header is not a stick id"))?;
-        let Some((organization, token)) = self.stick_secret(&id)? else {
+        let received_at = (self.clock)();
+        let Some((organization, token, scope)) = self.stick_secret(&id)? else {
             return Err(Rejection::Unauthorized);
         };
         if !ck_crypto::verify(&token, body, signature) {
             return Err(Rejection::Unauthorized);
         }
-        Ok((organization, id))
+        if let Some(scope) = &scope {
+            if !scope.accepts_at(received_at, grace) {
+                return Err(Rejection::Unauthorized);
+            }
+            // Recording chunks, status and completion sign fixed text, with no contest claim.
+            if body.trim_ascii_start().starts_with(b"{") {
+                let claim: ContestAssertion = serde_json::from_slice(body)
+                    .map_err(|_| Rejection::BadRequest("the contest identity cannot be read"))?;
+                if !scope.agrees_with(claim.contest_id.as_ref()) {
+                    return Err(Rejection::Unauthorized);
+                }
+            }
+        }
+        Ok((organization, id, scope))
     }
 
-    /// The organization a stick belongs to and its secret, if the Hub knows the stick. A stick is
-    /// known from the registry file or from the database, whichever has it. The registry file's
-    /// sticks belong to the default organization.
-    pub(crate) fn stick_secret(&self, id: &StickId) -> Result<Option<(String, Token)>, StoreError> {
+    /// The organization a stick belongs to and its credential. A stored retirement always blocks
+    /// an older copy in the trusted file. The file's sticks belong to the default organization.
+    pub(crate) fn stick_secret(
+        &self,
+        id: &StickId,
+    ) -> Result<Option<(String, Token, Option<CredentialScope>)>, StoreError> {
+        let stored = self.store.stick(id)?;
+        if stored
+            .as_ref()
+            .is_some_and(|(_, stick)| stick.retired_at.is_some())
+        {
+            return Ok(None);
+        }
         let from_file = {
             let mut registry = self.registry.lock().expect("registry lock");
             registry.refresh();
-            registry.find(id).map(|entry| entry.token.clone())
+            registry
+                .find(id)
+                .map(|entry| (entry.token.clone(), entry.credential_scope.clone()))
         };
         Ok(match from_file {
-            Some(token) => Some((self.default_org_id()?, token)),
-            None => self
-                .store
-                .stick(id)?
-                .map(|(organization, stick)| (organization, stick.token)),
+            Some((token, scope)) => Some((self.default_org_id()?, token, scope)),
+            None => stored
+                .map(|(organization, stick)| (organization, stick.token, stick.credential_scope)),
         })
+    }
+
+    pub(crate) fn retire_stick(&self, organization: &str, id: &str) -> Result<bool, StoreError> {
+        let Ok(id) = StickId::parse(id) else {
+            return Ok(false);
+        };
+        let file = {
+            let mut registry = self.registry.lock().expect("registry lock");
+            registry.refresh();
+            registry.find(&id).cloned()
+        };
+        let file = match file {
+            Some(entry) if organization == self.default_org_id()? => Some(entry),
+            _ => None,
+        };
+        self.store
+            .retire_stick(organization, &id, file.as_ref(), (self.clock)())
     }
 
     /// Takes in an event. A problem with the chain never makes the Hub refuse it: the stick would
@@ -385,12 +439,16 @@ impl Hub {
         signature: Option<&str>,
         body: &[u8],
     ) -> Result<u64, Rejection> {
-        let (organization, id) = self.authenticate(stick_header, signature, body)?;
+        let (organization, id, scope) =
+            self.authenticate(stick_header, signature, body, Duration::ZERO)?;
         self.rate_limit(&id)?;
         let event: Event = serde_json::from_slice(body)
             .map_err(|_| Rejection::BadRequest("the event cannot be read"))?;
         if event.stick_id != id {
             return Err(Rejection::BadRequest("the event is for another stick"));
+        }
+        if scope.is_some_and(|scope| !scope.agrees_with(event.payload.get("contest_id"))) {
+            return Err(Rejection::Unauthorized);
         }
         storable(body, event.seq)?;
 
@@ -497,7 +555,12 @@ impl Hub {
             Vec::new()
         };
         for stick in self.store.sticks(organization)? {
-            if !entries.iter().any(|e| e.stick_id == stick.stick_id) {
+            if let Some(entry) = entries
+                .iter_mut()
+                .find(|entry| entry.stick_id == stick.stick_id)
+            {
+                entry.retired_at = stick.retired_at;
+            } else {
                 entries.push(stick);
             }
         }
@@ -532,9 +595,11 @@ impl Hub {
                 site: entry.site.clone(),
                 contest: entry.contest.clone(),
                 machine_number: entry.machine_number,
-                online: last
-                    .as_ref()
-                    .is_some_and(|l| l.seconds_ago <= ONLINE_WINDOW_SECONDS),
+                online: entry.retired_at.is_none()
+                    && last
+                        .as_ref()
+                        .is_some_and(|l| l.seconds_ago <= ONLINE_WINDOW_SECONDS),
+                retired_at: entry.retired_at,
                 last,
                 events: stored.len(),
                 last_event_at: stored.last().map(|s| s.received_at),
