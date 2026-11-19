@@ -335,6 +335,14 @@ impl PostgresStore {
         organization: &str,
         query: impl FnOnce(&mut Conn) -> Result<T, postgres::Error>,
     ) -> Result<T, StoreError> {
+        self.in_org_transaction(organization, |conn| query(conn).map(|value| (value, true)))
+    }
+
+    fn in_org_transaction<T>(
+        &self,
+        organization: &str,
+        query: impl FnOnce(&mut Conn) -> Result<(T, bool), postgres::Error>,
+    ) -> Result<T, StoreError> {
         self.run(|conn| {
             // BEGIN and the setting go in one simple query, and COMMIT in another: three round
             // trips for a call instead of six. An id made of plain characters is put in the
@@ -352,8 +360,8 @@ impl PostgresStore {
                     conn.batch_execute("BEGIN")?;
                     conn.execute("SELECT set_config('ck.org_id', $1, true)", &[&organization])?;
                 }
-                let value = query(conn)?;
-                conn.batch_execute("COMMIT")?;
+                let (value, commit) = query(conn)?;
+                conn.batch_execute(if commit { "COMMIT" } else { "ROLLBACK" })?;
                 Ok(value)
             })();
             if result.is_err() {
@@ -529,27 +537,22 @@ impl Store for PostgresStore {
         organization: &str,
         heartbeat: Heartbeat,
         received_at: OffsetDateTime,
-    ) -> Result<(), StoreError> {
+    ) -> Result<Option<u64>, StoreError> {
         let json = serde_json::to_value(&heartbeat).map_err(failed)?;
         let seq = i64::try_from(heartbeat.seq).map_err(failed)?;
-        self.in_org(organization, |transaction| {
-            transaction.execute(
-                "INSERT INTO heartbeat_boots (organization_id, stick_id, boot_id, seq)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (stick_id, boot_id)
-                 DO UPDATE SET seq = GREATEST(heartbeat_boots.seq, EXCLUDED.seq)
-                 WHERE heartbeat_boots.organization_id = EXCLUDED.organization_id",
-                &[
-                    &organization,
-                    &heartbeat.stick_id.as_str(),
-                    &heartbeat.boot_id,
-                    &seq,
-                ],
-            )?;
-            transaction.execute(
-                "INSERT INTO heartbeats
+        let accepted = self.in_org_transaction(organization, |transaction| {
+            let stored = transaction.execute(
+                "WITH newer_boot AS (
+                     INSERT INTO heartbeat_boots (organization_id, stick_id, boot_id, seq)
+                     VALUES ($1, $2, $3, $4)
+                     ON CONFLICT (stick_id, boot_id) DO UPDATE SET seq = EXCLUDED.seq
+                     WHERE heartbeat_boots.organization_id = EXCLUDED.organization_id
+                       AND heartbeat_boots.seq < EXCLUDED.seq
+                     RETURNING organization_id, stick_id, boot_id, seq
+                 )
+                 INSERT INTO heartbeats
                      (organization_id, stick_id, boot_id, seq, received_at, count, heartbeat)
-                 VALUES ($1, $2, $3, $4, $5, 1, $6)
+                 SELECT organization_id, stick_id, boot_id, seq, $5, 1, $6 FROM newer_boot
                  ON CONFLICT (stick_id) DO UPDATE SET
                      boot_id = EXCLUDED.boot_id, seq = EXCLUDED.seq,
                      received_at = EXCLUDED.received_at, heartbeat = EXCLUDED.heartbeat,
@@ -563,9 +566,22 @@ impl Store for PostgresStore {
                     &received_at,
                     &json,
                 ],
-            )
+            )?;
+            // If a different organization owns the latest row, roll back the boot change too.
+            Ok((stored == 1, stored == 1))
         })?;
-        Ok(())
+        if accepted {
+            return Ok(None);
+        }
+        // Read the conflict detail after the write attempt. A concurrent writer may have
+        // advanced the boot while this transaction waited for its row.
+        let top =
+            self.heartbeat_seq_of_boot(organization, &heartbeat.stick_id, &heartbeat.boot_id)?;
+        top.filter(|&top| top >= heartbeat.seq)
+            .map(Some)
+            .ok_or_else(|| {
+                StoreError("the heartbeat could not be recorded in its organization".to_owned())
+            })
     }
 
     fn last_heartbeat(
