@@ -687,12 +687,18 @@ impl Hub {
             ))
         });
         let hardware = self.store.hardware(organization)?;
+        let expected = self.store.expected_configs(organization)?;
         let mut views = Vec::new();
         for entry in &entries {
             let seen = self.store.last_heartbeat(organization, &entry.stick_id)?;
             let stored = self.store.events(organization, &entry.stick_id)?;
             let (network_requests, blocked_requests) = network::counts(&stored);
             let boot = seen.as_ref().map(|s| s.heartbeat.boot_id.clone());
+            let reported = seen.as_ref().map(|s| s.heartbeat.config_sha256.clone());
+            let wrote = expected
+                .iter()
+                .find(|(id, _)| *id == entry.stick_id)
+                .map(|(_, sha256)| sha256.as_str());
             let last = seen.map(|s| LastHeartbeat {
                 received_at: s.received_at,
                 seconds_ago: (now - s.received_at).whole_seconds().max(0),
@@ -737,7 +743,11 @@ impl Hub {
                 blocked_requests,
                 submissions: stored.iter().filter(|s| taken(s)).count(),
                 last_submission: last_submission(&stored),
-                warnings: warnings(&stored, boot.as_deref()),
+                warnings: {
+                    let mut found = warnings(&stored, boot.as_deref());
+                    found.extend(config_warning(wrote, reported.as_deref()));
+                    found
+                },
             });
         }
         Ok(views)
@@ -836,6 +846,23 @@ fn last_submission(stored: &[StoredEvent]) -> Option<SubmissionView> {
 }
 
 /// Why an organizer should look at this stick.
+/// A warning when the stick reports another settings file than the one Forge wrote. Nothing is said
+/// for a stick Forge did not tell the Hub about, or one that has not sent a heartbeat yet.
+fn config_warning(wrote: Option<&str>, reported: Option<&str>) -> Option<String> {
+    let (wrote, reported) = (wrote?, reported?);
+    if reported.eq_ignore_ascii_case(wrote) {
+        return None;
+    }
+    let what = if reported.is_empty() {
+        "reports no settings file"
+    } else {
+        "reports settings other than the ones Forge wrote"
+    };
+    Some(format!(
+        "Settings changed: this stick {what}. The file was edited, or the stick was written by another tool."
+    ))
+}
+
 fn warnings(stored: &[StoredEvent], boot: Option<&str>) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     let mut distinct: Vec<String> = users_of_boot(stored, boot);

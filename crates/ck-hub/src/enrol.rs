@@ -205,6 +205,31 @@ impl Hub {
             .record_hardware_write(organization, hardware, Some(stick), now)?)
     }
 
+    /// Keeps the hash of the settings file Forge wrote for a stick, so the Hub can warn when the
+    /// stick reports another. Writing again replaces the hash.
+    ///
+    /// # Errors
+    /// [`EnrolError::BadRequest`] when `sha256` is not 64 lowercase hex digits.
+    pub fn record_config_hash(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        sha256: &str,
+    ) -> Result<(), EnrolError> {
+        let hex = sha256.len() == 64
+            && sha256
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        if !hex {
+            return Err(EnrolError::BadRequest(
+                "the settings hash must be 64 lowercase hex digits".to_owned(),
+            ));
+        }
+        Ok(self
+            .store
+            .record_expected_config(organization, stick, sha256, (self.clock)())?)
+    }
+
     /// Makes a code for one new stick of `organization`. The code is shown once, here.
     ///
     /// # Errors

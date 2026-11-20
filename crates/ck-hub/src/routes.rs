@@ -143,6 +143,8 @@ pub fn router(hub: Arc<Hub>) -> Router {
             "/api/v1/orgs/{slug}/recordings/{recording_id}/view",
             get(view_recording),
         )
+        .route("/api/v1/config-hashes", post(config_hash))
+        .route("/api/v1/orgs/{slug}/config-hashes", post(config_hash_in))
         .route("/api/v1/hardware-writes", post(hardware_write))
         .route(
             "/api/v1/orgs/{slug}/hardware-writes",
@@ -990,6 +992,50 @@ async fn hardware_write_in(
     match require_in(&hub, &headers, slug, Role::Admin).await {
         Ok(access) => record_write(hub, access, body).await,
         Err(reason) => denied(reason),
+    }
+}
+
+/// What Forge says about the settings file it wrote for a stick.
+#[derive(Deserialize)]
+struct ConfigHashBody {
+    stick_id: String,
+    sha256: String,
+}
+
+async fn config_hash(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) -> Response {
+    match require(&hub, &headers, Role::Admin).await {
+        Ok(access) => record_config(hub, access, body).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+async fn config_hash_in(
+    State(hub): State<Arc<Hub>>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    match require_in(&hub, &headers, slug, Role::Admin).await {
+        Ok(access) => record_config(hub, access, body).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+async fn record_config(hub: Arc<Hub>, access: Access, body: Bytes) -> Response {
+    let Ok(note) = serde_json::from_slice::<ConfigHashBody>(&body) else {
+        return (StatusCode::BAD_REQUEST, "the request cannot be read").into_response();
+    };
+    let Ok(stick) = ck_protocol::StickId::parse(&note.stick_id) else {
+        return (StatusCode::BAD_REQUEST, "the stick id is not valid").into_response();
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        hub.record_config_hash(&access.organization.id, &stick, &note.sha256)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(error)) => enrol_refusal(error),
+        Err(_) => unavailable(),
     }
 }
 
