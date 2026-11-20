@@ -1,10 +1,10 @@
 //! The store on PostgreSQL, so what sticks reported survives a restart of the Hub.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 
 use ck_protocol::{CommandAck, Event, Heartbeat, StickId, Token};
+use postgres::error::SqlState;
 use postgres::types::ToSql;
 use postgres::{Client, Row, Statement};
 use time::OffsetDateTime;
@@ -185,12 +185,31 @@ impl Conn {
 
 pub struct PostgresStore {
     url: String,
-    /// The connections. A slot is `None` before its first use, while the store is being dropped,
-    /// and after a connection was lost and not yet opened again. Each call uses one slot for the
-    /// whole of its transaction, so a call never sees another call's settings.
-    pool: Vec<Mutex<Option<Conn>>>,
-    /// Where the next call starts looking for a free slot, so calls spread over the pool.
-    next: AtomicUsize,
+    /// Idle slots. `None` is a slot whose connection has yet to be opened.
+    pool: Mutex<Vec<Option<Conn>>>,
+    available: Condvar,
+}
+
+struct ConnectionLease<'a> {
+    store: &'a PostgresStore,
+    connection: Option<Conn>,
+}
+
+impl Drop for ConnectionLease<'_> {
+    fn drop(&mut self) {
+        // A panic may have left a transaction open. Return the slot without reusing that connection.
+        if std::thread::panicking()
+            && let Some(connection) = self.connection.take()
+        {
+            let _ = std::thread::spawn(move || drop(connection)).join();
+        }
+        self.store
+            .pool
+            .lock()
+            .expect("database pool lock")
+            .push(self.connection.take());
+        self.store.available.notify_one();
+    }
 }
 
 /// TLS settings for every connection: the public web roots, no client certificate.
@@ -282,34 +301,56 @@ impl PostgresStore {
         // Migrations need the account that logged in; everything after them runs as the Hub role.
         migrate(&mut client)?;
         limit_to_hub_role(&mut client)?;
-        let mut pool = vec![Mutex::new(Some(Conn::new(client)))];
-        pool.extend((1..size.max(1)).map(|_| Mutex::new(None)));
+        let mut pool: Vec<_> = (1..size.max(1)).map(|_| None).collect();
+        pool.push(Some(Conn::new(client)));
         Ok(Self {
             url: url.to_owned(),
-            pool,
-            next: AtomicUsize::new(0),
+            pool: Mutex::new(pool),
+            available: Condvar::new(),
         })
+    }
+
+    fn lease(&self) -> ConnectionLease<'_> {
+        let mut pool = self
+            .available
+            .wait_while(self.pool.lock().expect("database pool lock"), |idle| {
+                idle.is_empty()
+            })
+            .expect("database pool lock");
+        ConnectionLease {
+            store: self,
+            connection: pool.pop().expect("an idle slot is available"),
+        }
     }
 
     fn run<T>(
         &self,
         query: impl FnOnce(&mut Conn) -> Result<T, postgres::Error>,
     ) -> Result<T, StoreError> {
-        // Take a free connection if there is one, starting where the last call left off; if all
-        // are busy, wait for the one this call would have started at.
-        let start = self.next.fetch_add(1, Ordering::Relaxed) % self.pool.len();
-        let mut slot = (0..self.pool.len())
-            .find_map(|i| self.pool[(start + i) % self.pool.len()].try_lock().ok())
-            .unwrap_or_else(|| self.pool[start].lock().expect("database lock"));
+        // Hold one connection for the whole transaction. When the pool is busy, wait for any slot.
+        let mut lease = self.lease();
         // After the database restarted the old connection is closed for good, so open a new one
         // instead of failing every request until the Hub restarts.
-        if slot.as_ref().is_none_or(Conn::is_closed) {
+        if lease.connection.as_ref().is_none_or(Conn::is_closed) {
             let mut client = Client::connect(&self.url, tls()).map_err(failed)?;
             limit_to_hub_role(&mut client)?;
-            *slot = Some(Conn::new(client));
+            lease.connection = Some(Conn::new(client));
         }
-        let client = slot.as_mut().expect("the connection was just opened");
-        query(client).map_err(failed)
+        let client = lease
+            .connection
+            .as_mut()
+            .expect("the connection was just opened");
+        let result = query(client);
+        if let Err(error) = &result
+            && (client.is_closed()
+                || error.is_closed()
+                || error.code() == Some(&SqlState::ADMIN_SHUTDOWN))
+        {
+            // PostgreSQL can report shutdown before the client notices that its socket is closed.
+            // Discard the connection without retrying an operation whose result may be uncertain.
+            lease.connection = None;
+        }
+        result.map_err(failed)
     }
 }
 
@@ -482,12 +523,11 @@ impl Drop for PostgresStore {
     /// Closing the connection blocks and starts a runtime of its own, which panics on a thread that
     /// already runs async tasks, such as the Hub's at shutdown. A plain thread does it safely.
     fn drop(&mut self) {
-        for slot in &mut self.pool {
-            if let Ok(slot) = slot.get_mut()
-                && let Some(conn) = slot.take()
-            {
-                let _ = std::thread::spawn(move || drop(conn)).join();
-            }
+        if let Ok(slots) = self.pool.get_mut()
+            && !slots.is_empty()
+        {
+            let connections = std::mem::take(slots);
+            let _ = std::thread::spawn(move || drop(connections)).join();
         }
     }
 }
@@ -1799,4 +1839,56 @@ fn organization_from(row: &Row) -> Organization {
 
 fn role_from(text: &str) -> Result<Role, StoreError> {
     Role::parse(text).ok_or_else(|| failed(format!("unknown role {text}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use super::PostgresStore;
+
+    #[test]
+    fn waiting_request_uses_whichever_connection_is_released() {
+        let Ok(url) = std::env::var("CK_TEST_DATABASE_URL") else {
+            return;
+        };
+        let store = PostgresStore::connect_with_pool(&url, 2).expect("PostgreSQL test database");
+        let (acquired, holds_connection) = mpsc::channel();
+        let (release_first, first) = mpsc::channel();
+        let (release_second, second) = mpsc::channel();
+        let (completed, finished) = mpsc::channel();
+        let wait = Duration::from_secs(3);
+        thread::scope(|scope| {
+            for release in [first, second] {
+                let store = &store;
+                let acquired = acquired.clone();
+                scope.spawn(move || {
+                    store
+                        .run(|_| {
+                            acquired.send(()).expect("connection acquired");
+                            release.recv_timeout(wait * 3).expect("release connection");
+                            Ok(())
+                        })
+                        .expect("hold connection");
+                });
+                holds_connection
+                    .recv_timeout(wait)
+                    .expect("held connection");
+            }
+            scope.spawn(|| {
+                store.run(|_| Ok(())).expect("use available connection");
+                completed.send(()).expect("request finished");
+            });
+            assert!(finished.recv_timeout(Duration::from_millis(100)).is_err());
+            release_second.send(()).expect("release second connection");
+            let result = finished.recv_timeout(wait);
+            release_first.send(()).expect("release first connection");
+            assert!(
+                result.is_ok(),
+                "the request waited on a busy connection while another was idle"
+            );
+        });
+    }
 }
