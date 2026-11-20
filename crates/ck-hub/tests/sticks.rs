@@ -872,3 +872,61 @@ async fn a_stick_that_reports_other_settings_than_forge_wrote_is_flagged() {
     );
     assert_eq!(settings_warning(&list(&setup.app).await), None);
 }
+
+#[tokio::test]
+async fn a_stick_that_refused_a_settings_file_is_flagged() {
+    let registry = json!({ "sticks": [stick("legacy-stick", TOKEN)] });
+    let setup = setup_with_registry(&registry.to_string());
+    let report = |seq: u64, trust: Option<&str>| {
+        let mut body = heartbeat_body("legacy-stick");
+        body["seq"] = json!(seq);
+        if let Some(trust) = trust {
+            body["config_trust"] = json!(trust);
+        }
+        body
+    };
+    let flagged = |sticks: &[Value]| {
+        sticks[0]["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .filter_map(|w| w.as_str())
+            .any(|w| w.starts_with("Settings refused"))
+    };
+    // Verified, unchecked and a stick that predates the check say nothing.
+    for (seq, trust) in [(1, None), (2, Some("verified")), (3, Some("unchecked"))] {
+        let body = report(seq, trust);
+        let status = signed_report(
+            &setup.app,
+            "/api/v1/heartbeat",
+            "legacy-stick",
+            TOKEN,
+            &body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!flagged(&list(&setup.app).await), "{trust:?}");
+    }
+    let body = report(4, Some("rejected"));
+    let status = signed_report(
+        &setup.app,
+        "/api/v1/heartbeat",
+        "legacy-stick",
+        TOKEN,
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(flagged(&list(&setup.app).await));
+    // Once the stick verifies its settings again the warning goes.
+    let body = report(5, Some("verified"));
+    signed_report(
+        &setup.app,
+        "/api/v1/heartbeat",
+        "legacy-stick",
+        TOKEN,
+        &body,
+    )
+    .await;
+    assert!(!flagged(&list(&setup.app).await));
+}

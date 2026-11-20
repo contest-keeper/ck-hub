@@ -51,6 +51,7 @@ fn heartbeat(stick: &str, boot: &str, seq: u64) -> Heartbeat {
             state: RecorderState::Recording,
         },
         screen_unlock: false,
+        config_trust: None,
     }
 }
 
