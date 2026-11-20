@@ -29,6 +29,7 @@ use crate::profiles::{
 };
 use crate::recordings::{CHUNK_BYTES, RecordingError, UploadStatus};
 use crate::register::{NewStick, RegisterError};
+use crate::signing::SignError;
 use crate::signup::{SignupError, TokenError};
 use crate::store::{Membership, Role};
 
@@ -142,6 +143,15 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route(
             "/api/v1/orgs/{slug}/recordings/{recording_id}/view",
             get(view_recording),
+        )
+        .route("/api/v1/config-signing-key", get(config_signing_key))
+        .route(
+            "/api/v1/config-signatures",
+            post(sign_config).layer(DefaultBodyLimit::max(MAX_SIGN_REQUEST_BYTES)),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/config-signatures",
+            post(sign_config_in).layer(DefaultBodyLimit::max(MAX_SIGN_REQUEST_BYTES)),
         )
         .route("/api/v1/config-hashes", post(config_hash))
         .route("/api/v1/orgs/{slug}/config-hashes", post(config_hash_in))
@@ -992,6 +1002,84 @@ async fn hardware_write_in(
     match require_in(&hub, &headers, slug, Role::Admin).await {
         Ok(access) => record_write(hub, access, body).await,
         Err(reason) => denied(reason),
+    }
+}
+
+/// A settings file of the largest size the Hub signs, as base64 in a small JSON request. A bigger
+/// request is refused before it is read; a file just over the limit gets a plain answer.
+const MAX_SIGN_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+
+/// The public key images trust to sign settings. It is public, so it needs no sign-in: the image
+/// build fetches it.
+async fn config_signing_key(State(hub): State<Arc<Hub>>) -> Response {
+    match hub.config_signing_public_key() {
+        Some(key) => {
+            Json(json!({ "key_id": key.key_id(), "public_key": key.to_base64() })).into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            "this Hub has no settings signing key",
+        )
+            .into_response(),
+    }
+}
+
+/// The settings file of a stick, as base64 so its bytes arrive exactly as they will be written.
+#[derive(Deserialize)]
+struct SignBody {
+    config: String,
+}
+
+async fn sign_config(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) -> Response {
+    match require(&hub, &headers, Role::Admin).await {
+        Ok(access) => sign(hub, access, body).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+async fn sign_config_in(
+    State(hub): State<Arc<Hub>>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    match require_in(&hub, &headers, slug, Role::Admin).await {
+        Ok(access) => sign(hub, access, body).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+async fn sign(hub: Arc<Hub>, access: Access, body: Bytes) -> Response {
+    use base64::Engine;
+    let refuse =
+        |status: StatusCode, why: &str| (status, Json(json!({ "error": why }))).into_response();
+    let Ok(request) = serde_json::from_slice::<SignBody>(&body) else {
+        return refuse(StatusCode::BAD_REQUEST, "the request cannot be read");
+    };
+    let Ok(config) = base64::engine::general_purpose::STANDARD.decode(request.config.trim()) else {
+        return refuse(StatusCode::BAD_REQUEST, "the settings must be base64");
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        hub.sign_stick_settings(&access.organization.id, &access.account, &config)
+    })
+    .await;
+    match result {
+        Ok(Ok(signature)) => Json(json!({
+            "signature": signature.to_file_text(),
+            "key_id": signature.key_id(),
+        }))
+        .into_response(),
+        Ok(Err(error)) => match error {
+            SignError::NoKey => refuse(StatusCode::SERVICE_UNAVAILABLE, &error.to_string()),
+            SignError::BadRequest(why) => refuse(StatusCode::BAD_REQUEST, &why),
+            SignError::RateLimited => refuse(StatusCode::TOO_MANY_REQUESTS, &error.to_string()),
+            SignError::NotYours => refuse(StatusCode::CONFLICT, &error.to_string()),
+            SignError::Store(error) => {
+                tracing::error!("{error}");
+                unavailable()
+            }
+        },
+        Err(_) => unavailable(),
     }
 }
 

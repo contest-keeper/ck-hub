@@ -7,6 +7,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ck_crypto::ConfigSigningKey;
 use ck_hub::{
     AcsMailer, AzureBlobs, CodeforcesClient, ConsoleMailer, CreateUserError, DEFAULT_POOL_SIZE,
     DEFAULT_RETENTION_DAYS, Download, Hub, MIN_PASSWORD_LENGTH, Mailer, MemoryStore, NewStick,
@@ -57,6 +58,10 @@ struct ServeArgs {
     registry: Option<PathBuf>,
     #[command(flatten)]
     database: DatabaseArgs,
+    /// The secret key the Hub signs stick settings with: the base64 seed that
+    /// `cargo run -p ck-crypto --example config_key` prints. Without it Forge cannot get settings signed
+    #[arg(long, env = "CK_CONFIG_SIGNING_KEY", hide_env_values = true)]
+    config_signing_key: Option<String>,
     /// A file to add one line to for every heartbeat, accepted or not. No secrets go in it
     #[arg(long)]
     log: Option<PathBuf>,
@@ -557,6 +562,9 @@ async fn run(args: ServeArgs) -> Result<(), String> {
     if let Some((mailer, url)) = mailer {
         hub = hub.with_mail(mailer, &url);
     }
+    if let Some(key) = settings_signing_key(args.config_signing_key.as_deref())? {
+        hub = hub.with_config_signing_key(key);
+    }
     // Public contests need no key, so this is always possible; the key and secret are not used.
     hub = hub.with_judge(Arc::new(CodeforcesClient::new(
         "https://codeforces.com",
@@ -574,6 +582,19 @@ async fn run(args: ServeArgs) -> Result<(), String> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|e| e.to_string())
+}
+
+/// The key stick settings are signed with, read from the environment. Only the id of its public
+/// half is logged, never the key. A blank value means the Hub does not sign.
+fn settings_signing_key(text: Option<&str>) -> Result<Option<ConfigSigningKey>, String> {
+    let Some(text) = text.filter(|text| !text.trim().is_empty()) else {
+        tracing::info!("no CK_CONFIG_SIGNING_KEY: stick settings cannot be signed");
+        return Ok(None);
+    };
+    let key = ConfigSigningKey::from_seed_base64(text)
+        .map_err(|_| "CK_CONFIG_SIGNING_KEY is not a settings signing key".to_owned())?;
+    tracing::info!(key = %key.verifying_key().key_id(), "stick settings signing is on");
+    Ok(Some(key))
 }
 
 /// Removes expired recordings every hour, on a thread of its own because the store and the storage

@@ -168,6 +168,10 @@ pub struct Hub {
     rates: Mutex<HashMap<StickId, (OffsetDateTime, u32)>>,
     /// Per user: when the current minute of commands started and how many they sent in it.
     pub(crate) command_rates: Mutex<HashMap<String, (OffsetDateTime, u32)>>,
+    /// Per user: when the current minute of settings signing started and how many they had signed.
+    pub(crate) sign_rates: Mutex<HashMap<String, (OffsetDateTime, u32)>>,
+    /// The key stick settings are signed with, when the Hub has one.
+    pub(crate) config_key: Option<ck_crypto::ConfigSigningKey>,
     /// Per user: enrolment codes made in the current minute.
     pub(crate) enrol_mints: Mutex<HashMap<String, (OffsetDateTime, u32)>>,
     /// Failed enrolments of everyone together: when the current minute started and how many.
@@ -232,6 +236,8 @@ impl Hub {
             clock,
             judge: None,
             judged: Mutex::new(HashMap::new()),
+            sign_rates: Mutex::new(HashMap::new()),
+            config_key: None,
         }
     }
 
@@ -695,6 +701,7 @@ impl Hub {
             let (network_requests, blocked_requests) = network::counts(&stored);
             let boot = seen.as_ref().map(|s| s.heartbeat.boot_id.clone());
             let reported = seen.as_ref().map(|s| s.heartbeat.config_sha256.clone());
+            let trust = seen.as_ref().and_then(|s| s.heartbeat.config_trust);
             let wrote = expected
                 .iter()
                 .find(|(id, _)| *id == entry.stick_id)
@@ -746,6 +753,7 @@ impl Hub {
                 warnings: {
                     let mut found = warnings(&stored, boot.as_deref());
                     found.extend(config_warning(wrote, reported.as_deref()));
+                    found.extend(trust_warning(trust));
                     found
                 },
             });
@@ -846,6 +854,14 @@ fn last_submission(stored: &[StoredEvent]) -> Option<SubmissionView> {
 }
 
 /// Why an organizer should look at this stick.
+/// A warning when the stick says it refused a settings file. It went on with its earlier settings,
+/// or with the image's own defaults, so what it does now is not what the file says.
+fn trust_warning(trust: Option<ck_protocol::ConfigTrust>) -> Option<String> {
+    (trust == Some(ck_protocol::ConfigTrust::Rejected)).then(|| {
+        "Settings refused: this stick refused a settings file the Hub did not sign (edited, unsigned or made for another stick) and kept its earlier settings.".to_owned()
+    })
+}
+
 /// A warning when the stick reports another settings file than the one Forge wrote. Nothing is said
 /// for a stick Forge did not tell the Hub about, or one that has not sent a heartbeat yet.
 fn config_warning(wrote: Option<&str>, reported: Option<&str>) -> Option<String> {

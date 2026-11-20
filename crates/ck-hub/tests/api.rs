@@ -147,6 +147,7 @@ fn heartbeat_body(stick: &str, boot: &str, seq: u64) -> Vec<u8> {
             state: RecorderState::Recording,
         },
         screen_unlock: false,
+        config_trust: None,
     };
     serde_json::to_vec(&heartbeat).expect("json")
 }

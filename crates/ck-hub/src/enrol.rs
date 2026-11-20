@@ -388,7 +388,7 @@ impl Hub {
 }
 
 /// Counts one more in the person's current minute; refuses past `max`.
-fn window_count(
+pub(crate) fn window_count(
     rates: &std::sync::Mutex<std::collections::HashMap<String, (OffsetDateTime, u32)>>,
     key: &str,
     now: OffsetDateTime,

@@ -203,6 +203,7 @@ fn stick(
                     state: RecorderState::Recording,
                 },
                 screen_unlock: false,
+                config_trust: None,
             })
             .expect("json");
             send(

@@ -159,6 +159,7 @@ async fn heartbeat_with_unlock(
             state: RecorderState::Recording,
         },
         screen_unlock,
+        config_trust: None,
     })
     .expect("json");
     let request = Request::post("/api/v1/heartbeat")
