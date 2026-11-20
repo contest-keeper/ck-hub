@@ -258,6 +258,7 @@ try { if (localStorage.getItem("ck-theme") === "classic") document.documentEleme
       <button class="chip" type="button" data-filter="attn" aria-pressed="false">Need a look <span id="c-attn"></span></button>
       <button class="chip" type="button" data-filter="offline" aria-pressed="false">Offline <span id="c-offline"></span></button>
       <button class="chip" type="button" data-filter="new" aria-pressed="false">Not seen yet <span id="c-new"></span></button>
+      <button class="chip" type="button" data-filter="archived" aria-pressed="false">Archived <span id="c-archived"></span></button>
     </div>
     <div class="wrap">
       <table>
@@ -349,7 +350,8 @@ function cell(row, text, className) {
   return td;
 }
 
-const needsLook = (stick) => stick.warnings.length > 0;
+const isArchived = (stick) => !!stick.archived_at;
+const needsLook = (stick) => !isArchived(stick) && stick.warnings.length > 0;
 const neverSeen = (stick) => !stick.last;
 const isOffline = (stick) => !stick.online && !!stick.last;
 
@@ -362,9 +364,20 @@ function rank(stick) {
 }
 
 function matches(stick) {
+  // Archived sticks have a place of their own; everywhere else they are out of the way.
+  if (filter === "archived") return isArchived(stick) && matchesQuery(stick);
+  if (isArchived(stick)) return false;
+  return matchesFilter(stick) && matchesQuery(stick);
+}
+
+function matchesFilter(stick) {
   if (filter === "attn" && !needsLook(stick)) return false;
   if (filter === "offline" && !isOffline(stick)) return false;
   if (filter === "new" && !neverSeen(stick)) return false;
+  return true;
+}
+
+function matchesQuery(stick) {
   if (!query) return true;
   const text = [stick.team, stick.site, stick.contest, stick.machine_number, stick.current_user,
     stick.last ? stick.last.hostname : ""].join(" ").toLowerCase();
@@ -789,6 +802,11 @@ function facts(stick) {
   add("Recorder", last ? last.recorder : "—");
   add("Heartbeats", last ? String(last.heartbeats) : "—");
   add("Image", last ? last.image_version : "—");
+  const disk = stick.hardware;
+  if (disk) {
+    add("USB disk", (disk.serial_hint ? "serial ending " + disk.serial_hint + ", " : "") + "id " + disk.id);
+    add("Written", disk.write_count === 1 ? "once" : disk.write_count + " times (rewritten)");
+  }
   add("Events", String(stick.events));
   add("Requests", String(stick.network_requests));
   add("Refused", String(stick.blocked_requests));
@@ -801,13 +819,69 @@ function facts(stick) {
   return list;
 }
 
+// Sticks whose "Delete now" was clicked once: the second click deletes.
+const confirmingDelete = new Set();
+
+async function changeStick(stick, method, suffix, body, done) {
+  const path = "/api/v1/orgs/" + encodeURIComponent(org) + "/sticks/" + encodeURIComponent(stick.stick_id) + suffix;
+  const result = await call(method, path, body);
+  confirmingDelete.delete(stick.stick_id);
+  if (result.ok) {
+    notice(done, true);
+    opened.delete(stick.stick_id);
+    await refresh();
+  } else {
+    notice((result.data && result.data.error) || "The Hub refused (" + result.status + ").", false);
+    render();
+  }
+}
+
+function archivePanel(stick) {
+  const box = el("div", "net cmd");
+  box.appendChild(el("h3", "", "Archive"));
+  const name = stick.team + " " + (stick.machine_number ?? "");
+  const admin = myRole === "owner" || myRole === "admin";
+  if (isArchived(stick)) {
+    box.appendChild(el("p", "", "Archived. The Hub deletes this stick and everything kept about it on " +
+      new Date(stick.delete_after).toLocaleDateString() + "."));
+    if (!admin) return box;
+    const bar = el("div", "cmd-bar");
+    bar.appendChild(actionButton("Restore", name, () => changeStick(stick, "POST", "/restore", null, "Stick restored.")));
+    const sure = confirmingDelete.has(stick.stick_id);
+    bar.appendChild(actionButton(sure ? "Click again to delete everything" : "Delete now", name, () => {
+      if (!confirmingDelete.has(stick.stick_id)) {
+        confirmingDelete.add(stick.stick_id);
+        render();
+        return;
+      }
+      changeStick(stick, "DELETE", "", null, "Stick deleted.");
+    }));
+    box.appendChild(bar);
+    return box;
+  }
+  if (!admin) {
+    box.appendChild(el("p", "muted", "Only an admin can archive a stick."));
+    return box;
+  }
+  box.appendChild(el("p", "muted", "An archived stick stops reporting and is deleted with all its data when the time is up. You can restore it before then."));
+  const bar = el("div", "cmd-bar");
+  for (const days of [7, 30]) {
+    bar.appendChild(actionButton("Archive for " + days + " days", name, () =>
+      changeStick(stick, "POST", "/archive", { days }, "Stick archived.")));
+  }
+  box.appendChild(bar);
+  return box;
+}
+
 function render() {
   const body = document.getElementById("rows");
   // The list is drawn again at every refresh: keep the cursor in a message being typed.
   const typing = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.cmd : null;
   body.replaceChildren();
-  const counts = { all: sticks.length, online: 0, offline: 0, attn: 0, new: 0 };
+  const counts = { all: 0, online: 0, offline: 0, attn: 0, new: 0, archived: 0 };
   for (const stick of sticks) {
+    if (isArchived(stick)) { counts.archived += 1; continue; }
+    counts.all += 1;
     if (stick.online) counts.online += 1;
     if (isOffline(stick)) counts.offline += 1;
     if (needsLook(stick)) counts.attn += 1;
@@ -817,7 +891,7 @@ function render() {
   document.getElementById("n-online").textContent = counts.online;
   document.getElementById("n-offline").textContent = counts.offline;
   document.getElementById("n-attn").textContent = counts.attn;
-  for (const name of ["all", "attn", "offline", "new"]) {
+  for (const name of ["all", "attn", "offline", "new", "archived"]) {
     document.getElementById("c-" + name).textContent = counts[name];
   }
 
@@ -830,9 +904,12 @@ function render() {
     const team = cell(row, "");
     team.appendChild(el("b", "", stick.team));
     team.appendChild(el("span", "sub", stick.site));
+    if (stick.hardware && stick.hardware.rewritten) {
+      team.appendChild(el("span", "sub", "Rewritten, written " + stick.hardware.write_count + " times"));
+    }
     const status = cell(row, "");
-    status.appendChild(el("span", "pill " + (stick.online ? "on" : last ? "off" : "new"),
-      stick.online ? "online" : (last ? "offline" : "not seen yet")));
+    status.appendChild(el("span", "pill " + (isArchived(stick) ? "new" : stick.online ? "on" : last ? "off" : "new"),
+      isArchived(stick) ? "archived" : stick.online ? "online" : (last ? "offline" : "not seen yet")));
     cell(row, stick.current_user ?? "", stick.current_user ? "" : "muted");
     cell(row, last ? ago(last.seconds_ago) : "—", last ? "" : "muted");
     const warnings = cell(row, "");
@@ -855,6 +932,7 @@ function render() {
       const td = el("td");
       td.colSpan = 7;
       td.appendChild(facts(stick));
+      td.appendChild(archivePanel(stick));
       td.appendChild(commandPanel(stick));
       td.appendChild(proofPanel(stick));
       td.appendChild(networkPanel(stick));

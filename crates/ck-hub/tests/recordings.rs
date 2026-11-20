@@ -552,3 +552,51 @@ async fn without_storage_the_routes_do_not_exist() {
     .await;
     assert_eq!(code, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn deleting_an_archived_stick_removes_its_recording_files_from_storage() {
+    let s = setup(true);
+    upload_whole(&s, "one.mkv").await;
+    upload_whole(&s, "two.mkv").await;
+    assert_eq!(s.blobs.names().len(), 2);
+    let owner = cookie(&s.app, "owner@example.org").await;
+    let send = |method: &'static str, path: &'static str, body: Body| {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("cookie", &owner)
+            .header("content-type", "application/json")
+            .body(body)
+            .expect("request");
+        call(&s.app, request)
+    };
+
+    // A stick that is not archived cannot be deleted, and its files stay.
+    let stick = "/api/v1/orgs/default/sticks/stick-a";
+    assert_eq!(
+        send("DELETE", stick, Body::empty()).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(s.blobs.names().len(), 2);
+
+    let archive = "/api/v1/orgs/default/sticks/stick-a/archive";
+    let days = Body::from(json!({ "days": 7 }).to_string());
+    assert_eq!(send("POST", archive, days).await.0, StatusCode::NO_CONTENT);
+    // An archived stick uploads nothing more, and keeps what it has until it is deleted.
+    let (status, _) = start(
+        &s.app,
+        "stick-a",
+        "token-of-stick-a",
+        "three.mkv",
+        &bytes_of(100),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(s.blobs.names().len(), 2);
+
+    assert_eq!(
+        send("DELETE", stick, Body::empty()).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert!(s.blobs.names().is_empty(), "{:?}", s.blobs.names());
+}

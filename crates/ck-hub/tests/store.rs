@@ -173,6 +173,9 @@ fn sticks_contract(store: &dyn Store, org: &str, a_id: &StickId) {
         token: Token::new(token),
         credential_scope: None,
         retired_at: None,
+        archived_at: None,
+        delete_after: None,
+        deleted_at: None,
         team: "Alpha".to_owned(),
         site: "Lab 1".to_owned(),
         contest: "Spring".to_owned(),
@@ -612,6 +615,9 @@ fn organizations_are_kept_apart(store: &dyn Store) {
         token: Token::new("a-secret-of-some-length"),
         credential_scope: None,
         retired_at: None,
+        archived_at: None,
+        delete_after: None,
+        deleted_at: None,
         team: "Alpha".to_owned(),
         site: "Lab 1".to_owned(),
         contest: "Spring".to_owned(),
@@ -1211,6 +1217,7 @@ fn commands_contract(store: &dyn Store) {
     );
 }
 
+#[allow(clippy::too_many_lines)]
 fn enrolment_contract(store: &dyn Store) {
     use ck_hub::{NewEnrolmentCode, Redemption};
 
@@ -1232,6 +1239,7 @@ fn enrolment_contract(store: &dyn Store) {
         created_at: time(0),
         expires_at: time(ends),
         credential_scope: None,
+        hardware: None,
     };
     // Sticks are never deleted from a database, so ids from an earlier run must not come again.
     let base = SystemTime::now()
@@ -1352,6 +1360,7 @@ fn scoped_enrolment_contract(store: &dyn Store) {
         created_at: time(0),
         expires_at: time(600),
         credential_scope: Some(scope.clone()),
+        hardware: None,
     };
     store.add_enrolment_code(&org.id, code).expect("mint");
     let stick = StickId::parse(&id).expect("stick ID");
@@ -1389,6 +1398,7 @@ fn recoverable_enrolment_contract(store: &dyn Store) {
                 created_at: time(0),
                 expires_at: time(86_400),
                 credential_scope: Some(credential_scope.clone()),
+                hardware: None,
             },
         )
         .expect("mint");
@@ -1437,6 +1447,297 @@ fn recoverable_enrolment_contract(store: &dyn Store) {
     assert_eq!(claim(86_431, &stick, &token), Redemption::Invalid);
 }
 
+fn hardware_contract(store: &dyn Store) {
+    use ck_hub::Hardware;
+
+    let id = unique();
+    let make = |tag: &str| {
+        store
+            .create_organization(&format!("{id}-{tag}"), tag)
+            .expect("write")
+            .expect("a new organization")
+            .id
+    };
+    let (one, two) = (make("one"), make("two"));
+    let disk = Hardware {
+        fingerprint: "ab".repeat(32),
+        serial_hint: "1234".to_owned(),
+    };
+    let stick = |n: &str| StickId::parse(&format!("{id}-{n}")).expect("id");
+
+    // Every write of a disk counts, for its own organization only.
+    assert_eq!(
+        store
+            .record_hardware_write(&one, &disk, None, time(1))
+            .expect("write"),
+        1
+    );
+    assert_eq!(
+        store
+            .record_hardware_write(&one, &disk, Some(&stick("a")), time(2))
+            .expect("write"),
+        2
+    );
+    assert_eq!(
+        store
+            .record_hardware_write(&two, &disk, None, time(3))
+            .expect("write"),
+        1
+    );
+    let rows = store.hardware(&one).expect("read");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].write_count, 2);
+    assert_eq!(
+        (rows[0].first_written_at, rows[0].last_written_at),
+        (time(1), time(2))
+    );
+    assert_eq!(rows[0].current_stick_id, Some(stick("a")));
+    // A write that names no stick keeps the current one.
+    assert_eq!(
+        store
+            .record_hardware_write(&one, &disk, None, time(4))
+            .expect("write"),
+        3
+    );
+    assert_eq!(
+        store.hardware(&one).expect("read")[0].current_stick_id,
+        Some(stick("a"))
+    );
+
+    // A code minted for a disk counts nothing by itself: a write that never happened (a cancelled
+    // prompt, a failed disk) must not show as a rewrite. The stick that trades the code is the
+    // write, and becomes the disk's current stick.
+    let code = ck_hub::NewEnrolmentCode {
+        code_hash: format!("{id}-code"),
+        created_by_user_id: "u-1".to_owned(),
+        team: "Team".to_owned(),
+        site: "Lab".to_owned(),
+        contest: "Final".to_owned(),
+        machine_number: Some(1),
+        created_at: time(0),
+        expires_at: time(1000),
+        credential_scope: None,
+        hardware: Some(disk.clone()),
+    };
+    store.add_enrolment_code(&one, code).expect("write");
+    assert_eq!(store.hardware(&one).expect("read")[0].write_count, 3);
+    // A database keeps every stick id for good, so an id from an earlier run must not come again.
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time")
+        .as_nanos();
+    let enrolled = StickId::parse(&format!("{:08x}", nanos % 0xF00_0000)).expect("id");
+    let token = Token::new("a-fresh-secret-for-the-stick");
+    let done = store
+        .redeem_enrolment_code(&format!("{id}-code"), time(5), &enrolled, &token)
+        .expect("write");
+    assert!(matches!(done, ck_hub::Redemption::Done(_)), "{done:?}");
+    let row = &store.hardware(&one).expect("read")[0];
+    assert_eq!(row.write_count, 4);
+    assert_eq!(row.last_written_at, time(5));
+    assert_eq!(row.current_stick_id, Some(enrolled.clone()));
+
+    // The count outlives the stick: deleting it keeps the disk's row.
+    assert!(
+        store
+            .archive_stick(&one, &enrolled, None, time(6), time(100))
+            .expect("write")
+    );
+    assert!(store.delete_stick(&one, &enrolled, time(7)).expect("write"));
+    assert_eq!(store.hardware(&one).expect("read")[0].write_count, 4);
+    assert_eq!(store.hardware(&two).expect("read")[0].write_count, 1);
+}
+
+#[allow(clippy::too_many_lines)]
+fn archive_contract(store: &dyn Store) {
+    use ck_hub::{CommandState, Kind, Recording, StoredCommand};
+    use ck_protocol::{Action, Command};
+
+    let id = unique();
+    let org = store
+        .create_organization(&format!("{id}-archive"), "Archive")
+        .expect("write")
+        .expect("a new organization")
+        .id;
+    let other_org = store
+        .create_organization(&format!("{id}-other"), "Other")
+        .expect("write")
+        .expect("a new organization")
+        .id;
+    let a = format!("{id}-a");
+    let b = format!("{id}-b");
+    let a_id = StickId::parse(&a).expect("id");
+    let b_id = StickId::parse(&b).expect("id");
+    let stick = |stick_id: &StickId| ck_hub::Stick {
+        stick_id: stick_id.clone(),
+        token: Token::new("a-secret-token-of-the-stick"),
+        credential_scope: None,
+        retired_at: None,
+        archived_at: None,
+        delete_after: None,
+        deleted_at: None,
+        team: "Alpha".to_owned(),
+        site: "Lab 1".to_owned(),
+        contest: "Spring".to_owned(),
+        machine_number: Some(4),
+    };
+    assert!(store.add_stick(&org, stick(&a_id)).expect("write"));
+    assert!(store.add_stick(&org, stick(&b_id)).expect("write"));
+
+    // Everything a stick reports and is sent.
+    store
+        .record_heartbeat(&org, heartbeat(&a, "boot-1", 1), time(1))
+        .expect("write");
+    store
+        .append_event(&org, event(&a, 1, "ana"), time(2), None)
+        .expect("write");
+    store
+        .record_heartbeat(&org, heartbeat(&b, "boot-1", 1), time(1))
+        .expect("write");
+    store
+        .append_event(&org, event(&b, 1, "bob"), time(2), None)
+        .expect("write");
+    let token = Token::new("a-secret-token-of-the-stick");
+    let command = StoredCommand {
+        signed: ck_crypto::sign_command(
+            &token,
+            Command {
+                id: format!("{id}-command"),
+                stick_id: a_id.clone(),
+                issued_at: time(3).into(),
+                expires_at: time(900).into(),
+                action: Action::Message {
+                    text: "hello".to_owned(),
+                },
+            },
+        ),
+        sent_by_user_id: "u-1".to_owned(),
+        sent_by_email: "owner@example.org".to_owned(),
+        state: CommandState::Queued,
+        refusal: None,
+        created_at: time(3),
+        delivered_at: None,
+        finished_at: None,
+    };
+    store.queue_command(&org, command).expect("write");
+    let recording = Recording {
+        id: format!("{id}-rec"),
+        stick_id: a.clone(),
+        file: "screen.mkv".to_owned(),
+        kind: Kind::Video,
+        size: 9_000_000,
+        sha256: "a".repeat(64),
+        started_at: Some(time(3)),
+        duration_s: Some(600),
+        next_chunk: 0,
+        created_at: time(3),
+        completed_at: None,
+        expires_at: None,
+    };
+    assert!(store.add_recording(&org, &recording).expect("write"));
+
+    // Archiving needs the stick to exist in the organization, and keeps the first time.
+    let after = time(100);
+    assert!(
+        !store
+            .archive_stick(
+                &org,
+                &StickId::parse(&format!("{id}-none")).expect("id"),
+                None,
+                time(10),
+                after
+            )
+            .expect("write")
+    );
+    assert!(
+        !store
+            .archive_stick(&other_org, &a_id, None, time(10), after)
+            .expect("write"),
+        "another organization cannot archive the stick"
+    );
+    assert!(
+        store
+            .archive_stick(&org, &a_id, None, time(10), after)
+            .expect("write")
+    );
+    assert!(
+        store
+            .archive_stick(&org, &a_id, None, time(20), time(5000))
+            .expect("write")
+    );
+    let (_, kept) = store.stick(&a_id).expect("read").expect("stick");
+    assert_eq!(
+        (kept.archived_at, kept.delete_after),
+        (Some(time(10)), Some(after))
+    );
+    // Nothing is due before the time, and only the archived stick after it.
+    assert_eq!(
+        store.sticks_due_for_deletion(&org, time(99)).expect("read"),
+        Vec::new()
+    );
+    assert_eq!(
+        store
+            .sticks_due_for_deletion(&org, time(100))
+            .expect("read"),
+        vec![a_id.clone()]
+    );
+
+    // Restoring undoes archiving. A stick that is not archived cannot be deleted.
+    assert!(!store.restore_stick(&other_org, &a_id).expect("write"));
+    assert!(store.restore_stick(&org, &a_id).expect("write"));
+    assert!(!store.restore_stick(&org, &a_id).expect("write"));
+    let (_, kept) = store.stick(&a_id).expect("read").expect("stick");
+    assert_eq!((kept.archived_at, kept.delete_after), (None, None));
+    assert!(!store.delete_stick(&org, &a_id, time(200)).expect("write"));
+    assert_eq!(store.events(&org, &a_id).expect("read").len(), 1);
+
+    // Deleting removes everything but a tombstone, in its own organization only.
+    assert!(
+        store
+            .archive_stick(&org, &a_id, None, time(10), after)
+            .expect("write")
+    );
+    assert!(
+        !store
+            .delete_stick(&other_org, &a_id, time(200))
+            .expect("write")
+    );
+    assert!(store.delete_stick(&org, &a_id, time(200)).expect("write"));
+    assert!(!store.delete_stick(&org, &a_id, time(300)).expect("write"));
+    assert!(store.last_heartbeat(&org, &a_id).expect("read").is_none());
+    assert!(
+        store
+            .heartbeat_seq_of_boot(&org, &a_id, "boot-1")
+            .expect("read")
+            .is_none()
+    );
+    assert!(store.events(&org, &a_id).expect("read").is_empty());
+    assert_eq!(
+        store.commands_of(&org, &a_id, 10).expect("read"),
+        Vec::new()
+    );
+    assert_eq!(
+        store.recordings_of(&org, &a_id, 10).expect("read"),
+        Vec::new()
+    );
+    let (_, tomb) = store.stick(&a_id).expect("read").expect("tombstone");
+    assert_eq!(tomb.deleted_at, Some(time(200)));
+    assert!(tomb.retired_at.is_some() && tomb.token != token);
+    assert_eq!((tomb.team.as_str(), tomb.contest.as_str()), ("", ""));
+    // The id stays taken, and a deleted stick cannot be archived or restored again.
+    assert!(!store.add_stick(&org, stick(&a_id)).expect("write"));
+    assert!(
+        !store
+            .archive_stick(&org, &a_id, None, time(300), time(900))
+            .expect("write")
+    );
+    assert!(!store.restore_stick(&org, &a_id).expect("write"));
+
+    // The other stick is untouched.
+    assert_eq!(store.events(&org, &b_id).expect("read").len(), 1);
+    assert!(store.last_heartbeat(&org, &b_id).expect("read").is_some());
+}
+
 #[test]
 fn the_memory_store_keeps_its_contract() {
     enrolment_contract(&MemoryStore::default());
@@ -1449,6 +1750,8 @@ fn the_memory_store_keeps_its_contract() {
     the_store_contract(&MemoryStore::default());
     judge_contract(&MemoryStore::default());
     organizations_are_kept_apart(&MemoryStore::default());
+    archive_contract(&MemoryStore::default());
+    hardware_contract(&MemoryStore::default());
 }
 
 #[test]
@@ -1468,6 +1771,8 @@ fn the_postgres_store_keeps_its_contract() {
     the_store_contract(&store);
     judge_contract(&store);
     organizations_are_kept_apart(&store);
+    archive_contract(&store);
+    hardware_contract(&store);
 }
 
 #[test]
@@ -1525,6 +1830,9 @@ fn postgres_row_security_hides_other_organizations() {
                 token: Token::new("a-secret-of-some-length"),
                 credential_scope: None,
                 retired_at: None,
+                archived_at: None,
+                delete_after: None,
+                deleted_at: None,
                 team: String::new(),
                 site: String::new(),
                 contest: String::new(),
@@ -1873,6 +2181,78 @@ fn postgres_hub_role_cannot_change_the_schema_or_the_event_log() {
             .batch_execute("ROLLBACK TO SAVEPOINT s")
             .expect("rollback");
     }
+}
+
+#[test]
+fn postgres_hub_role_can_purge_events_only_of_an_archived_stick_of_its_own_organization() {
+    let Some(url) = database_url() else { return };
+    let store = PostgresStore::connect(&url).expect("connect");
+    let id = unique();
+    let make = |tag: &str| {
+        store
+            .create_organization(&format!("{id}-{tag}"), tag)
+            .expect("write")
+            .expect("a new organization")
+            .id
+    };
+    let (org, other) = (make("org"), make("other"));
+    let live = format!("{id}-live");
+    let archived = format!("{id}-gone");
+    for stick in [&live, &archived] {
+        let new = ck_hub::Stick {
+            stick_id: StickId::parse(stick).expect("id"),
+            token: Token::new("a-secret-token-of-the-stick"),
+            credential_scope: None,
+            retired_at: None,
+            archived_at: None,
+            delete_after: None,
+            deleted_at: None,
+            team: String::new(),
+            site: String::new(),
+            contest: String::new(),
+            machine_number: None,
+        };
+        assert!(store.add_stick(&org, new).expect("write"));
+        store
+            .append_event(&org, event(stick, 1, "ana"), time(2), None)
+            .expect("write");
+    }
+    let gone = StickId::parse(&archived).expect("id");
+    let live_id = StickId::parse(&live).expect("id");
+    assert!(
+        store
+            .archive_stick(&org, &gone, None, time(3), time(9))
+            .expect("write")
+    );
+
+    // The Hub role runs the function the way the Hub does, inside one organization.
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).expect("connect");
+    let mut purge = |organization: &str, working_for: &str, stick: &str| {
+        let mut transaction = client.transaction().expect("transaction");
+        transaction
+            .batch_execute("SET LOCAL ROLE ck_hub_app")
+            .expect("the hub role exists");
+        transaction
+            .execute("SELECT set_config('ck.org_id', $1, true)", &[&working_for])
+            .expect("set");
+        let result = transaction.query(
+            "SELECT purge_stick_events($1, $2)",
+            &[&organization, &stick],
+        );
+        result.is_ok()
+    };
+    assert!(!purge(&org, &org, &live), "a live stick's events must stay");
+    assert!(
+        !purge(&org, &other, &archived),
+        "a request for another organization must not purge"
+    );
+    assert!(
+        !purge(&other, &other, &archived),
+        "the stick is not that organization's"
+    );
+    assert_eq!(store.events(&org, &live_id).expect("read").len(), 1);
+    assert_eq!(store.events(&org, &gone).expect("read").len(), 1);
+    assert!(purge(&org, &org, &archived));
 }
 
 // One long scenario on purpose: its steps share the same organization and people.

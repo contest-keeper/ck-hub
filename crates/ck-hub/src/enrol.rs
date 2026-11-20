@@ -51,6 +51,8 @@ pub struct NewEnrolmentCode {
     pub created_at: OffsetDateTime,
     pub expires_at: OffsetDateTime,
     pub credential_scope: Option<CredentialScope>,
+    /// The disk the stick is written to, when Forge says so.
+    pub hardware: Option<crate::store::Hardware>,
 }
 
 /// What the Hub knows about the stick a code was made for.
@@ -101,6 +103,7 @@ pub struct EnrolmentSpec {
     pub machine_number: Option<u32>,
     pub lifetime_minutes: Option<i64>,
     pub credential_scope: Option<CredentialScope>,
+    pub hardware: Option<crate::store::Hardware>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -114,6 +117,27 @@ pub enum EnrolError {
     Invalid,
     #[error(transparent)]
     Store(#[from] StoreError),
+}
+
+/// A fingerprint is a SHA-256 in hex; the hint is a few letters or digits of the serial number.
+pub(crate) fn check_hardware(hardware: &crate::store::Hardware) -> Result<(), EnrolError> {
+    let fingerprint = &hardware.fingerprint;
+    let hint = &hardware.serial_hint;
+    if fingerprint.len() != 64
+        || !fingerprint
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(EnrolError::BadRequest(
+            "the hardware fingerprint must be 64 lowercase hex digits".to_owned(),
+        ));
+    }
+    if hint.len() > 8 || !hint.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err(EnrolError::BadRequest(
+            "the serial hint is at most 8 letters or digits".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn plain_text(text: &str) -> bool {
@@ -163,6 +187,24 @@ fn new_stick_id() -> StickId {
 }
 
 impl Hub {
+    /// Counts a write of a disk that gets a stick whose id is already known, as when Forge makes a
+    /// stick with its secret already on it. Returns how many times the disk was written.
+    ///
+    /// # Errors
+    /// [`EnrolError::BadRequest`] for a fingerprint or hint that is not valid.
+    pub fn record_stick_write(
+        &self,
+        organization: &str,
+        hardware: &crate::store::Hardware,
+        stick: &StickId,
+    ) -> Result<u32, EnrolError> {
+        check_hardware(hardware)?;
+        let now = (self.clock)();
+        Ok(self
+            .store
+            .record_hardware_write(organization, hardware, Some(stick), now)?)
+    }
+
     /// Makes a code for one new stick of `organization`. The code is shown once, here.
     ///
     /// # Errors
@@ -203,6 +245,9 @@ impl Hub {
         }
         let now = (self.clock)();
         window_count(&self.enrol_mints, &creator.id, now, MAX_MINTS_PER_MINUTE)?;
+        if let Some(hardware) = &spec.hardware {
+            check_hardware(hardware)?;
+        }
         let (shown, plain) = new_code();
         let expires_at = now + Duration::minutes(minutes);
         self.store.add_enrolment_code(
@@ -217,6 +262,7 @@ impl Hub {
                 created_at: now,
                 expires_at,
                 credential_scope: spec.credential_scope,
+                hardware: spec.hardware,
             },
         )?;
         self.store

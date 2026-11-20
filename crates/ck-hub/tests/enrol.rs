@@ -412,3 +412,107 @@ async fn one_person_may_make_only_so_many_codes_a_minute() {
         StatusCode::TOO_MANY_REQUESTS
     );
 }
+
+async fn sticks_of_default(app: &Router, cookie: &str) -> Vec<Value> {
+    let request = Request::get("/api/v1/orgs/default/sticks")
+        .header("cookie", cookie)
+        .body(Body::empty())
+        .expect("request");
+    let (status, body) = call(app, request).await;
+    assert_eq!(status, StatusCode::OK);
+    body.as_array().expect("a list").clone()
+}
+
+async fn hardware_write(app: &Router, cookie: &str, body: &Value) -> (StatusCode, Value) {
+    let request = Request::post("/api/v1/orgs/default/hardware-writes")
+        .header("cookie", cookie)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("request");
+    call(app, request).await
+}
+
+#[tokio::test]
+async fn writing_the_same_disk_again_shows_the_stick_as_rewritten() {
+    let s = setup();
+    let owner = cookie(&s.app, "owner@example.org").await;
+    let viewer = cookie(&s.app, "viewer@example.org").await;
+    let disk = json!({ "fingerprint": "ab".repeat(32), "serial_hint": "1234" });
+    let other_disk = json!({ "fingerprint": "cd".repeat(32), "serial_hint": "9999" });
+
+    // A code that is minted and never traded (a cancelled write) is not a write.
+    let (status, _) = mint(&s.app, &owner, &json!({ "hardware": &disk })).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // Two enrolments for one disk: the second stick is the disk's second write.
+    let mut enrolled = Vec::new();
+    for hardware in [&disk, &disk, &other_disk] {
+        let (status, minted) = mint(&s.app, &owner, &json!({ "hardware": hardware })).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, stick) = enrol(&s.app, minted["code"].as_str().expect("code")).await;
+        assert_eq!(status, StatusCode::OK);
+        enrolled.push(stick["stick_id"].as_str().expect("id").to_owned());
+    }
+    let listed = sticks_of_default(&s.app, &owner).await;
+    let hardware_of = |id: &str| {
+        listed
+            .iter()
+            .find(|stick| stick["stick_id"] == id)
+            .expect("the stick is listed")["hardware"]
+            .clone()
+    };
+    assert_eq!(
+        hardware_of(&enrolled[0]),
+        Value::Null,
+        "the old stick no longer holds the disk"
+    );
+    let second = hardware_of(&enrolled[1]);
+    assert_eq!(
+        (
+            second["write_count"].as_u64(),
+            second["rewritten"].as_bool()
+        ),
+        (Some(2), Some(true))
+    );
+    assert_eq!(second["serial_hint"], "1234");
+    assert_eq!(second["id"], "abababab");
+    let third = hardware_of(&enrolled[2]);
+    assert_eq!(
+        (third["write_count"].as_u64(), third["rewritten"].as_bool()),
+        (Some(1), Some(false))
+    );
+
+    // A stick with its secret already on it reports its disk after it is written.
+    let known =
+        json!({ "stick_id": "stick-a", "fingerprint": "ef".repeat(32), "serial_hint": "55" });
+    assert_eq!(
+        hardware_write(&s.app, &viewer, &known).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        hardware_write(&s.app, &owner, &known).await,
+        (StatusCode::OK, json!({ "write_count": 1 }))
+    );
+    assert_eq!(
+        hardware_write(&s.app, &owner, &known).await,
+        (StatusCode::OK, json!({ "write_count": 2 }))
+    );
+    let listed = sticks_of_default(&s.app, &owner).await;
+    let stick = listed
+        .iter()
+        .find(|s| s["stick_id"] == "stick-a")
+        .expect("stick-a");
+    assert_eq!(stick["hardware"]["rewritten"], true);
+
+    // What is not a fingerprint is refused.
+    for bad in [
+        json!({ "fingerprint": "xyz" }),
+        json!({ "fingerprint": "AB".repeat(32) }),
+        json!({ "fingerprint": "ab".repeat(32), "serial_hint": "too-long-for-a-hint" }),
+    ] {
+        assert_eq!(
+            mint(&s.app, &owner, &json!({ "hardware": bad })).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+}

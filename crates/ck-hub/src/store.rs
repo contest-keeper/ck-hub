@@ -74,6 +74,29 @@ impl Role {
     }
 }
 
+/// The physical disk a stick was written to, as Forge reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Hardware {
+    /// A SHA-256 (64 hex digits) of the disk's serial number and size.
+    pub fingerprint: String,
+    /// The last characters of the serial number, for a person to match with a stick in hand.
+    #[serde(default)]
+    pub serial_hint: String,
+}
+
+/// What the Hub keeps about one physical disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StickHardware {
+    pub fingerprint: String,
+    pub serial_hint: String,
+    /// How many times the disk was written for this organization.
+    pub write_count: u32,
+    pub first_written_at: OffsetDateTime,
+    pub last_written_at: OffsetDateTime,
+    /// The stick id of the latest write, once that stick enrolled or was registered.
+    pub current_stick_id: Option<StickId>,
+}
+
 /// A stick the admin made. The Hub keeps its secret to check what the stick signs. It reads as
 /// an entry of the admin tool's registry file, whose other fields are ignored.
 #[derive(Debug, Clone, Deserialize)]
@@ -84,6 +107,15 @@ pub struct Stick {
     pub credential_scope: Option<crate::CredentialScope>,
     #[serde(skip)]
     pub retired_at: Option<OffsetDateTime>,
+    /// Set while the stick is archived: its credential does not work until it is restored.
+    #[serde(skip)]
+    pub archived_at: Option<OffsetDateTime>,
+    /// When an archived stick is deleted for good.
+    #[serde(skip)]
+    pub delete_after: Option<OffsetDateTime>,
+    /// Set on the tombstone a deleted stick leaves, so its id is not registered or shown again.
+    #[serde(skip)]
+    pub deleted_at: Option<OffsetDateTime>,
     #[serde(default)]
     pub team: String,
     #[serde(default)]
@@ -391,6 +423,51 @@ pub trait Store: Send + Sync {
         now: OffsetDateTime,
     ) -> Result<bool, StoreError>;
 
+    /// Counts one more write of the disk and returns how many there are now. With `stick`, that
+    /// stick id becomes the disk's current one. The rows are kept when a stick is deleted.
+    fn record_hardware_write(
+        &self,
+        organization: &str,
+        hardware: &Hardware,
+        stick: Option<&StickId>,
+        now: OffsetDateTime,
+    ) -> Result<u32, StoreError>;
+
+    /// Every disk the organization wrote sticks to.
+    fn hardware(&self, organization: &str) -> Result<Vec<StickHardware>, StoreError>;
+
+    /// Archives a stick of the organization until `delete_after`. As with retiring, a matching
+    /// entry from the trusted registry file lets the store keep a file-only stick. A stick that is
+    /// deleted or already archived changes nothing. Returns whether the stick was found.
+    fn archive_stick(
+        &self,
+        organization: &str,
+        id: &StickId,
+        file: Option<&Stick>,
+        now: OffsetDateTime,
+        delete_after: OffsetDateTime,
+    ) -> Result<bool, StoreError>;
+
+    /// Brings an archived stick back. Returns whether an archived stick was found.
+    fn restore_stick(&self, organization: &str, id: &StickId) -> Result<bool, StoreError>;
+
+    /// Archived sticks of the organization whose time is up at `now`.
+    fn sticks_due_for_deletion(
+        &self,
+        organization: &str,
+        now: OffsetDateTime,
+    ) -> Result<Vec<StickId>, StoreError>;
+
+    /// Deletes an archived stick and everything kept about it (heartbeats, events, commands,
+    /// recording rows), leaving only a tombstone with its id. Returns false when the stick is not
+    /// archived: only an archived stick can be deleted.
+    fn delete_stick(
+        &self,
+        organization: &str,
+        id: &StickId,
+        now: OffsetDateTime,
+    ) -> Result<bool, StoreError>;
+
     /// The stick with this id and the organization it belongs to.
     fn stick(&self, id: &StickId) -> Result<Option<(String, Stick)>, StoreError>;
 
@@ -600,6 +677,7 @@ pub struct MemoryStore {
     members: Mutex<Vec<(String, String, Role)>>,
     next_id: AtomicU64,
     sticks: Mutex<HashMap<StickId, (String, Stick)>>,
+    hardware: Mutex<Vec<(String, StickHardware)>>,
     profiles: Mutex<HashMap<(String, String), KeptProfile>>,
     commands: Mutex<Vec<(String, StoredCommand)>>,
     /// Per code hash: the organization, what it was minted for and whether it is used.
@@ -624,6 +702,40 @@ impl KeptCode {
             machine_number: self.code.machine_number,
         }
     }
+}
+
+/// Counts one more write of the disk and returns how many there are now.
+fn count_hardware_write(
+    rows: &mut Vec<(String, StickHardware)>,
+    organization: &str,
+    hardware: &Hardware,
+    stick: Option<&StickId>,
+    now: OffsetDateTime,
+) -> u32 {
+    let found = rows
+        .iter_mut()
+        .find(|(owner, row)| owner == organization && row.fingerprint == hardware.fingerprint);
+    if let Some((_, row)) = found {
+        row.write_count += 1;
+        row.last_written_at = now;
+        row.serial_hint.clone_from(&hardware.serial_hint);
+        if stick.is_some() {
+            row.current_stick_id = stick.cloned();
+        }
+        return row.write_count;
+    }
+    rows.push((
+        organization.to_owned(),
+        StickHardware {
+            fingerprint: hardware.fingerprint.clone(),
+            serial_hint: hardware.serial_hint.clone(),
+            write_count: 1,
+            first_written_at: now,
+            last_written_at: now,
+            current_stick_id: stick.cloned(),
+        },
+    ));
+    1
 }
 
 impl MemoryStore {
@@ -677,12 +789,20 @@ impl MemoryStore {
             token: token.clone(),
             credential_scope: kept.code.credential_scope.clone(),
             retired_at: None,
+            archived_at: None,
+            delete_after: None,
+            deleted_at: None,
             team: kept.code.team.clone(),
             site: kept.code.site.clone(),
             contest: kept.code.contest.clone(),
             machine_number: kept.code.machine_number,
         };
         sticks.insert(stick.clone(), (kept.organization.clone(), made));
+        if let Some(hardware) = &kept.code.hardware {
+            // The write counts now, when the stick that was written trades its code.
+            let mut rows = self.hardware.lock().expect("hardware lock");
+            count_hardware_write(&mut rows, &kept.organization, hardware, Some(stick), now);
+        }
         Redemption::Done(kept.enrolled())
     }
 }
@@ -1245,6 +1365,152 @@ impl Store for MemoryStore {
             return Ok(false);
         }
         stick.retired_at.get_or_insert(now);
+        Ok(true)
+    }
+
+    fn record_hardware_write(
+        &self,
+        organization: &str,
+        hardware: &Hardware,
+        stick: Option<&StickId>,
+        now: OffsetDateTime,
+    ) -> Result<u32, StoreError> {
+        let mut kept = self.hardware.lock().expect("hardware lock");
+        Ok(count_hardware_write(
+            &mut kept,
+            organization,
+            hardware,
+            stick,
+            now,
+        ))
+    }
+
+    fn hardware(&self, organization: &str) -> Result<Vec<StickHardware>, StoreError> {
+        Ok(self
+            .hardware
+            .lock()
+            .expect("hardware lock")
+            .iter()
+            .filter(|(owner, _)| owner == organization)
+            .map(|(_, row)| row.clone())
+            .collect())
+    }
+
+    fn archive_stick(
+        &self,
+        organization: &str,
+        id: &StickId,
+        file: Option<&Stick>,
+        now: OffsetDateTime,
+        delete_after: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        let mut sticks = self.sticks.lock().expect("sticks lock");
+        if let Some(file) = file.filter(|file| &file.stick_id == id) {
+            sticks
+                .entry(id.clone())
+                .or_insert_with(|| (organization.to_owned(), file.clone()));
+        }
+        let Some((owner, stick)) = sticks.get_mut(id) else {
+            return Ok(false);
+        };
+        if owner != organization || stick.deleted_at.is_some() {
+            return Ok(false);
+        }
+        if stick.archived_at.is_none() {
+            stick.archived_at = Some(now);
+            stick.delete_after = Some(delete_after);
+        }
+        Ok(true)
+    }
+
+    fn restore_stick(&self, organization: &str, id: &StickId) -> Result<bool, StoreError> {
+        let mut sticks = self.sticks.lock().expect("sticks lock");
+        let Some((owner, stick)) = sticks.get_mut(id) else {
+            return Ok(false);
+        };
+        if owner != organization || stick.archived_at.is_none() || stick.deleted_at.is_some() {
+            return Ok(false);
+        }
+        stick.archived_at = None;
+        stick.delete_after = None;
+        Ok(true)
+    }
+
+    fn sticks_due_for_deletion(
+        &self,
+        organization: &str,
+        now: OffsetDateTime,
+    ) -> Result<Vec<StickId>, StoreError> {
+        Ok(self
+            .sticks
+            .lock()
+            .expect("sticks lock")
+            .iter()
+            .filter(|(_, (owner, stick))| {
+                owner == organization
+                    && stick.deleted_at.is_none()
+                    && stick.delete_after.is_some_and(|after| after <= now)
+            })
+            .map(|(id, _)| id.clone())
+            .collect())
+    }
+
+    fn delete_stick(
+        &self,
+        organization: &str,
+        id: &StickId,
+        now: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        let mut sticks = self.sticks.lock().expect("sticks lock");
+        let Some((owner, stick)) = sticks.get_mut(id) else {
+            return Ok(false);
+        };
+        if owner != organization || stick.archived_at.is_none() || stick.deleted_at.is_some() {
+            return Ok(false);
+        }
+        *stick = Stick {
+            stick_id: id.clone(),
+            token: Token::new(String::new()),
+            credential_scope: None,
+            retired_at: Some(now),
+            archived_at: None,
+            delete_after: None,
+            deleted_at: Some(now),
+            team: String::new(),
+            site: String::new(),
+            contest: String::new(),
+            machine_number: None,
+        };
+        let key = (organization.to_owned(), id.clone());
+        self.heartbeats
+            .lock()
+            .expect("heartbeats lock")
+            .remove(&key);
+        self.boot_seqs
+            .lock()
+            .expect("boots lock")
+            .retain(|(org, stick, _), _| !(org == organization && stick == id));
+        self.events.lock().expect("events lock").remove(&key);
+        self.commands
+            .lock()
+            .expect("commands lock")
+            .retain(|(org, command)| {
+                !(org == organization && command.signed.command.stick_id == *id)
+            });
+        self.recordings
+            .lock()
+            .expect("recordings lock")
+            .retain(|(org, recording)| !(org == organization && recording.stick_id == id.as_str()));
+        for kept in self
+            .enrolment_codes
+            .lock()
+            .expect("codes lock")
+            .values_mut()
+        {
+            if kept.organization == organization && kept.claimed_stick_id.as_ref() == Some(id) {
+                kept.claimed_stick_id = None;
+            }
+        }
         Ok(true)
     }
 
