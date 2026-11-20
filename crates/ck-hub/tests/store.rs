@@ -1548,6 +1548,62 @@ fn hardware_contract(store: &dyn Store) {
     assert_eq!(store.hardware(&two).expect("read")[0].write_count, 1);
 }
 
+fn expected_config_contract(store: &dyn Store) {
+    let id = unique();
+    let make = |tag: &str| {
+        store
+            .create_organization(&format!("{id}-{tag}"), tag)
+            .expect("write")
+            .expect("a new organization")
+            .id
+    };
+    let (one, two) = (make("one"), make("two"));
+    let stick = StickId::parse(&format!("{id}-a")).expect("id");
+    let first = "ab".repeat(32);
+    let second = "cd".repeat(32);
+
+    assert_eq!(store.expected_configs(&one).expect("read"), Vec::new());
+    store
+        .record_expected_config(&one, &stick, &first, time(1))
+        .expect("write");
+    assert_eq!(
+        store.expected_configs(&one).expect("read"),
+        vec![(stick.clone(), first.clone())]
+    );
+    // Another organization has its own, and writing again replaces the hash.
+    assert_eq!(store.expected_configs(&two).expect("read"), Vec::new());
+    store
+        .record_expected_config(&one, &stick, &second, time(2))
+        .expect("write");
+    assert_eq!(
+        store.expected_configs(&one).expect("read"),
+        vec![(stick.clone(), second)]
+    );
+
+    // Deleting an archived stick deletes what was recorded for it.
+    let new = ck_hub::Stick {
+        stick_id: stick.clone(),
+        token: Token::new("a-secret-token-of-the-stick"),
+        credential_scope: None,
+        retired_at: None,
+        archived_at: None,
+        delete_after: None,
+        deleted_at: None,
+        team: String::new(),
+        site: String::new(),
+        contest: String::new(),
+        machine_number: None,
+    };
+    assert!(store.add_stick(&one, new).expect("write"));
+    assert!(
+        store
+            .archive_stick(&one, &stick, None, time(3), time(9))
+            .expect("write")
+    );
+    assert!(store.delete_stick(&one, &stick, time(4)).expect("write"));
+    assert_eq!(store.expected_configs(&one).expect("read"), Vec::new());
+}
+
 #[allow(clippy::too_many_lines)]
 fn archive_contract(store: &dyn Store) {
     use ck_hub::{CommandState, Kind, Recording, StoredCommand};
@@ -1752,6 +1808,7 @@ fn the_memory_store_keeps_its_contract() {
     organizations_are_kept_apart(&MemoryStore::default());
     archive_contract(&MemoryStore::default());
     hardware_contract(&MemoryStore::default());
+    expected_config_contract(&MemoryStore::default());
 }
 
 #[test]
@@ -1773,6 +1830,7 @@ fn the_postgres_store_keeps_its_contract() {
     organizations_are_kept_apart(&store);
     archive_contract(&store);
     hardware_contract(&store);
+    expected_config_contract(&store);
 }
 
 #[test]

@@ -772,3 +772,103 @@ async fn archived_sticks_are_deleted_when_their_time_is_up() {
     assert_eq!(hub.purge_archived_sticks().expect("purge"), 1);
     assert_eq!(remaining(app).await, ["stick-kept"]);
 }
+
+async fn heartbeat_with_config(app: &Router, seq: u64, config_sha256: &str) -> StatusCode {
+    let mut body = heartbeat_body("legacy-stick");
+    body["seq"] = json!(seq);
+    body["config_sha256"] = json!(config_sha256);
+    signed_report(app, "/api/v1/heartbeat", "legacy-stick", TOKEN, &body).await
+}
+
+fn settings_warning(sticks: &[Value]) -> Option<String> {
+    sticks[0]["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .filter_map(|w| w.as_str())
+        .find(|w| w.starts_with("Settings changed"))
+        .map(str::to_owned)
+}
+
+#[tokio::test]
+async fn a_stick_that_reports_other_settings_than_forge_wrote_is_flagged() {
+    let registry = json!({ "sticks": [stick("legacy-stick", TOKEN)] });
+    let setup = setup_with_registry(&registry.to_string());
+    let admin = cookie_for(&setup.app, "ana@example.org").await;
+    let viewer = cookie_for(&setup.app, "vera@example.org").await;
+    let wrote = "ab".repeat(32);
+    let note = |hash: &str| json!({ "stick_id": "legacy-stick", "sha256": hash });
+
+    // Nothing was recorded for this stick, so nothing is checked.
+    assert_eq!(
+        heartbeat_with_config(&setup.app, 1, &wrote).await,
+        StatusCode::OK
+    );
+    assert_eq!(settings_warning(&list(&setup.app).await), None);
+
+    // Only an admin records it, and only a real hash.
+    let path = "/api/v1/config-hashes";
+    assert_eq!(
+        send(&setup.app, "POST", path, &viewer, Some(&note(&wrote)))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    for bad in ["", "xyz", &"AB".repeat(32), &"ab".repeat(31)] {
+        assert_eq!(
+            send(&setup.app, "POST", path, &admin, Some(&note(bad)))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST,
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        send(
+            &setup.app,
+            "POST",
+            path,
+            &admin,
+            Some(&json!({ "stick_id": "no spaces", "sha256": wrote }))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        send(&setup.app, "POST", path, &admin, Some(&note(&wrote)))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    // The same settings: no warning.
+    assert_eq!(settings_warning(&list(&setup.app).await), None);
+
+    // Other settings, and no settings at all, are told apart.
+    assert_eq!(
+        heartbeat_with_config(&setup.app, 2, &"cd".repeat(32)).await,
+        StatusCode::OK
+    );
+    let other = settings_warning(&list(&setup.app).await).expect("a warning");
+    assert!(other.contains("other than the ones Forge wrote"), "{other}");
+    assert_eq!(
+        heartbeat_with_config(&setup.app, 3, "").await,
+        StatusCode::OK
+    );
+    let empty = settings_warning(&list(&setup.app).await).expect("a warning");
+    assert!(empty.contains("no settings file"), "{empty}");
+
+    // Forge writing the stick again records the new hash, and the warning goes.
+    let again = "cd".repeat(32);
+    assert_eq!(
+        send(&setup.app, "POST", path, &admin, Some(&note(&again)))
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        heartbeat_with_config(&setup.app, 4, &again).await,
+        StatusCode::OK
+    );
+    assert_eq!(settings_warning(&list(&setup.app).await), None);
+}

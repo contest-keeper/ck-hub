@@ -23,7 +23,7 @@ use crate::store::{
 
 /// The schema, in the order it is applied. A migration that was applied is never run again and
 /// never edited: a change is a new file.
-const MIGRATIONS: [(&str, &str); 19] = [
+const MIGRATIONS: [(&str, &str); 20] = [
     (
         "0001_heartbeats_and_events",
         include_str!("../migrations/0001_heartbeats_and_events.sql"),
@@ -96,6 +96,10 @@ const MIGRATIONS: [(&str, &str); 19] = [
     (
         "0019_stick_hardware",
         include_str!("../migrations/0019_stick_hardware.sql"),
+    ),
+    (
+        "0020_expected_configs",
+        include_str!("../migrations/0020_expected_configs.sql"),
     ),
 ];
 
@@ -1307,6 +1311,40 @@ impl Store for PostgresStore {
         u32::try_from(count).map_err(failed)
     }
 
+    fn record_expected_config(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        sha256: &str,
+        now: OffsetDateTime,
+    ) -> Result<(), StoreError> {
+        self.in_org(organization, |transaction| {
+            transaction.execute(
+                "INSERT INTO expected_configs (organization_id, stick_id, sha256, recorded_at)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (organization_id, stick_id) DO UPDATE SET
+                     sha256 = EXCLUDED.sha256, recorded_at = EXCLUDED.recorded_at",
+                &[&organization, &stick.as_str(), &sha256, &now],
+            )
+        })
+        .map(|_| ())
+    }
+
+    fn expected_configs(&self, organization: &str) -> Result<Vec<(StickId, String)>, StoreError> {
+        let rows = self.in_org(organization, |transaction| {
+            transaction.query(
+                "SELECT stick_id, sha256 FROM expected_configs WHERE organization_id = $1",
+                &[&organization],
+            )
+        })?;
+        rows.iter()
+            .map(|row| {
+                let id: String = row.get(0);
+                Ok((StickId::parse(&id).map_err(failed)?, row.get(1)))
+            })
+            .collect()
+    }
+
     fn hardware(&self, organization: &str) -> Result<Vec<StickHardware>, StoreError> {
         let rows = self.in_org(organization, |transaction| {
             transaction.query(
@@ -1410,6 +1448,7 @@ impl Store for PostgresStore {
                 "DELETE FROM heartbeat_boots WHERE organization_id = $1 AND stick_id = $2",
                 "DELETE FROM commands WHERE organization_id = $1 AND stick_id = $2",
                 "DELETE FROM recordings WHERE organization_id = $1 AND stick_id = $2",
+                "DELETE FROM expected_configs WHERE organization_id = $1 AND stick_id = $2",
                 "UPDATE enrolment_codes SET claimed_stick_id = NULL
                  WHERE organization_id = $1 AND claimed_stick_id = $2",
             ] {

@@ -436,6 +436,18 @@ pub trait Store: Send + Sync {
     /// Every disk the organization wrote sticks to.
     fn hardware(&self, organization: &str) -> Result<Vec<StickHardware>, StoreError>;
 
+    /// Keeps the hash of the settings file Forge wrote for a stick, replacing an earlier one.
+    fn record_expected_config(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        sha256: &str,
+        now: OffsetDateTime,
+    ) -> Result<(), StoreError>;
+
+    /// The settings hash Forge wrote for each stick of the organization that has one.
+    fn expected_configs(&self, organization: &str) -> Result<Vec<(StickId, String)>, StoreError>;
+
     /// Archives a stick of the organization until `delete_after`. As with retiring, a matching
     /// entry from the trusted registry file lets the store keep a file-only stick. A stick that is
     /// deleted or already archived changes nothing. Returns whether the stick was found.
@@ -678,6 +690,7 @@ pub struct MemoryStore {
     next_id: AtomicU64,
     sticks: Mutex<HashMap<StickId, (String, Stick)>>,
     hardware: Mutex<Vec<(String, StickHardware)>>,
+    expected_configs: Mutex<HashMap<(String, StickId), String>>,
     profiles: Mutex<HashMap<(String, String), KeptProfile>>,
     commands: Mutex<Vec<(String, StoredCommand)>>,
     /// Per code hash: the organization, what it was minted for and whether it is used.
@@ -1385,6 +1398,31 @@ impl Store for MemoryStore {
         ))
     }
 
+    fn record_expected_config(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        sha256: &str,
+        _now: OffsetDateTime,
+    ) -> Result<(), StoreError> {
+        self.expected_configs
+            .lock()
+            .expect("expected configs lock")
+            .insert((organization.to_owned(), stick.clone()), sha256.to_owned());
+        Ok(())
+    }
+
+    fn expected_configs(&self, organization: &str) -> Result<Vec<(StickId, String)>, StoreError> {
+        Ok(self
+            .expected_configs
+            .lock()
+            .expect("expected configs lock")
+            .iter()
+            .filter(|((owner, _), _)| owner == organization)
+            .map(|((_, stick), sha256)| (stick.clone(), sha256.clone()))
+            .collect())
+    }
+
     fn hardware(&self, organization: &str) -> Result<Vec<StickHardware>, StoreError> {
         Ok(self
             .hardware
@@ -1491,6 +1529,10 @@ impl Store for MemoryStore {
             .expect("boots lock")
             .retain(|(org, stick, _), _| !(org == organization && stick == id));
         self.events.lock().expect("events lock").remove(&key);
+        self.expected_configs
+            .lock()
+            .expect("expected configs lock")
+            .remove(&key);
         self.commands
             .lock()
             .expect("commands lock")
