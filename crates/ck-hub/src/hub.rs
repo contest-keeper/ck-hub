@@ -80,6 +80,20 @@ pub struct StickView {
         skip_serializing_if = "Option::is_none"
     )]
     pub retired_at: Option<OffsetDateTime>,
+    /// Set while the stick is archived: it keeps its data, its credential does not work, and the
+    /// Hub deletes it at `delete_after`.
+    #[serde(
+        with = "time::serde::rfc3339::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub archived_at: Option<OffsetDateTime>,
+    #[serde(
+        with = "time::serde::rfc3339::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub delete_after: Option<OffsetDateTime>,
+    /// The disk this stick was written to, when Forge reported it.
+    pub hardware: Option<HardwareView>,
     pub last: Option<LastHeartbeat>,
     /// Events received from this stick since the Hub started.
     pub events: usize,
@@ -95,6 +109,20 @@ pub struct StickView {
     pub last_submission: Option<SubmissionView>,
     /// Things an organizer should look at: a chain problem, two users on one stick.
     pub warnings: Vec<String>,
+}
+
+/// What the Hub knows about the physical disk of a stick.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct HardwareView {
+    /// The start of the disk's fingerprint, to tell disks apart.
+    pub id: String,
+    /// The last characters of the disk's serial number.
+    pub serial_hint: String,
+    /// How many times this disk was written. More than one means it was rewritten.
+    pub write_count: u32,
+    pub rewritten: bool,
+    #[serde(with = "time::serde::rfc3339")]
+    pub last_written_at: OffsetDateTime,
 }
 
 /// What a submission event says, read loosely: the shape of the payload is fixed by the capture
@@ -373,7 +401,7 @@ impl Hub {
         let stored = self.store.stick(id)?;
         if stored
             .as_ref()
-            .is_some_and(|(_, stick)| stick.retired_at.is_some())
+            .is_some_and(|(_, stick)| stick.retired_at.is_some() || stick.archived_at.is_some())
         {
             return Ok(None);
         }
@@ -395,17 +423,102 @@ impl Hub {
         let Ok(id) = StickId::parse(id) else {
             return Ok(false);
         };
+        let file = self.registry_entry(organization, &id)?;
+        self.store
+            .retire_stick(organization, &id, file.as_ref(), (self.clock)())
+    }
+
+    /// The registry file's entry for the stick, when the organization is the one the file belongs to.
+    fn registry_entry(
+        &self,
+        organization: &str,
+        id: &StickId,
+    ) -> Result<Option<Stick>, StoreError> {
         let file = {
             let mut registry = self.registry.lock().expect("registry lock");
             registry.refresh();
-            registry.find(&id).cloned()
+            registry.find(id).cloned()
         };
-        let file = match file {
+        Ok(match file {
             Some(entry) if organization == self.default_org_id()? => Some(entry),
             _ => None,
+        })
+    }
+
+    /// Archives a stick for `days`: it stops being accepted and is deleted when the time is up,
+    /// unless it is restored first. Returns false for a stick that is unknown or already deleted.
+    pub(crate) fn archive_stick(
+        &self,
+        organization: &str,
+        id: &str,
+        days: i64,
+    ) -> Result<bool, StoreError> {
+        let Ok(id) = StickId::parse(id) else {
+            return Ok(false);
         };
-        self.store
-            .retire_stick(organization, &id, file.as_ref(), (self.clock)())
+        let file = self.registry_entry(organization, &id)?;
+        let now = (self.clock)();
+        self.store.archive_stick(
+            organization,
+            &id,
+            file.as_ref(),
+            now,
+            now + Duration::days(days),
+        )
+    }
+
+    /// Brings an archived stick back. Returns false when it is not archived.
+    pub(crate) fn restore_stick(&self, organization: &str, id: &str) -> Result<bool, StoreError> {
+        let Ok(id) = StickId::parse(id) else {
+            return Ok(false);
+        };
+        self.store.restore_stick(organization, &id)
+    }
+
+    /// Deletes an archived stick and everything kept about it, the recording files included. Only
+    /// an archived stick can be deleted. Returns false when it is not archived.
+    ///
+    /// # Errors
+    /// [`StoreError`] when a recording file cannot be removed from storage (nothing else is
+    /// removed then, and the call can be repeated) or the store fails.
+    pub(crate) fn delete_stick(&self, organization: &str, id: &str) -> Result<bool, StoreError> {
+        let Ok(id) = StickId::parse(id) else {
+            return Ok(false);
+        };
+        let archived = self.store.stick(&id)?.is_some_and(|(owner, stick)| {
+            owner == organization && stick.archived_at.is_some() && stick.deleted_at.is_none()
+        });
+        if !archived {
+            return Ok(false);
+        }
+        if let Some((blobs, _)) = self.recordings.as_ref() {
+            for recording in self.store.recordings_of(organization, &id, u32::MAX)? {
+                blobs.delete(&recording.blob(organization)).map_err(|_| {
+                    StoreError("a recording could not be removed from storage".to_owned())
+                })?;
+            }
+        }
+        self.store.delete_stick(organization, &id, (self.clock)())
+    }
+
+    /// Deletes the archived sticks whose time is up. Returns how many it deleted.
+    ///
+    /// # Errors
+    /// [`StoreError`] when the organizations or their sticks cannot be read.
+    pub fn purge_archived_sticks(&self) -> Result<usize, StoreError> {
+        let now = (self.clock)();
+        let mut removed = 0;
+        for organization in self.store.organizations()? {
+            for id in self.store.sticks_due_for_deletion(&organization.id, now)? {
+                match self.delete_stick(&organization.id, id.as_str()) {
+                    Ok(true) => removed += 1,
+                    Ok(false) => {}
+                    // One stick that cannot be removed now does not hold up the others.
+                    Err(error) => tracing::warn!("an archived stick could not be deleted: {error}"),
+                }
+            }
+        }
+        Ok(removed)
     }
 
     /// Takes in an event. A problem with the chain never makes the Hub refuse it: the stick would
@@ -551,11 +664,16 @@ impl Hub {
             Vec::new()
         };
         for stick in self.store.sticks(organization)? {
-            if let Some(entry) = entries
+            if stick.deleted_at.is_some() {
+                // A deleted stick leaves a tombstone, so the registry file cannot bring it back.
+                entries.retain(|entry| entry.stick_id != stick.stick_id);
+            } else if let Some(entry) = entries
                 .iter_mut()
                 .find(|entry| entry.stick_id == stick.stick_id)
             {
                 entry.retired_at = stick.retired_at;
+                entry.archived_at = stick.archived_at;
+                entry.delete_after = stick.delete_after;
             } else {
                 entries.push(stick);
             }
@@ -568,6 +686,7 @@ impl Hub {
                 b.stick_id.as_str(),
             ))
         });
+        let hardware = self.store.hardware(organization)?;
         let mut views = Vec::new();
         for entry in &entries {
             let seen = self.store.last_heartbeat(organization, &entry.stick_id)?;
@@ -593,10 +712,23 @@ impl Hub {
                 contest: entry.contest.clone(),
                 machine_number: entry.machine_number,
                 online: entry.retired_at.is_none()
+                    && entry.archived_at.is_none()
                     && last
                         .as_ref()
                         .is_some_and(|l| l.seconds_ago <= ONLINE_WINDOW_SECONDS),
                 retired_at: entry.retired_at,
+                archived_at: entry.archived_at,
+                delete_after: entry.delete_after,
+                hardware: hardware
+                    .iter()
+                    .find(|row| row.current_stick_id.as_ref() == Some(&entry.stick_id))
+                    .map(|row| HardwareView {
+                        id: row.fingerprint.chars().take(8).collect(),
+                        serial_hint: row.serial_hint.clone(),
+                        write_count: row.write_count,
+                        rewritten: row.write_count > 1,
+                        last_written_at: row.last_written_at,
+                    }),
                 last,
                 events: stored.len(),
                 last_event_at: stored.last().map(|s| s.received_at),

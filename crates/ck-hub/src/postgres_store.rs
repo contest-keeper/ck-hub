@@ -16,13 +16,14 @@ use crate::judge::{JudgeSubmission, SubmitEvent, submit_event};
 
 use crate::recordings::{Kind, Recording};
 use crate::store::{
-    Invitation, Member, Membership, NewProfile, NewUser, Organization, Profile, ProfileSummary,
-    Role, SeenHeartbeat, Stick, Store, StoreError, StoredEvent, TokenPurpose, User, Wallpaper,
+    Hardware, Invitation, Member, Membership, NewProfile, NewUser, Organization, Profile,
+    ProfileSummary, Role, SeenHeartbeat, Stick, StickHardware, Store, StoreError, StoredEvent,
+    TokenPurpose, User, Wallpaper,
 };
 
 /// The schema, in the order it is applied. A migration that was applied is never run again and
 /// never edited: a change is a new file.
-const MIGRATIONS: [(&str, &str); 17] = [
+const MIGRATIONS: [(&str, &str); 19] = [
     (
         "0001_heartbeats_and_events",
         include_str!("../migrations/0001_heartbeats_and_events.sql"),
@@ -87,6 +88,14 @@ const MIGRATIONS: [(&str, &str); 17] = [
     (
         "0017_enrolment_claims",
         include_str!("../migrations/0017_enrolment_claims.sql"),
+    ),
+    (
+        "0018_archive_sticks",
+        include_str!("../migrations/0018_archive_sticks.sql"),
+    ),
+    (
+        "0019_stick_hardware",
+        include_str!("../migrations/0019_stick_hardware.sql"),
     ),
 ];
 
@@ -475,7 +484,8 @@ impl PostgresStore {
             let used = transaction.query_opt(
                 "UPDATE enrolment_codes SET used_at = $2, claimed_stick_id = $3
                  WHERE code_hash = $1 AND used_at IS NULL AND expires_at > $2
-                 RETURNING organization_id, team, site, contest, machine_number, credential_scope",
+                 RETURNING organization_id, team, site, contest, machine_number, credential_scope,
+                           hardware_fingerprint, hardware_serial_hint",
                 &[&code_hash, &now, &claimed],
             )?;
             let Some(row) = used else {
@@ -490,6 +500,8 @@ impl PostgresStore {
             let enrolled = enrolled_stick(&row);
             let machine: Option<i32> = row.get(4);
             let scope: Option<serde_json::Value> = row.get(5);
+            let fingerprint: Option<String> = row.get(6);
+            let serial_hint: Option<String> = row.get(7);
             transaction.execute(
                 "SELECT set_config('ck.org_id', $1, true)",
                 &[&enrolled.organization],
@@ -512,6 +524,25 @@ impl PostgresStore {
             if added == 0 {
                 transaction.rollback()?;
                 return Ok(Redemption::IdTaken);
+            }
+            if let Some(fingerprint) = fingerprint {
+                // The write counts now, when the stick that was written trades its code.
+                transaction.execute(
+                    "INSERT INTO stick_hardware
+                         (organization_id, fingerprint, serial_hint, write_count,
+                          first_written_at, last_written_at, current_stick_id)
+                     VALUES ($1, $2, $3, 1, $4, $4, $5)
+                     ON CONFLICT (organization_id, fingerprint) DO UPDATE SET
+                         write_count = stick_hardware.write_count + 1,
+                         last_written_at = $4, serial_hint = $3, current_stick_id = $5",
+                    &[
+                        &enrolled.organization,
+                        &fingerprint,
+                        &serial_hint.unwrap_or_default(),
+                        &now,
+                        &stick.as_str(),
+                    ],
+                )?;
             }
             transaction.commit()?;
             Ok(Redemption::Done(enrolled))
@@ -1243,6 +1274,160 @@ impl Store for PostgresStore {
         })
     }
 
+    fn record_hardware_write(
+        &self,
+        organization: &str,
+        hardware: &Hardware,
+        stick: Option<&StickId>,
+        now: OffsetDateTime,
+    ) -> Result<u32, StoreError> {
+        let stick = stick.map(StickId::as_str);
+        let count: i32 = self.in_org(organization, |transaction| {
+            let row = transaction.query_one(
+                "INSERT INTO stick_hardware
+                     (organization_id, fingerprint, serial_hint, write_count,
+                      first_written_at, last_written_at, current_stick_id)
+                 VALUES ($1, $2, $3, 1, $4, $4, $5)
+                 ON CONFLICT (organization_id, fingerprint) DO UPDATE SET
+                     write_count = stick_hardware.write_count + 1,
+                     last_written_at = $4,
+                     serial_hint = $3,
+                     current_stick_id = COALESCE($5, stick_hardware.current_stick_id)
+                 RETURNING write_count",
+                &[
+                    &organization,
+                    &hardware.fingerprint,
+                    &hardware.serial_hint,
+                    &now,
+                    &stick,
+                ],
+            )?;
+            Ok(row.get(0))
+        })?;
+        u32::try_from(count).map_err(failed)
+    }
+
+    fn hardware(&self, organization: &str) -> Result<Vec<StickHardware>, StoreError> {
+        let rows = self.in_org(organization, |transaction| {
+            transaction.query(
+                "SELECT fingerprint, serial_hint, write_count, first_written_at,
+                        last_written_at, current_stick_id
+                 FROM stick_hardware WHERE organization_id = $1",
+                &[&organization],
+            )
+        })?;
+        rows.iter()
+            .map(|row| {
+                let current: Option<String> = row.get(5);
+                Ok(StickHardware {
+                    fingerprint: row.get(0),
+                    serial_hint: row.get(1),
+                    write_count: u32::try_from(row.get::<_, i32>(2)).map_err(failed)?,
+                    first_written_at: row.get(3),
+                    last_written_at: row.get(4),
+                    current_stick_id: current
+                        .map(|id| StickId::parse(&id).map_err(failed))
+                        .transpose()?,
+                })
+            })
+            .collect()
+    }
+
+    fn archive_stick(
+        &self,
+        organization: &str,
+        id: &StickId,
+        file: Option<&Stick>,
+        now: OffsetDateTime,
+        delete_after: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        if let Some(file) = file.filter(|file| &file.stick_id == id) {
+            self.save_stick(organization, file, None)?;
+        }
+        self.in_org(organization, |transaction| {
+            // The first archiving decides the time; a second one changes nothing.
+            let found = transaction.execute(
+                "UPDATE sticks SET
+                     archived_at = COALESCE(archived_at, $3),
+                     delete_after = COALESCE(delete_after, $4)
+                 WHERE organization_id = $1 AND stick_id = $2 AND deleted_at IS NULL",
+                &[&organization, &id.as_str(), &now, &delete_after],
+            )?;
+            Ok(found == 1)
+        })
+    }
+
+    fn restore_stick(&self, organization: &str, id: &StickId) -> Result<bool, StoreError> {
+        self.in_org(organization, |transaction| {
+            let found = transaction.execute(
+                "UPDATE sticks SET archived_at = NULL, delete_after = NULL
+                 WHERE organization_id = $1 AND stick_id = $2
+                   AND archived_at IS NOT NULL AND deleted_at IS NULL",
+                &[&organization, &id.as_str()],
+            )?;
+            Ok(found == 1)
+        })
+    }
+
+    fn sticks_due_for_deletion(
+        &self,
+        organization: &str,
+        now: OffsetDateTime,
+    ) -> Result<Vec<StickId>, StoreError> {
+        let rows = self.in_org(organization, |transaction| {
+            transaction.query(
+                "SELECT stick_id FROM sticks
+                 WHERE organization_id = $1 AND deleted_at IS NULL AND delete_after <= $2",
+                &[&organization, &now],
+            )
+        })?;
+        rows.iter()
+            .map(|row| StickId::parse(&row.get::<_, String>(0)).map_err(failed))
+            .collect()
+    }
+
+    fn delete_stick(
+        &self,
+        organization: &str,
+        id: &StickId,
+        now: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        self.in_org_transaction(organization, |transaction| {
+            let archived = transaction.query_opt(
+                "SELECT 1 FROM sticks
+                 WHERE organization_id = $1 AND stick_id = $2
+                   AND archived_at IS NOT NULL AND deleted_at IS NULL
+                 FOR UPDATE",
+                &[&organization, &id.as_str()],
+            )?;
+            if archived.is_none() {
+                return Ok((false, false));
+            }
+            let args: [&(dyn ToSql + Sync); 2] = [&organization, &id.as_str()];
+            transaction.execute("SELECT purge_stick_events($1, $2)", &args)?;
+            for table in [
+                "DELETE FROM heartbeats WHERE organization_id = $1 AND stick_id = $2",
+                "DELETE FROM heartbeat_boots WHERE organization_id = $1 AND stick_id = $2",
+                "DELETE FROM commands WHERE organization_id = $1 AND stick_id = $2",
+                "DELETE FROM recordings WHERE organization_id = $1 AND stick_id = $2",
+                "UPDATE enrolment_codes SET claimed_stick_id = NULL
+                 WHERE organization_id = $1 AND claimed_stick_id = $2",
+            ] {
+                transaction.execute(table, &args)?;
+            }
+            // The tombstone keeps the id taken: a registry push or the registry file cannot bring
+            // the stick back, and its blanked secret never matches again.
+            transaction.execute(
+                "UPDATE sticks SET token = '', credential_scope = NULL, team = '', site = '',
+                     contest = '', machine_number = NULL, retired_at = COALESCE(retired_at, $3),
+                     archived_at = NULL, delete_after = NULL, deleted_at = $3
+                 WHERE organization_id = $1 AND stick_id = $2",
+                &[&organization, &id.as_str(), &now],
+            )?;
+            Ok((true, true))
+        })
+    }
+
     /// The one lookup that runs without an organization: a stick does not say which one it is in.
     /// Row-level security lets it read exactly the stick it names.
     fn stick(&self, id: &StickId) -> Result<Option<(String, Stick)>, StoreError> {
@@ -1254,7 +1439,7 @@ impl Store for PostgresStore {
             )?;
             let row = transaction.query_opt(
                 "SELECT stick_id, token, team, site, contest, machine_number, organization_id,
-                        credential_scope, retired_at
+                        credential_scope, retired_at, archived_at, delete_after, deleted_at
                  FROM sticks WHERE stick_id = $1",
                 &[&id.as_str()],
             )?;
@@ -1270,7 +1455,7 @@ impl Store for PostgresStore {
         let rows = self.in_org(organization, |transaction| {
             transaction.query(
                 "SELECT stick_id, token, team, site, contest, machine_number, credential_scope,
-                        retired_at FROM sticks
+                        retired_at, archived_at, delete_after, deleted_at FROM sticks
                  WHERE organization_id = $1",
                 &[&organization],
             )
@@ -1535,12 +1720,15 @@ impl Store for PostgresStore {
             .map(i32::try_from)
             .transpose()
             .map_err(failed)?;
+        let fingerprint = code.hardware.as_ref().map(|h| h.fingerprint.clone());
+        let serial_hint = code.hardware.as_ref().map(|h| h.serial_hint.clone());
         self.in_org(organization, |transaction| {
             transaction.execute(
                 "INSERT INTO enrolment_codes
                      (code_hash, organization_id, created_by_user_id, team, site, contest,
-                      machine_number, created_at, expires_at, credential_scope)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                      machine_number, created_at, expires_at, credential_scope,
+                      hardware_fingerprint, hardware_serial_hint)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
                 &[
                     &code.code_hash,
                     &organization,
@@ -1552,6 +1740,8 @@ impl Store for PostgresStore {
                     &code.created_at,
                     &code.expires_at,
                     &scope,
+                    &fingerprint,
+                    &serial_hint,
                 ],
             )
         })
@@ -1800,6 +1990,9 @@ fn stick_from(row: &Row) -> Result<Stick, StoreError> {
         token: Token::new(token),
         credential_scope,
         retired_at: row.get("retired_at"),
+        archived_at: row.get("archived_at"),
+        delete_after: row.get("delete_after"),
+        deleted_at: row.get("deleted_at"),
         team: row.get(2),
         site: row.get(3),
         contest: row.get(4),

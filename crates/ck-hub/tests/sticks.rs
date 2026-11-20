@@ -604,3 +604,171 @@ async fn sticks_and_heartbeats_of_one_organization_are_invisible_to_another() {
         "an unknown organization looks the same"
     );
 }
+
+#[tokio::test]
+async fn an_archived_stick_is_refused_until_restored_and_deleting_it_removes_it_for_good() {
+    let id = "legacy-stick";
+    let registry = json!({ "sticks": [stick(id, TOKEN)] });
+    let setup = setup_with_registry(&registry.to_string());
+    let admin = cookie_for(&setup.app, "ana@example.org").await;
+    let viewer = cookie_for(&setup.app, "vera@example.org").await;
+    let base = "/api/v1/orgs/default/sticks/legacy-stick";
+    assert_eq!(
+        heartbeat_status(&setup.app, id, TOKEN).await,
+        StatusCode::OK
+    );
+
+    // Only an admin archives, and only for 7 or 30 days.
+    let seven = json!({ "days": 7 });
+    assert_eq!(
+        send(
+            &setup.app,
+            "POST",
+            &format!("{base}/archive"),
+            &viewer,
+            Some(&seven)
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    for days in [0, 1, 8, 31] {
+        assert_eq!(
+            send(
+                &setup.app,
+                "POST",
+                &format!("{base}/archive"),
+                &admin,
+                Some(&json!({ "days": days }))
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    // A stick that is not archived cannot be deleted.
+    assert_eq!(
+        send(&setup.app, "DELETE", base, &admin, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        send(
+            &setup.app,
+            "POST",
+            &format!("{base}/archive"),
+            &admin,
+            Some(&seven)
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    let listed = list(&setup.app).await;
+    assert!(listed[0]["archived_at"].is_string() && listed[0]["delete_after"].is_string());
+    assert_eq!(listed[0]["online"], false);
+    assert_eq!(
+        heartbeat_status(&setup.app, id, TOKEN).await,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // Restoring brings it back.
+    assert_eq!(
+        send(&setup.app, "POST", &format!("{base}/restore"), &admin, None)
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    assert!(list(&setup.app).await[0].get("archived_at").is_none());
+    // The same heartbeat again is a conflict, which means the credential is accepted.
+    assert_eq!(
+        heartbeat_status(&setup.app, id, TOKEN).await,
+        StatusCode::CONFLICT
+    );
+
+    // Archive again and delete now: it is gone from the list, refused, and the file cannot bring
+    // it back.
+    send(
+        &setup.app,
+        "POST",
+        &format!("{base}/archive"),
+        &admin,
+        Some(&json!({ "days": 30 })),
+    )
+    .await;
+    assert_eq!(
+        send(&setup.app, "DELETE", base, &viewer, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        send(&setup.app, "DELETE", base, &admin, None).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(list(&setup.app).await, Vec::<Value>::new());
+    assert_eq!(
+        heartbeat_status(&setup.app, id, TOKEN).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        send(&setup.app, "DELETE", base, &admin, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn archived_sticks_are_deleted_when_their_time_is_up() {
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    let offset = Arc::new(AtomicI64::new(0));
+    let clock = Arc::clone(&offset);
+    let hub = Hub::new(
+        Registry::empty(),
+        Arc::new(MemoryStore::default()),
+        None,
+        Box::new(move || {
+            OffsetDateTime::now_utc() + time::Duration::seconds(clock.load(Ordering::SeqCst))
+        }),
+    )
+    .with_password_cost(PasswordCost {
+        memory_kib: 8,
+        passes: 1,
+    });
+    hub.create_user("ana@example.org", PASSWORD).expect("ana");
+    hub.create_organization("default", "Default", "ana@example.org")
+        .expect("organization");
+    let hub = Arc::new(hub);
+    let app = router(Arc::clone(&hub));
+    let admin = cookie_for(&app, "ana@example.org").await;
+    for id in ["stick-7", "stick-30", "stick-kept"] {
+        let new = stick(id, "a-secret-token-of-a-stick-1");
+        assert_eq!(register(&app, Some(&admin), &new).await.1["added"], 1);
+    }
+    for (id, days) in [("stick-7", 7), ("stick-30", 30)] {
+        let path = format!("/api/v1/orgs/default/sticks/{id}/archive");
+        let body = json!({ "days": days });
+        assert_eq!(
+            send(&app, "POST", &path, &admin, Some(&body)).await.0,
+            StatusCode::NO_CONTENT
+        );
+    }
+    let remaining = |app: Router| async move {
+        // A session lasts 12 hours, so each look at the list logs in again.
+        let admin = cookie_for(&app, "ana@example.org").await;
+        let (_, sticks) = send(&app, "GET", "/api/v1/orgs/default/sticks", &admin, None).await;
+        let mut ids: Vec<String> = sticks
+            .as_array()
+            .expect("list")
+            .iter()
+            .map(|s| s["stick_id"].as_str().expect("id").to_owned())
+            .collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(remaining(app.clone()).await.len(), 3);
+    // After 8 days only the 7-day stick is gone; after 31 days the 30-day one goes too.
+    offset.store(8 * 86_400, Ordering::SeqCst);
+    assert_eq!(hub.purge_archived_sticks().expect("purge"), 1);
+    assert_eq!(remaining(app.clone()).await, ["stick-30", "stick-kept"]);
+    offset.store(31 * 86_400, Ordering::SeqCst);
+    assert_eq!(hub.purge_archived_sticks().expect("purge"), 1);
+    assert_eq!(remaining(app).await, ["stick-kept"]);
+}

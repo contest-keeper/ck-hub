@@ -564,6 +564,7 @@ async fn run(args: ServeArgs) -> Result<(), String> {
     )));
     let hub = Arc::new(hub);
     start_recording_purge(&hub);
+    start_archive_purge(&hub);
 
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
@@ -593,6 +594,26 @@ fn start_recording_purge(hub: &Arc<Hub>) {
         });
     if let Err(error) = started {
         tracing::error!("the recording clean-up cannot start: {error}");
+    }
+}
+
+/// Deletes archived sticks whose time is up, every hour, on a thread of its own.
+fn start_archive_purge(hub: &Arc<Hub>) {
+    let hub = Arc::clone(hub);
+    let started = std::thread::Builder::new()
+        .name("archive-purge".into())
+        .spawn(move || {
+            loop {
+                match hub.purge_archived_sticks() {
+                    Ok(0) => {}
+                    Ok(removed) => tracing::info!("deleted {removed} archived sticks"),
+                    Err(error) => tracing::error!("{error}"),
+                }
+                std::thread::sleep(Duration::from_secs(3600));
+            }
+        });
+    if let Err(error) = started {
+        tracing::error!("the archived stick clean-up cannot start: {error}");
     }
 }
 

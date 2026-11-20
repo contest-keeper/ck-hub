@@ -49,7 +49,7 @@ pub use enrol::{
     MintedCode, NewEnrolmentCode, Redemption,
 };
 pub use forge::{FORGE_CODE_LIFETIME_SECONDS, ForgeError};
-pub use hub::{Hub, LastHeartbeat, ONLINE_WINDOW_SECONDS, Rejection, StickView};
+pub use hub::{HardwareView, Hub, LastHeartbeat, ONLINE_WINDOW_SECONDS, Rejection, StickView};
 pub use images::{Image, ImageSource, ImagesError, MANIFEST_BLOB, StaticImages, StorageImages};
 pub use invite::{AcceptError, INVITATION_LIFETIME_DAYS, InviteError, MemberError, StaffError};
 pub use judge::{EventKey, JudgeSubmission, SubmitEvent, submit_event};
@@ -72,9 +72,9 @@ pub use signup::{
     VERIFY_LIFETIME_HOURS,
 };
 pub use store::{
-    Invitation, Member, Membership, MemoryStore, NewProfile, NewUser, Organization, Profile,
-    ProfileSummary, Role, SeenHeartbeat, Stick, Store, StoreError, StoredEvent, TokenPurpose, User,
-    Wallpaper,
+    Hardware, Invitation, Member, Membership, MemoryStore, NewProfile, NewUser, Organization,
+    Profile, ProfileSummary, Role, SeenHeartbeat, Stick, StickHardware, Store, StoreError,
+    StoredEvent, TokenPurpose, User, Wallpaper,
 };
 pub use submissions::{JudgeRow, StickSubmission, SubmissionsView};
 pub use watcher::{WatchError, poll_once, run as watch};

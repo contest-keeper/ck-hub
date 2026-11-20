@@ -97,6 +97,15 @@ pub fn router(hub: Arc<Hub>) -> Router {
             delete(retire_credential_in),
         )
         .route(
+            "/api/v1/orgs/{slug}/sticks/{id}/archive",
+            post(archive_stick),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/sticks/{id}/restore",
+            post(restore_stick),
+        )
+        .route("/api/v1/orgs/{slug}/sticks/{id}", delete(delete_stick))
+        .route(
             "/api/v1/orgs/{slug}/invitations",
             get(invitations_of).post(invite),
         )
@@ -133,6 +142,11 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route(
             "/api/v1/orgs/{slug}/recordings/{recording_id}/view",
             get(view_recording),
+        )
+        .route("/api/v1/hardware-writes", post(hardware_write))
+        .route(
+            "/api/v1/orgs/{slug}/hardware-writes",
+            post(hardware_write_in),
         )
         .route("/api/v1/enrolment-codes", post(mint_code))
         .route("/api/v1/orgs/{slug}/enrolment-codes", post(mint_code_in))
@@ -618,6 +632,84 @@ async fn retire_credential_of(hub: Arc<Hub>, access: Access, id: String) -> Resp
     }
 }
 
+/// How long an archived stick is kept before the Hub deletes it.
+const ARCHIVE_DAYS: [i64; 2] = [7, 30];
+
+#[derive(Deserialize)]
+struct ArchiveRequest {
+    days: i64,
+}
+
+async fn archive_stick(
+    State(hub): State<Arc<Hub>>,
+    Path((slug, id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let access = match require_in(&hub, &headers, slug, Role::Admin).await {
+        Ok(access) => access,
+        Err(reason) => return denied(reason),
+    };
+    let Some(days) = serde_json::from_slice::<ArchiveRequest>(&body)
+        .ok()
+        .map(|request| request.days)
+        .filter(|days| ARCHIVE_DAYS.contains(days))
+    else {
+        return (StatusCode::BAD_REQUEST, "days must be 7 or 30").into_response();
+    };
+    stick_change(
+        tokio::task::spawn_blocking(move || hub.archive_stick(&access.organization.id, &id, days))
+            .await,
+        "no such stick",
+    )
+}
+
+async fn restore_stick(
+    State(hub): State<Arc<Hub>>,
+    Path((slug, id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    match require_in(&hub, &headers, slug, Role::Admin).await {
+        Ok(access) => stick_change(
+            tokio::task::spawn_blocking(move || hub.restore_stick(&access.organization.id, &id))
+                .await,
+            "no such archived stick",
+        ),
+        Err(reason) => denied(reason),
+    }
+}
+
+/// Deletes an archived stick and everything kept about it now, without waiting for its time.
+async fn delete_stick(
+    State(hub): State<Arc<Hub>>,
+    Path((slug, id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    match require_in(&hub, &headers, slug, Role::Admin).await {
+        Ok(access) => stick_change(
+            tokio::task::spawn_blocking(move || hub.delete_stick(&access.organization.id, &id))
+                .await,
+            "no such archived stick",
+        ),
+        Err(reason) => denied(reason),
+    }
+}
+
+fn stick_change(
+    result: Result<Result<bool, crate::store::StoreError>, tokio::task::JoinError>,
+    missing: &'static str,
+) -> Response {
+    match result {
+        Ok(Ok(true)) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Ok(false)) => denied((StatusCode::NOT_FOUND, missing)),
+        Ok(Err(error)) => {
+            tracing::error!("{error}");
+            unavailable()
+        }
+        Err(_) => unavailable(),
+    }
+}
+
 /// The network history of one stick of the only organization the caller belongs to.
 async fn network(
     State(hub): State<Arc<Hub>>,
@@ -836,6 +928,8 @@ struct MintBody {
     lifetime_minutes: Option<i64>,
     #[serde(default)]
     credential_scope: Option<crate::CredentialScope>,
+    #[serde(default)]
+    hardware: Option<crate::Hardware>,
 }
 
 /// Only an admin or an owner may make an enrolment code.
@@ -872,6 +966,51 @@ fn enrol_refusal(error: EnrolError) -> Response {
     }
 }
 
+/// What Forge says when it writes a disk for a stick whose id it already knows.
+#[derive(Deserialize)]
+struct HardwareWriteBody {
+    stick_id: String,
+    #[serde(flatten)]
+    hardware: crate::Hardware,
+}
+
+async fn hardware_write(State(hub): State<Arc<Hub>>, headers: HeaderMap, body: Bytes) -> Response {
+    match require(&hub, &headers, Role::Admin).await {
+        Ok(access) => record_write(hub, access, body).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+async fn hardware_write_in(
+    State(hub): State<Arc<Hub>>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    match require_in(&hub, &headers, slug, Role::Admin).await {
+        Ok(access) => record_write(hub, access, body).await,
+        Err(reason) => denied(reason),
+    }
+}
+
+async fn record_write(hub: Arc<Hub>, access: Access, body: Bytes) -> Response {
+    let Ok(write) = serde_json::from_slice::<HardwareWriteBody>(&body) else {
+        return (StatusCode::BAD_REQUEST, "the request cannot be read").into_response();
+    };
+    let Ok(stick) = ck_protocol::StickId::parse(&write.stick_id) else {
+        return (StatusCode::BAD_REQUEST, "the stick id is not valid").into_response();
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        hub.record_stick_write(&access.organization.id, &write.hardware, &stick)
+    })
+    .await;
+    match result {
+        Ok(Ok(count)) => Json(json!({ "write_count": count })).into_response(),
+        Ok(Err(error)) => enrol_refusal(error),
+        Err(_) => unavailable(),
+    }
+}
+
 async fn mint(hub: Arc<Hub>, access: Access, body: Bytes) -> Response {
     // An empty body is a code with nothing preset.
     let spec: MintBody = if body.is_empty() {
@@ -899,6 +1038,7 @@ async fn mint(hub: Arc<Hub>, access: Access, body: Bytes) -> Response {
                 machine_number: spec.machine_number,
                 lifetime_minutes: spec.lifetime_minutes,
                 credential_scope: spec.credential_scope,
+                hardware: spec.hardware,
             },
         )
     })
