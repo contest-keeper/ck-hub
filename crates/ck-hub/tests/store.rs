@@ -307,6 +307,49 @@ fn identity_contract(store: &dyn Store) {
     invitations_contract(store);
 }
 
+fn concurrent_heartbeats(store: &dyn Store) {
+    let id = unique();
+    let org = store
+        .ensure_organization(&id, "Heartbeat race")
+        .expect("organization")
+        .id;
+    let barrier = std::sync::Barrier::new(4);
+    let record = || {
+        barrier.wait();
+        store
+            .record_heartbeat(&org, heartbeat(&id, "boot-1", 1), time(0))
+            .expect("record")
+    };
+    let outcomes = std::thread::scope(|thread| {
+        let jobs: Vec<_> = (0..4).map(|_| thread.spawn(record)).collect();
+        jobs.into_iter()
+            .map(|job| job.join().expect("thread"))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(outcomes.iter().filter(|value| value.is_none()).count(), 1);
+    assert!(outcomes.iter().flatten().all(|&seq| seq == 1));
+    assert_eq!(
+        store
+            .record_heartbeat(&org, heartbeat(&id, "boot-2", 1), time(1))
+            .expect("new boot"),
+        None
+    );
+    assert_eq!(
+        store
+            .record_heartbeat(&org, heartbeat(&id, "boot-1", 1), time(2))
+            .expect("safe repeat"),
+        Some(1)
+    );
+    let stick = StickId::parse(&id).expect("id");
+    let seen = store
+        .last_heartbeat(&org, &stick)
+        .expect("read")
+        .expect("heartbeat");
+    assert_eq!(seen.heartbeat.boot_id, "boot-2");
+    assert_eq!(seen.received_at, time(1));
+    assert_eq!(seen.count, 2);
+}
+
 fn retirement_contract(store: &dyn Store, org: &str, existing: &StickId) {
     let other = store
         .ensure_organization(&unique(), "Unrelated organization")
@@ -1399,6 +1442,7 @@ fn the_memory_store_keeps_its_contract() {
     enrolment_contract(&MemoryStore::default());
     scoped_enrolment_contract(&MemoryStore::default());
     recoverable_enrolment_contract(&MemoryStore::default());
+    concurrent_heartbeats(&MemoryStore::default());
     commands_contract(&MemoryStore::default());
     recordings_contract(&MemoryStore::default());
     profiles_contract(&MemoryStore::default());
@@ -1417,12 +1461,45 @@ fn the_postgres_store_keeps_its_contract() {
     enrolment_contract(&store);
     scoped_enrolment_contract(&store);
     recoverable_enrolment_contract(&store);
+    concurrent_heartbeats(&store);
     commands_contract(&store);
     recordings_contract(&store);
     profiles_contract(&store);
     the_store_contract(&store);
     judge_contract(&store);
     organizations_are_kept_apart(&store);
+}
+
+#[test]
+fn postgres_rolls_back_the_boot_when_the_latest_heartbeat_belongs_to_another_organization() {
+    let Some(url) = database_url() else { return };
+    let store = PostgresStore::connect(&url).expect("connect");
+    let one = store
+        .ensure_organization(&unique(), "One")
+        .expect("organization");
+    let two = store
+        .ensure_organization(&unique(), "Two")
+        .expect("organization");
+    let id = unique();
+    let stick = StickId::parse(&id).expect("id");
+    store
+        .record_heartbeat(&one.id, heartbeat(&id, "boot-1", 1), time(1))
+        .expect("first heartbeat");
+
+    let wrong_owner = store.record_heartbeat(&two.id, heartbeat(&id, "boot-2", 1), time(2));
+    assert!(wrong_owner.is_err());
+    assert_eq!(
+        store
+            .heartbeat_seq_of_boot(&two.id, &stick, "boot-2")
+            .expect("read"),
+        None
+    );
+    let seen = store
+        .last_heartbeat(&one.id, &stick)
+        .expect("read")
+        .expect("heartbeat");
+    assert_eq!(seen.heartbeat.boot_id, "boot-1");
+    assert_eq!(seen.count, 1);
 }
 
 /// The policies themselves, with the Hub's queries out of the way: a role that cannot bypass row

@@ -290,23 +290,16 @@ impl Hub {
         storable(body, heartbeat.seq)?;
 
         let _one_at_a_time = self.write_lock(&id);
-        // The sequence starts again at every boot, so only a message of the same boot is compared.
-        // The highest one of each boot is kept, so an old boot cannot be replayed after a newer
-        // one.
-        if let Some(top) =
-            self.store
-                .heartbeat_seq_of_boot(&organization, &id, &heartbeat.boot_id)?
-            && heartbeat.seq <= top
-        {
-            return Err(Rejection::Conflict(format!(
-                "sequence {} is not newer than {top}",
-                heartbeat.seq
-            )));
-        }
         let seq = heartbeat.seq;
         let screen_unlock = heartbeat.screen_unlock;
-        self.store
-            .record_heartbeat(&organization, heartbeat, (self.clock)())?;
+        if let Some(top) = self
+            .store
+            .record_heartbeat(&organization, heartbeat, (self.clock)())?
+        {
+            return Err(Rejection::Conflict(format!(
+                "sequence {seq} is not newer than {top}"
+            )));
+        }
         Ok((seq, organization, id, screen_unlock))
     }
 

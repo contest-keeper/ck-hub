@@ -186,13 +186,14 @@ pub struct StoredEvent {
 
 /// Every method fails with [`StoreError`] when the data cannot be read or written.
 pub trait Store: Send + Sync {
-    /// Keeps `heartbeat` as the latest of its stick in the organization and counts it.
+    /// Accepts a newer sequence for its boot, keeps it as the stick's latest heartbeat and counts
+    /// it atomically. Returns the highest sequence of that boot when the heartbeat is a replay.
     fn record_heartbeat(
         &self,
         organization: &str,
         heartbeat: Heartbeat,
         received_at: OffsetDateTime,
-    ) -> Result<(), StoreError>;
+    ) -> Result<Option<u64>, StoreError>;
 
     fn last_heartbeat(
         &self,
@@ -692,18 +693,19 @@ impl Store for MemoryStore {
         organization: &str,
         heartbeat: Heartbeat,
         received_at: OffsetDateTime,
-    ) -> Result<(), StoreError> {
+    ) -> Result<Option<u64>, StoreError> {
+        let mut boots = self.boot_seqs.lock().expect("boots lock");
+        let boot = (
+            organization.to_owned(),
+            heartbeat.stick_id.clone(),
+            heartbeat.boot_id.clone(),
+        );
+        if let Some(&top) = boots.get(&boot)
+            && heartbeat.seq <= top
         {
-            let mut boots = self.boot_seqs.lock().expect("boots lock");
-            let top = boots
-                .entry((
-                    organization.to_owned(),
-                    heartbeat.stick_id.clone(),
-                    heartbeat.boot_id.clone(),
-                ))
-                .or_insert(0);
-            *top = (*top).max(heartbeat.seq);
+            return Ok(Some(top));
         }
+        boots.insert(boot, heartbeat.seq);
         let key = (organization.to_owned(), heartbeat.stick_id.clone());
         let mut heartbeats = self.heartbeats.lock().expect("heartbeats lock");
         let count = heartbeats.get(&key).map_or(0, |seen| seen.count) + 1;
@@ -715,7 +717,7 @@ impl Store for MemoryStore {
                 count,
             },
         );
-        Ok(())
+        Ok(None)
     }
 
     fn last_heartbeat(
