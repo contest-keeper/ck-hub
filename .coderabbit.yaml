@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+reviews:
+  profile: assertive
+  auto_review:
+    enabled: true
+    base_branches: ["^develop$"]
+    ignore_usernames: ["dependabot[bot]"]
+  tools:
+    shellcheck:
+      enabled: true
+    clippy:
+      enabled: true
+  path_instructions:
+    - path: "crates/ck-hub/src/{accounts,enrol,signing,commands}.rs"
+      instructions: |
+        Security-critical: logins, enrolment, settings signing and commands to sticks. Check authorization on every route (organization scoping), bounded work and memory before expensive steps (Argon2, maps), constant-time compares, replay protection, and that no secret, token or password is logged or returned.
