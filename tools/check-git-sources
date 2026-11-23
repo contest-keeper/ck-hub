@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Checks that every dependency in Cargo.lock comes from crates.io or from a repository of the
+# contest-keeper organisation on GitHub, so a lockfile cannot quietly pull code from anywhere else.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+org="contest-keeper"
+bad=0
+for lock in $(git ls-files 'Cargo.lock' '**/Cargo.lock'); do
+  while IFS= read -r source; do
+    case "$source" in
+      registry+https://github.com/rust-lang/crates.io-index) ;;
+      "git+https://github.com/${org}/"*) ;;
+      *)
+        echo "check-git-sources: $lock has a source outside crates.io and github.com/${org}: $source"
+        bad=1
+        ;;
+    esac
+  done < <(sed -n 's/^source = "\(.*\)"$/\1/p' "$lock" | sort -u)
+done
+
+if [ "$bad" -ne 0 ]; then
+  exit 1
+fi
+echo "check-git-sources: all sources are allowed"
