@@ -1,5 +1,5 @@
 //! Every state-changing route refuses a request from another origin and, when it carries the session
-//! cookie, a body that is not JSON. The list is checked against `routes.rs`, so a new route has to be
+//! cookie, a body that is not JSON. The list is checked against `routes/mod.rs`, so a new route has to be
 //! added here (or to the read-only list) before the tests pass.
 
 use std::fs;
@@ -237,7 +237,7 @@ async fn no_listed_method_is_refused_as_not_allowed() {
 
 #[test]
 fn the_list_covers_every_route_in_routes_rs() {
-    let source = include_str!("../../src/routes.rs");
+    let source = include_str!("../../src/routes/mod.rs");
     let mut paths = Vec::new();
     for (index, _) in source.match_indices("\"/api/v1/") {
         let rest = &source[index + 1..];
@@ -265,7 +265,7 @@ fn the_list_covers_every_route_in_routes_rs() {
             || READ_ONLY.contains(&path);
         assert!(
             known,
-            "{path} is in routes.rs but in neither list of tests/csrf.rs"
+            "{path} is in routes/mod.rs but in neither list of tests/csrf.rs"
         );
     }
 }
