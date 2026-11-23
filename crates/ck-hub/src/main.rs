@@ -722,8 +722,17 @@ fn storage_containers(args: &DownloadArgs, account: &str) -> Result<(Download, D
         }
         (None, None) => Err(ck_hub::DownloadError::NoKey),
     };
-    Ok((
-        make(&args.download_container).map_err(|e| e.to_string())?,
-        make(&args.recordings_container).map_err(|e| e.to_string())?,
-    ))
+    let downloads = make(&args.download_container).map_err(|e| e.to_string())?;
+    let recordings = make(&args.recordings_container).map_err(|e| e.to_string())?;
+    // A wrong signature or a missing role shows in the log at start, not at the first download.
+    let checked = [downloads.clone(), recordings.clone()];
+    std::thread::spawn(move || {
+        for container in checked {
+            match container.self_test(OffsetDateTime::now_utc()) {
+                Ok(text) => tracing::info!("storage self-test: {text}"),
+                Err(reason) => tracing::error!("storage self-test failed: {reason}"),
+            }
+        }
+    });
+    Ok((downloads, recordings))
 }
