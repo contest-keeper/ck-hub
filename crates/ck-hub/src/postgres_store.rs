@@ -16,14 +16,14 @@ use crate::judge::{JudgeSubmission, SubmitEvent, submit_event};
 
 use crate::recordings::{Kind, Recording};
 use crate::store::{
-    Hardware, Invitation, Member, Membership, NewProfile, NewUser, Organization, Profile,
+    BootSpan, Hardware, Invitation, Member, Membership, NewProfile, NewUser, Organization, Profile,
     ProfileSummary, Role, SeenHeartbeat, Stick, StickHardware, Store, StoreError, StoredEvent,
     TokenPurpose, User, Wallpaper,
 };
 
 /// The schema, in the order it is applied. A migration that was applied is never run again and
 /// never edited: a change is a new file.
-const MIGRATIONS: [(&str, &str); 20] = [
+const MIGRATIONS: [(&str, &str); 21] = [
     (
         "0001_heartbeats_and_events",
         include_str!("../migrations/0001_heartbeats_and_events.sql"),
@@ -100,6 +100,10 @@ const MIGRATIONS: [(&str, &str); 20] = [
     (
         "0020_expected_configs",
         include_str!("../migrations/0020_expected_configs.sql"),
+    ),
+    (
+        "0021_boot_spans",
+        include_str!("../migrations/0021_boot_spans.sql"),
     ),
 ];
 
@@ -618,9 +622,12 @@ impl Store for PostgresStore {
         let accepted = self.in_org_transaction(organization, |transaction| {
             let stored = transaction.execute(
                 "WITH newer_boot AS (
-                     INSERT INTO heartbeat_boots (organization_id, stick_id, boot_id, seq)
-                     VALUES ($1, $2, $3, $4)
-                     ON CONFLICT (stick_id, boot_id) DO UPDATE SET seq = EXCLUDED.seq
+                     INSERT INTO heartbeat_boots
+                         (organization_id, stick_id, boot_id, seq, first_seen, last_seen)
+                     VALUES ($1, $2, $3, $4, $5, $5)
+                     ON CONFLICT (stick_id, boot_id) DO UPDATE SET
+                         seq = EXCLUDED.seq, last_seen = EXCLUDED.last_seen,
+                         first_seen = COALESCE(heartbeat_boots.first_seen, EXCLUDED.first_seen)
                      WHERE heartbeat_boots.organization_id = EXCLUDED.organization_id
                        AND heartbeat_boots.seq < EXCLUDED.seq
                      RETURNING organization_id, stick_id, boot_id, seq
@@ -679,6 +686,30 @@ impl Store for PostgresStore {
             received_at: row.get(1),
             count: u64::try_from(count).map_err(failed)?,
         }))
+    }
+
+    fn boot_spans(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        heard_since: OffsetDateTime,
+    ) -> Result<Vec<BootSpan>, StoreError> {
+        let rows = self.in_org(organization, |transaction| {
+            transaction.query(
+                "SELECT boot_id, first_seen, last_seen FROM heartbeat_boots
+                 WHERE organization_id = $1 AND stick_id = $2
+                   AND first_seen IS NOT NULL AND last_seen >= $3",
+                &[&organization, &stick.as_str(), &heard_since],
+            )
+        })?;
+        Ok(rows
+            .iter()
+            .map(|row| BootSpan {
+                boot_id: row.get(0),
+                first_seen: row.get(1),
+                last_seen: row.get(2),
+            })
+            .collect())
     }
 
     fn heartbeat_seq_of_boot(

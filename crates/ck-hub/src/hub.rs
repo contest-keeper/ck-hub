@@ -22,7 +22,7 @@ use crate::mail::Mailer;
 use crate::network::{self, NetworkView};
 use crate::recordings::Blobs;
 use crate::registry::Registry;
-use crate::store::{Stick, Store, StoreError, StoredEvent};
+use crate::store::{BootSpan, Stick, Store, StoreError, StoredEvent};
 use crate::submissions::{self, SubmissionsView};
 
 /// A stick that has sent nothing for longer than this is shown as offline.
@@ -752,6 +752,7 @@ impl Hub {
                 last_submission: last_submission(&stored),
                 warnings: {
                     let mut found = warnings(&stored, boot.as_deref());
+                    found.extend(self.two_places(organization, &entry.stick_id, now)?);
                     found.extend(config_warning(wrote, reported.as_deref()));
                     found.extend(trust_warning(trust));
                     found
@@ -877,6 +878,41 @@ fn config_warning(wrote: Option<&str>, reported: Option<&str>) -> Option<String>
     Some(format!(
         "Settings changed: this stick {what}. The file was edited, or the stick was written by another tool."
     ))
+}
+
+/// How long after the last heartbeat of a boot the Hub still counts it as live when it looks for a
+/// second machine using the same stick credential.
+const TWO_PLACES_WINDOW_SECONDS: i64 = 300;
+
+impl Hub {
+    fn two_places(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        now: OffsetDateTime,
+    ) -> Result<Option<String>, StoreError> {
+        let since = now - Duration::seconds(TWO_PLACES_WINDOW_SECONDS);
+        Ok(two_places_warning(&self.store.boot_spans(
+            organization,
+            stick,
+            since,
+        )?))
+    }
+}
+
+/// A stick is on one machine at a time: a reboot ends the old boot before the new one starts. Two
+/// boots that were both heard from, with their first-to-last times overlapping, mean the credential
+/// is in use on two machines (a cloned disk or a copied secret).
+fn two_places_warning(spans: &[BootSpan]) -> Option<String> {
+    let overlapping = spans.iter().enumerate().any(|(index, a)| {
+        spans[index + 1..]
+            .iter()
+            .any(|b| a.first_seen < b.last_seen && b.first_seen < a.last_seen)
+    });
+    overlapping.then(|| {
+        "two machines are sending heartbeats as this stick at the same time: its credential is in use in two places"
+            .to_owned()
+    })
 }
 
 fn warnings(stored: &[StoredEvent], boot: Option<&str>) -> Vec<String> {

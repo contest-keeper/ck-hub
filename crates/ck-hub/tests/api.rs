@@ -853,6 +853,34 @@ async fn an_event_the_hub_already_has_is_a_conflict_and_forged_ones_are_refused(
 }
 
 #[tokio::test]
+async fn two_boots_heard_at_the_same_time_are_flagged_but_a_reboot_is_not() {
+    let setup = setup();
+    let tick = |seconds: i64| {
+        *setup.now.lock().expect("clock") += Duration::seconds(seconds);
+    };
+    // A normal reboot: boot a stops, boot b starts, and nothing of a is heard again.
+    assert_eq!(heartbeat(&setup.app, "boot-a", 1).await.0, StatusCode::OK);
+    tick(10);
+    assert_eq!(heartbeat(&setup.app, "boot-a", 2).await.0, StatusCode::OK);
+    tick(10);
+    assert_eq!(heartbeat(&setup.app, "boot-b", 1).await.0, StatusCode::OK);
+    tick(10);
+    assert_eq!(heartbeat(&setup.app, "boot-b", 2).await.0, StatusCode::OK);
+    let warnings = list(&setup.app).await[0]["warnings"].to_string();
+    assert!(!warnings.contains("two machines"), "{warnings}");
+    // Boot a is heard again while boot b is live: the credential is in two places.
+    tick(10);
+    assert_eq!(heartbeat(&setup.app, "boot-a", 3).await.0, StatusCode::OK);
+    let warnings = list(&setup.app).await[0]["warnings"].to_string();
+    assert!(warnings.contains("two machines"), "{warnings}");
+    // The flag goes when only one of them is still heard from.
+    tick(400);
+    assert_eq!(heartbeat(&setup.app, "boot-b", 3).await.0, StatusCode::OK);
+    let warnings = list(&setup.app).await[0]["warnings"].to_string();
+    assert!(!warnings.contains("two machines"), "{warnings}");
+}
+
+#[tokio::test]
 async fn a_gap_a_changed_event_and_a_late_start_are_kept_as_warnings_not_refused() {
     let setup = setup();
     assert_eq!(

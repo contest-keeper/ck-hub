@@ -79,6 +79,22 @@ fn event(stick: &str, seq: u64, user: &str) -> Event {
     }
 }
 
+/// Each boot keeps when it was first and last heard from (boot-1 at 1 and 2, boot-2 at 4).
+fn boot_spans_contract(store: &dyn Store, org: &str, a_id: &StickId) {
+    let mut spans = store.boot_spans(org, a_id, time(0)).expect("read");
+    spans.sort_by(|x, y| x.boot_id.cmp(&y.boot_id));
+    assert_eq!(
+        spans
+            .iter()
+            .map(|s| (s.boot_id.as_str(), s.first_seen, s.last_seen))
+            .collect::<Vec<_>>(),
+        vec![("boot-1", time(1), time(2)), ("boot-2", time(4), time(4))]
+    );
+    let late = store.boot_spans(org, a_id, time(3)).expect("read");
+    assert_eq!(late.len(), 1);
+    assert_eq!(late[0].boot_id, "boot-2");
+}
+
 /// What every store must do.
 fn the_store_contract(store: &dyn Store) {
     let id = unique();
@@ -138,6 +154,7 @@ fn the_store_contract(store: &dyn Store) {
             .expect("read"),
         None
     );
+    boot_spans_contract(store, &org, &a_id);
 
     // Events: kept whole, in the order received, for each stick on its own.
     assert!(store.events(&org, &a_id).expect("read").is_empty());
