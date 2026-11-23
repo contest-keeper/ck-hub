@@ -13,7 +13,7 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 /// Method and path of every route that changes something.
-const STATE_CHANGING: &[(&str, &str)] = &[
+pub(crate) const STATE_CHANGING: &[(&str, &str)] = &[
     ("POST", "/api/v1/heartbeat"),
     ("POST", "/api/v1/events"),
     ("POST", "/api/v1/config-hashes"),
@@ -56,7 +56,7 @@ const STATE_CHANGING: &[(&str, &str)] = &[
 ];
 
 /// Paths that only answer GET, so nothing can be forged through them.
-const READ_ONLY: &[&str] = &[
+pub(crate) const READ_ONLY: &[&str] = &[
     "/api/v1/config-signing-key",
     "/api/v1/images",
     "/api/v1/me",
