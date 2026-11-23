@@ -19,3 +19,9 @@ itself five minutes after one of the two stops.
 **Not done.** No heartbeat is refused and no credential is retired: a wrong guess must not take a
 working stick offline during a contest. Retiring stays an organizer's decision. The Hub does not
 store client addresses, so the warning cannot say where the second machine is.
+
+**Limits.** The check needs two different boot ids, so a copy resumed from a running snapshot (same
+boot id) is not caught by it; its heartbeats only collide on sequence numbers. A boot that was already
+running when migration 0021 was applied starts its span at its first heartbeat after it. The warning
+is not stored: it shows while the overlap is recent and then goes. The stick list asks the store once
+per stick; an organization-wide query is the next step if that list gets slow.
