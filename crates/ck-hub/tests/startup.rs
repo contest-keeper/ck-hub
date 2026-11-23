@@ -28,9 +28,16 @@ fn status_of(address: &str) -> Option<String> {
 
 #[test]
 fn the_program_starts_on_postgres_and_answers() {
-    let Ok(url) = std::env::var("CK_TEST_DATABASE_URL") else {
-        eprintln!("skipped: set CK_TEST_DATABASE_URL to run against PostgreSQL");
-        return;
+    let url = match std::env::var("CK_TEST_DATABASE_URL") {
+        Ok(url) if !url.is_empty() => url,
+        _ => {
+            assert!(
+                std::env::var("CK_TEST_DATABASE_REQUIRED").as_deref() != Ok("1"),
+                "CK_TEST_DATABASE_REQUIRED=1 but CK_TEST_DATABASE_URL is not set"
+            );
+            eprintln!("skipped: set CK_TEST_DATABASE_URL to run against PostgreSQL");
+            return;
+        }
     };
     // A free port: ask the system for one and let it go.
     let port = TcpListener::bind("127.0.0.1:0")

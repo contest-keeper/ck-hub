@@ -78,6 +78,9 @@ docker run -d --name ck-hub-test-db -e POSTGRES_PASSWORD=ck-test-only -e POSTGRE
 CK_TEST_DATABASE_URL=postgres://postgres:ck-test-only@127.0.0.1:54329/ckhub cargo test
 ```
 
+Without the variable those tests print `skipped: ...` (run `cargo test -- --nocapture` to see it) and
+pass. Set `CK_TEST_DATABASE_REQUIRED=1` to make a missing database a failure; CI does.
+
 Events in the database are append-only: the database itself refuses to change or delete them, so
 every test uses ids no earlier run used.
 

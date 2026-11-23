@@ -2083,8 +2083,16 @@ mod tests {
 
     #[test]
     fn waiting_request_uses_whichever_connection_is_released() {
-        let Ok(url) = std::env::var("CK_TEST_DATABASE_URL") else {
-            return;
+        let url = match std::env::var("CK_TEST_DATABASE_URL") {
+            Ok(url) if !url.is_empty() => url,
+            _ => {
+                assert!(
+                    std::env::var("CK_TEST_DATABASE_REQUIRED").as_deref() != Ok("1"),
+                    "CK_TEST_DATABASE_REQUIRED=1 but CK_TEST_DATABASE_URL is not set"
+                );
+                eprintln!("skipped: set CK_TEST_DATABASE_URL to run against PostgreSQL");
+                return;
+            }
         };
         let store = PostgresStore::connect_with_pool(&url, 2).expect("PostgreSQL test database");
         let (acquired, holds_connection) = mpsc::channel();
