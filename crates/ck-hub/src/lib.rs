@@ -6,6 +6,7 @@ mod acs_mail;
 mod codeforces;
 mod commands;
 mod credentials;
+mod csrf;
 mod download;
 mod enrol;
 mod forge;

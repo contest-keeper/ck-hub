@@ -201,6 +201,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
             post(password_reset_confirm),
         )
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(axum::middleware::from_fn(crate::csrf::guard))
         .layer(axum::middleware::map_response(security_headers))
         .with_state(hub)
 }
