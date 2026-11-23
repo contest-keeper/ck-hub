@@ -1,6 +1,7 @@
 mod accounts;
 mod acs_mail;
 mod api;
+mod auth_sweep;
 mod codeforces_watcher;
 mod commands;
 mod csrf;
