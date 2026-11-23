@@ -15,7 +15,7 @@ use time::{Duration, OffsetDateTime};
 use crate::delegation::Delegation;
 
 /// The storage REST version the link is signed for.
-const SAS_VERSION: &str = "2022-11-02";
+const SAS_VERSION: &str = crate::delegation::STORAGE_VERSION;
 
 /// How long a link works. Long enough for a slow download to start, short enough that a shared link
 /// is useless soon after.

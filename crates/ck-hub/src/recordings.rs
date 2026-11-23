@@ -280,7 +280,7 @@ pub struct AzureBlobs {
 }
 
 /// The storage REST version the links are signed for; sent with every call.
-const STORAGE_VERSION: &str = "2022-11-02";
+use crate::delegation::STORAGE_VERSION;
 
 /// A link for one call lives this long: enough for a slow 4 MiB chunk.
 const CALL_LINK_MINUTES: i64 = 10;

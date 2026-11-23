@@ -95,16 +95,16 @@ impl Delegation {
         }
         let this = Arc::clone(self);
         std::thread::spawn(move || {
+            let mut wait = REFRESH_EVERY;
             loop {
-                let ok = this.refresh(OffsetDateTime::now_utc());
-                if let Err(reason) = &ok {
-                    tracing::error!("storage delegation key not renewed: {reason}");
-                }
-                std::thread::sleep(if ok.is_ok() {
-                    REFRESH_EVERY
-                } else {
-                    RETRY_AFTER
-                });
+                std::thread::sleep(wait);
+                wait = match this.refresh(OffsetDateTime::now_utc()) {
+                    Ok(()) => REFRESH_EVERY,
+                    Err(reason) => {
+                        tracing::error!("storage delegation key not renewed: {reason}");
+                        RETRY_AFTER
+                    }
+                };
             }
         });
     }
