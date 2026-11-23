@@ -6,6 +6,7 @@ mod commands;
 mod csrf;
 mod enrol;
 mod forge_connect;
+mod hostile;
 mod invitation_routes;
 mod invitations;
 mod profiles;
