@@ -1,4 +1,4 @@
-//! The same tests for every store. PostgreSQL runs only when `CK_TEST_DATABASE_URL` is set, for
+//! The same tests for every store. PostgreSQL runs only when `CK_TEST_DATABASE_URL` is set (or must, with `CK_TEST_DATABASE_REQUIRED=1`), for
 //! example `postgres://postgres:password@127.0.0.1:54329/ckhub` against a local Docker database:
 //! the shared checks do not start a database of their own.
 
@@ -17,8 +17,20 @@ use ck_protocol::{
 use tempfile::TempDir;
 use time::OffsetDateTime;
 
+/// The PostgreSQL test database, or `None` (with a reason on stderr) to skip. With
+/// `CK_TEST_DATABASE_REQUIRED=1` a missing URL fails the test instead, so CI cannot pass silently.
 fn database_url() -> Option<String> {
-    std::env::var("CK_TEST_DATABASE_URL").ok()
+    match std::env::var("CK_TEST_DATABASE_URL") {
+        Ok(url) if !url.is_empty() => Some(url),
+        _ => {
+            assert!(
+                std::env::var("CK_TEST_DATABASE_REQUIRED").as_deref() != Ok("1"),
+                "CK_TEST_DATABASE_REQUIRED=1 but CK_TEST_DATABASE_URL is not set"
+            );
+            eprintln!("skipped: set CK_TEST_DATABASE_URL to run against PostgreSQL");
+            None
+        }
+    }
 }
 
 /// A prefix no earlier run used, because the events of a database are never deleted.
@@ -1814,10 +1826,7 @@ fn the_memory_store_keeps_its_contract() {
 
 #[test]
 fn the_postgres_store_keeps_its_contract() {
-    let Some(url) = database_url() else {
-        eprintln!("skipped: set CK_TEST_DATABASE_URL to run against PostgreSQL");
-        return;
-    };
+    let Some(url) = database_url() else { return };
     let store = PostgresStore::connect(&url).expect("connect");
     enrolment_contract(&store);
     scoped_enrolment_contract(&store);
