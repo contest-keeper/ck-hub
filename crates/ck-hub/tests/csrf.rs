@@ -179,6 +179,62 @@ async fn the_hubs_own_origin_and_clients_without_one_still_get_through() {
     }
 }
 
+#[tokio::test]
+async fn the_origin_may_be_named_by_a_proxy_or_by_an_http2_authority() {
+    let (_dir, app) = app();
+    let body = r#"{"email":"a@b.c","password":"x"}"#;
+    let forwarded = Request::post("/api/v1/login")
+        .header("host", "ca-hub.internal")
+        .header("x-forwarded-host", "hub.example")
+        .header("origin", "https://hub.example")
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .expect("request");
+    assert_eq!(status(&app, forwarded).await, StatusCode::UNAUTHORIZED);
+    let http2 = Request::post("https://hub.example/api/v1/login")
+        .header("origin", "https://hub.example")
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .expect("request");
+    assert_eq!(status(&app, http2).await, StatusCode::UNAUTHORIZED);
+    let wrong = Request::post("/api/v1/login")
+        .header("host", "ca-hub.internal")
+        .header("x-forwarded-host", "other.example")
+        .header("origin", "https://hub.example")
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .expect("request");
+    assert_eq!(status(&app, wrong).await, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_cookie_request_with_a_form_type_is_refused_even_without_a_length() {
+    let (_dir, app) = app();
+    let forged = request("POST", "/api/v1/sticks")
+        .header("cookie", "ck_session=anything")
+        .header("content-type", "text/plain")
+        .body(Body::from("a=b"))
+        .expect("request");
+    assert_eq!(
+        status(&app, forged).await,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
+}
+
+#[tokio::test]
+async fn no_listed_method_is_refused_as_not_allowed() {
+    let (_dir, app) = app();
+    for (method, path) in STATE_CHANGING {
+        let probe = request(method, path)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("request");
+        let answer = status(&app, probe).await;
+        // 404 is a real answer (no such organization, recordings off), 405 is a stale list.
+        assert_ne!(answer, StatusCode::METHOD_NOT_ALLOWED, "{method} {path}");
+    }
+}
+
 #[test]
 fn the_list_covers_every_route_in_routes_rs() {
     let source = include_str!("../src/routes.rs");
