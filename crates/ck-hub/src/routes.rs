@@ -228,12 +228,19 @@ async fn download_forge(State(hub): State<Arc<Hub>>) -> Response {
     let Some(download) = hub.download.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let link = download.link(FORGE_INSTALLER, (hub.clock)());
-    (
-        StatusCode::FOUND,
-        [(LOCATION, link), (CACHE_CONTROL, "no-store".to_owned())],
-    )
-        .into_response()
+    redirect_to(download.link(FORGE_INSTALLER, (hub.clock)()))
+}
+
+/// Sends the visitor to a storage link, or answers 503 when the Hub has no key to sign one with.
+fn redirect_to(link: Result<String, crate::download::DownloadError>) -> Response {
+    match link {
+        Ok(link) => (
+            StatusCode::FOUND,
+            [(LOCATION, link), (CACHE_CONTROL, "no-store".to_owned())],
+        )
+            .into_response(),
+        Err(_) => unavailable(),
+    }
 }
 
 /// The images an organizer may download. Each one has a Hub address to ask for a short-lived link;
@@ -315,12 +322,7 @@ async fn download_source_offer(
             .into_response(),
         Ok(Ok(Some(blob))) => {
             let download = hub.download.as_ref().expect("checked above");
-            let link = download.link(&blob, (hub.clock)());
-            (
-                StatusCode::FOUND,
-                [(LOCATION, link), (CACHE_CONTROL, "no-store".to_owned())],
-            )
-                .into_response()
+            redirect_to(download.link(&blob, (hub.clock)()))
         }
     }
 }
@@ -352,12 +354,7 @@ async fn download_image(
             .into_response(),
         Ok(Ok(Some(image))) => {
             let download = hub.download.as_ref().expect("checked above");
-            let link = download.link(&image.blob, (hub.clock)());
-            (
-                StatusCode::FOUND,
-                [(LOCATION, link), (CACHE_CONTROL, "no-store".to_owned())],
-            )
-                .into_response()
+            redirect_to(download.link(&image.blob, (hub.clock)()))
         }
     }
 }

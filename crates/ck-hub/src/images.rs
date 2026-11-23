@@ -116,7 +116,10 @@ impl ImageSource for StorageImages {
             return Ok(images.clone());
         }
         // The link carries a signature, so it is never logged or put in an error.
-        let link = self.download.link(MANIFEST_BLOB, OffsetDateTime::now_utc());
+        let link = self
+            .download
+            .link(MANIFEST_BLOB, OffsetDateTime::now_utc())
+            .map_err(|_| ImagesError::Unavailable)?;
         let response = self
             .agent
             .get(&link)

@@ -10,9 +10,10 @@ use std::time::Duration;
 use ck_crypto::ConfigSigningKey;
 use ck_hub::{
     AcsMailer, AzureBlobs, CodeforcesClient, ConsoleMailer, CreateUserError, DEFAULT_POOL_SIZE,
-    DEFAULT_RETENTION_DAYS, Download, Hub, MIN_PASSWORD_LENGTH, Mailer, MemoryStore, NewStick,
-    OrganizationError, PasswordCost, PostgresStore, RegisterError, Registry, Role, StorageImages,
-    Store, StoreError, add_member, create_organization, create_user, register_sticks, router,
+    DEFAULT_RETENTION_DAYS, Delegation, Download, Hub, MIN_PASSWORD_LENGTH, Mailer, MemoryStore,
+    NewStick, OrganizationError, PasswordCost, PostgresStore, RegisterError, Registry, Role,
+    StorageImages, Store, StoreError, add_member, create_organization, create_user,
+    register_sticks, router,
 };
 use clap::{Args, Parser, Subcommand};
 use time::OffsetDateTime;
@@ -97,13 +98,16 @@ enum MailKind {
 #[allow(clippy::struct_field_names)]
 #[derive(Args)]
 struct DownloadArgs {
-    /// The Azure Storage account that holds the downloads. Without it `/download/...` answers 404
-    #[arg(long, env = "CK_DOWNLOAD_ACCOUNT", requires = "download_key")]
+    /// The Azure Storage account that holds the downloads. Without it `/download/...` answers 404.
+    /// Links are signed with `--download-key` when it is set, otherwise with a user delegation key
+    /// of the Hub's managed identity (Azure Container Apps).
+    #[arg(long, env = "CK_DOWNLOAD_ACCOUNT")]
     download_account: Option<String>,
     /// The private container inside that account
     #[arg(long, env = "CK_DOWNLOAD_CONTAINER", default_value = "downloads")]
     download_container: String,
-    /// The account key the short-lived download links are signed with
+    /// The account key the short-lived download links are signed with. Leave it out to use the
+    /// managed identity instead, which needs no key.
     #[arg(
         long,
         env = "CK_DOWNLOAD_KEY",
@@ -111,6 +115,9 @@ struct DownloadArgs {
         requires = "download_account"
     )]
     download_key: Option<String>,
+    /// The client id of the user-assigned managed identity that signs links, when it has one
+    #[arg(long, env = "AZURE_CLIENT_ID")]
+    storage_client_id: Option<String>,
     /// The private container for recordings uploaded by sticks, in the same account. Recordings are
     /// only accepted when the download account is set
     #[arg(long, env = "CK_RECORDINGS_CONTAINER", default_value = "recordings")]
@@ -544,13 +551,8 @@ async fn run(args: ServeArgs) -> Result<(), String> {
         start_codeforces_watcher(&store, slug, contest, credentials).await?;
     }
     let mut hub = Hub::new(registry, store, log, Box::new(OffsetDateTime::now_utc));
-    if let (Some(account), Some(key)) =
-        (&args.download.download_account, &args.download.download_key)
-    {
-        let download = Download::new(account, &args.download.download_container, key)
-            .map_err(|e| e.to_string())?;
-        let recordings = Download::new(account, &args.download.recordings_container, key)
-            .map_err(|e| e.to_string())?;
+    if let Some(account) = &args.download.download_account {
+        let (download, recordings) = storage_containers(&args.download, account)?;
         hub = hub
             .with_images(Arc::new(StorageImages::new(download.clone())))
             .with_download(download)
@@ -693,4 +695,35 @@ async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     ctrl_c.await;
+}
+
+/// The downloads and recordings containers, signed with the account key or the managed identity.
+fn storage_containers(args: &DownloadArgs, account: &str) -> Result<(Download, Download), String> {
+    let delegation = if args.download_key.is_some() {
+        None
+    } else {
+        let delegation = Delegation::from_environment(account, args.storage_client_id.clone())
+            .ok_or("set CK_DOWNLOAD_KEY, or run with a managed identity (IDENTITY_ENDPOINT)")?;
+        delegation.start();
+        Some(delegation)
+    };
+    tracing::info!(
+        "storage links are signed with {}",
+        if delegation.is_some() {
+            "the managed identity"
+        } else {
+            "the account key"
+        }
+    );
+    let make = |container: &str| match (&args.download_key, &delegation) {
+        (Some(key), _) => Download::new(account, container, key),
+        (None, Some(delegation)) => {
+            Download::with_delegation(account, container, Arc::clone(delegation))
+        }
+        (None, None) => Err(ck_hub::DownloadError::NoKey),
+    };
+    Ok((
+        make(&args.download_container).map_err(|e| e.to_string())?,
+        make(&args.recordings_container).map_err(|e| e.to_string())?,
+    ))
 }

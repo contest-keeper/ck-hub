@@ -264,7 +264,7 @@ pub trait Blobs: Send + Sync {
         content_type: &str,
         lifetime: Duration,
         now: OffsetDateTime,
-    ) -> String;
+    ) -> Result<String, BlobError>;
 }
 
 /// The id of block `index`: all ids of a blob must have the same length.
@@ -280,7 +280,7 @@ pub struct AzureBlobs {
 }
 
 /// The storage REST version the links are signed for; sent with every call.
-const STORAGE_VERSION: &str = "2022-11-02";
+use crate::delegation::STORAGE_VERSION;
 
 /// A link for one call lives this long: enough for a slow 4 MiB chunk.
 const CALL_LINK_MINUTES: i64 = 10;
@@ -297,14 +297,16 @@ impl AzureBlobs {
         Self { download, agent }
     }
 
-    fn call_link(&self, blob: &str, permissions: &str) -> String {
-        self.download.sas(
-            blob,
-            permissions,
-            Duration::minutes(CALL_LINK_MINUTES),
-            None,
-            OffsetDateTime::now_utc(),
-        )
+    fn call_link(&self, blob: &str, permissions: &str) -> Result<String, BlobError> {
+        self.download
+            .sas(
+                blob,
+                permissions,
+                Duration::minutes(CALL_LINK_MINUTES),
+                None,
+                OffsetDateTime::now_utc(),
+            )
+            .map_err(|_| BlobError)
     }
 }
 
@@ -313,7 +315,7 @@ impl Blobs for AzureBlobs {
         // The link carries a signature, so it is never logged or put in an error.
         let link = format!(
             "{}&comp=block&blockid={}",
-            self.call_link(blob, "cw"),
+            self.call_link(blob, "cw")?,
             encode(block_id)
         );
         let response = self
@@ -342,7 +344,7 @@ impl Blobs for AzureBlobs {
             body.push_str("</Latest>");
         }
         body.push_str("</BlockList>");
-        let link = format!("{}&comp=blocklist", self.call_link(blob, "cw"));
+        let link = format!("{}&comp=blocklist", self.call_link(blob, "cw")?);
         let response = self
             .agent
             .put(&link)
@@ -358,7 +360,7 @@ impl Blobs for AzureBlobs {
     }
 
     fn delete(&self, blob: &str) -> Result<(), BlobError> {
-        let link = self.call_link(blob, "d");
+        let link = self.call_link(blob, "d")?;
         let response = self
             .agent
             .delete(&link)
@@ -378,9 +380,10 @@ impl Blobs for AzureBlobs {
         content_type: &str,
         lifetime: Duration,
         now: OffsetDateTime,
-    ) -> String {
+    ) -> Result<String, BlobError> {
         self.download
             .sas(blob, "r", lifetime, Some(content_type), now)
+            .map_err(|_| BlobError)
     }
 }
 
@@ -463,8 +466,11 @@ impl Blobs for MemoryBlobs {
         content_type: &str,
         _lifetime: Duration,
         _now: OffsetDateTime,
-    ) -> String {
-        format!("https://blobs.invalid/{blob}?type={}", encode(content_type))
+    ) -> Result<String, BlobError> {
+        Ok(format!(
+            "https://blobs.invalid/{blob}?type={}",
+            encode(content_type)
+        ))
     }
 }
 
@@ -776,18 +782,22 @@ impl Hub {
         let Some((blobs, _)) = self.recordings.as_ref() else {
             return Ok(None);
         };
-        Ok(self
+        let Some(recording) = self
             .store
             .recording(organization, id)?
             .filter(Recording::is_complete)
-            .map(|r| {
-                blobs.view_link(
-                    &r.blob(organization),
-                    r.kind.content_type(),
-                    Duration::hours(VIEW_LINK_HOURS),
-                    (self.clock)(),
-                )
-            }))
+        else {
+            return Ok(None);
+        };
+        blobs
+            .view_link(
+                &recording.blob(organization),
+                recording.kind.content_type(),
+                Duration::hours(VIEW_LINK_HOURS),
+                (self.clock)(),
+            )
+            .map(Some)
+            .map_err(|_| StoreError("no storage signing key right now".to_owned()))
     }
 
     /// Removes the recordings that have expired and the uploads that were never finished: the blob

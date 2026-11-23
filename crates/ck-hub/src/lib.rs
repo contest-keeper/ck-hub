@@ -7,6 +7,7 @@ mod codeforces;
 mod commands;
 mod credentials;
 mod csrf;
+mod delegation;
 mod download;
 mod enrol;
 mod forge;
@@ -44,6 +45,7 @@ pub use commands::{
     MAX_OPEN_PER_STICK, MAX_PER_MINUTE, MIN_LIFETIME_SECONDS, StoredCommand,
 };
 pub use credentials::CredentialScope;
+pub use delegation::Delegation;
 pub use download::{Download, DownloadError, LINK_LIFETIME_MINUTES};
 pub use enrol::{
     DEFAULT_LIFETIME_MINUTES, EnrolError, EnrolledStick, Enrolment, EnrolmentSpec,
