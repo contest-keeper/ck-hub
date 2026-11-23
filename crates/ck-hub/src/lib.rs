@@ -75,9 +75,9 @@ pub use signup::{
     VERIFY_LIFETIME_HOURS,
 };
 pub use store::{
-    Hardware, Invitation, Member, Membership, MemoryStore, NewProfile, NewUser, Organization,
-    Profile, ProfileSummary, Role, SeenHeartbeat, Stick, StickHardware, Store, StoreError,
-    StoredEvent, TokenPurpose, User, Wallpaper,
+    BootSpan, Hardware, Invitation, Member, Membership, MemoryStore, NewProfile, NewUser,
+    Organization, Profile, ProfileSummary, Role, SeenHeartbeat, Stick, StickHardware, Store,
+    StoreError, StoredEvent, TokenPurpose, User, Wallpaper,
 };
 pub use submissions::{JudgeRow, StickSubmission, SubmissionsView};
 pub use watcher::{WatchError, poll_once, run as watch};

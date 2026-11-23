@@ -208,6 +208,17 @@ pub struct SeenHeartbeat {
     pub count: u64,
 }
 
+/// The first and last time a boot was heard from.
+type FirstAndLast = (OffsetDateTime, OffsetDateTime);
+
+/// When one boot of a stick was first and last heard from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootSpan {
+    pub boot_id: String,
+    pub first_seen: OffsetDateTime,
+    pub last_seen: OffsetDateTime,
+}
+
 /// An event as the Hub received it, with what was wrong with its place in the chain, if anything.
 #[derive(Debug, Clone)]
 pub struct StoredEvent {
@@ -232,6 +243,15 @@ pub trait Store: Send + Sync {
         organization: &str,
         stick: &StickId,
     ) -> Result<Option<SeenHeartbeat>, StoreError>;
+
+    /// The boots of `stick` last heard from at or after `heard_since`, with the times they were
+    /// first and last heard from. Boots recorded before the times were kept are left out.
+    fn boot_spans(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        heard_since: OffsetDateTime,
+    ) -> Result<Vec<BootSpan>, StoreError>;
 
     /// The highest heartbeat sequence ever accepted from `stick` in `boot`, if any.
     fn heartbeat_seq_of_boot(
@@ -679,6 +699,7 @@ type MailedToken = (String, String, TokenPurpose, OffsetDateTime);
 pub struct MemoryStore {
     heartbeats: Mutex<HashMap<(String, StickId), SeenHeartbeat>>,
     boot_seqs: Mutex<HashMap<(String, StickId, String), u64>>,
+    boot_times: Mutex<HashMap<(String, StickId, String), FirstAndLast>>,
     events: Mutex<HashMap<(String, StickId), Vec<StoredEvent>>>,
     judge_submissions: Mutex<Vec<(String, String, JudgeSubmission)>>,
     users: Mutex<Vec<User>>,
@@ -838,7 +859,13 @@ impl Store for MemoryStore {
         {
             return Ok(Some(top));
         }
-        boots.insert(boot, heartbeat.seq);
+        boots.insert(boot.clone(), heartbeat.seq);
+        self.boot_times
+            .lock()
+            .expect("boot times lock")
+            .entry(boot)
+            .and_modify(|(_, last)| *last = received_at)
+            .or_insert((received_at, received_at));
         let key = (organization.to_owned(), heartbeat.stick_id.clone());
         let mut heartbeats = self.heartbeats.lock().expect("heartbeats lock");
         let count = heartbeats.get(&key).map_or(0, |seen| seen.count) + 1;
@@ -864,6 +891,28 @@ impl Store for MemoryStore {
             .expect("heartbeats lock")
             .get(&(organization.to_owned(), stick.clone()))
             .cloned())
+    }
+
+    fn boot_spans(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        heard_since: OffsetDateTime,
+    ) -> Result<Vec<BootSpan>, StoreError> {
+        Ok(self
+            .boot_times
+            .lock()
+            .expect("boot times lock")
+            .iter()
+            .filter(|((org, id, _), (_, last))| {
+                org == organization && id == stick && *last >= heard_since
+            })
+            .map(|((_, _, boot), (first, last))| BootSpan {
+                boot_id: boot.clone(),
+                first_seen: *first,
+                last_seen: *last,
+            })
+            .collect())
     }
 
     fn heartbeat_seq_of_boot(
@@ -1527,6 +1576,10 @@ impl Store for MemoryStore {
         self.boot_seqs
             .lock()
             .expect("boots lock")
+            .retain(|(org, stick, _), _| !(org == organization && stick == id));
+        self.boot_times
+            .lock()
+            .expect("boot times lock")
             .retain(|(org, stick, _), _| !(org == organization && stick == id));
         self.events.lock().expect("events lock").remove(&key);
         self.expected_configs
