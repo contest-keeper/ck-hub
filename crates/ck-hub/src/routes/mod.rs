@@ -74,7 +74,10 @@ use sticks::{
 
 /// The page organizers watch. It is one file with no outside resources, so it works on a network
 /// with no internet.
-const PAGE: &str = include_str!("../page.html");
+const PAGE: &str = include_str!("../page/index.html");
+const THEME_JS: &str = include_str!("../page/theme.js");
+const APP_JS: &str = include_str!("../page/app.js");
+const APP_CSS: &str = include_str!("../page/app.css");
 
 /// Where sticks send events. The stick's agent uses the same address.
 const EVENTS_PATH: &str = "/api/v1/events";
@@ -87,6 +90,9 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 pub fn router(hub: Arc<Hub>) -> Router {
     Router::new()
         .route("/", get(page))
+        .route("/assets/theme.js", get(theme_js))
+        .route("/assets/app.js", get(app_js))
+        .route("/assets/app.css", get(app_css))
         .route("/forge/connect", get(page))
         .route("/download/forge", get(download_forge))
         .route("/download/image", get(page))
@@ -224,13 +230,13 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .with_state(hub)
 }
 
-/// The page is one file with inline script and style and talks only to its own server, so nothing
-/// else may load, and no other site may put it in a frame.
+/// The page loads its own script and style from this server and talks only to it, so nothing else
+/// may load (no inline script or style either), and no other site may put it in a frame.
 async fn security_headers(mut response: Response) -> Response {
     let headers = response.headers_mut();
     headers.insert(
         "content-security-policy",
-        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; \
+        "default-src 'none'; script-src 'self'; style-src 'self'; \
          connect-src 'self'; frame-ancestors 'none'"
             .parse()
             .expect("a valid header"),
@@ -242,6 +248,25 @@ async fn security_headers(mut response: Response) -> Response {
 
 async fn page() -> impl IntoResponse {
     ([(CACHE_CONTROL, "no-store")], Html(PAGE))
+}
+
+async fn theme_js() -> impl IntoResponse {
+    asset("text/javascript; charset=utf-8", THEME_JS)
+}
+
+async fn app_js() -> impl IntoResponse {
+    asset("text/javascript; charset=utf-8", APP_JS)
+}
+
+async fn app_css() -> impl IntoResponse {
+    asset("text/css; charset=utf-8", APP_CSS)
+}
+
+fn asset(content_type: &'static str, body: &'static str) -> impl IntoResponse {
+    (
+        [(CONTENT_TYPE, content_type), (CACHE_CONTROL, "no-store")],
+        body,
+    )
 }
 
 /// The stick keeps what it could not send and tries again later.
