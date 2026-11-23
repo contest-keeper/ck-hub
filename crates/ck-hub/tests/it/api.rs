@@ -441,7 +441,30 @@ async fn the_page_is_served_and_needs_nothing_from_outside() {
         .await
         .expect("body")
         .to_bytes();
-    let page = String::from_utf8_lossy(&bytes);
+    let html = String::from_utf8_lossy(&bytes).into_owned();
+    let mut page = html.clone();
+    for (path, kind) in [
+        ("/assets/theme.js", "text/javascript"),
+        ("/assets/app.js", "text/javascript"),
+        ("/assets/app.css", "text/css"),
+    ] {
+        assert!(html.contains(path), "the page loads {path}");
+        let asset = setup
+            .app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).expect("request"))
+            .await
+            .expect("response");
+        assert_eq!(asset.status(), StatusCode::OK, "{path}");
+        let served = asset.headers()["content-type"].to_str().expect("text");
+        assert!(served.starts_with(kind), "{path}: {served}");
+        let body = asset.into_body().collect().await.expect("body").to_bytes();
+        page.push_str(&String::from_utf8_lossy(&body));
+    }
+    assert!(
+        !html.contains("<script>") && !html.contains("<style>") && !html.contains("style=\""),
+        "no inline script or style: the policy refuses them"
+    );
     assert!(
         page.contains("/api/v1/orgs/") && page.contains("/sticks"),
         "the page reads the stick list of an organization"
@@ -461,7 +484,7 @@ async fn the_page_is_served_and_needs_nothing_from_outside() {
             && page.contains("\"invite\""),
         "the page accepts invitations, lists people and lets staff make organizations"
     );
-    // Everything is in the one file: no scripts, styles or images from another address.
+    // Script and style come from this server: nothing from another address.
     assert!(
         !page.contains("http://") && !page.contains("https://"),
         "an outside address"
@@ -953,27 +976,26 @@ async fn two_different_users_in_one_boot_are_a_warning_but_a_new_boot_starts_cle
 #[tokio::test]
 async fn the_page_script_is_valid_javascript() {
     let setup = setup();
-    let request = Request::get("/").body(Body::empty()).expect("request");
-    let (_, page) = call(&setup.app, request).await;
-    let start = page.find("<script>").expect("a script") + "<script>".len();
-    let end = page.find("</script>").expect("the end of the script");
-
-    let file = setup.dir.path().join("page.js");
-    fs::write(&file, &page[start..end]).expect("write the script");
-    let Ok(output) = std::process::Command::new("node")
-        .arg("--check")
-        .arg(&file)
-        .output()
-    else {
-        eprintln!("skipped: Node is not installed, so the page script was not parsed");
-        return;
-    };
-    assert!(
-        output.status.success(),
-        "the page script does not parse:
+    for path in ["/assets/theme.js", "/assets/app.js"] {
+        let request = Request::get(path).body(Body::empty()).expect("request");
+        let (_, script) = call(&setup.app, request).await;
+        let file = setup.dir.path().join("page.js");
+        fs::write(&file, &script).expect("write the script");
+        let Ok(output) = std::process::Command::new("node")
+            .arg("--check")
+            .arg(&file)
+            .output()
+        else {
+            eprintln!("skipped: Node is not installed, so the page script was not parsed");
+            return;
+        };
+        assert!(
+            output.status.success(),
+            "{path} does not parse:
 {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[tokio::test]
@@ -1029,6 +1051,10 @@ async fn every_answer_forbids_framing_and_outside_resources() {
         .to_str()
         .expect("text");
     assert!(policy.contains("frame-ancestors 'none'") && policy.contains("default-src 'none'"));
+    assert!(
+        !policy.contains("unsafe-inline"),
+        "no inline script or style: {policy}"
+    );
 }
 
 #[tokio::test]
@@ -1260,7 +1286,9 @@ async fn the_page_has_the_command_buttons_with_a_confirm_step() {
     let setup = setup();
     let (status, page) = call(
         &setup.app,
-        Request::get("/").body(Body::empty()).expect("request"),
+        Request::get("/assets/app.js")
+            .body(Body::empty())
+            .expect("request"),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
