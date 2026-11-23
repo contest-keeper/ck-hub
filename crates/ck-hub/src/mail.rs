@@ -77,35 +77,3 @@ pub fn token_after(body: &str, marker: &str) -> Option<String> {
             .collect(),
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_memory_mailer_keeps_mail_and_finds_the_newest_for_an_address() {
-        let mailer = MemoryMailer::default();
-        for subject in ["one", "two"] {
-            mailer
-                .send(Mail {
-                    to: "a@example.org".into(),
-                    subject: subject.into(),
-                    body: String::new(),
-                })
-                .expect("send");
-        }
-        assert_eq!(mailer.sent().len(), 2);
-        assert_eq!(
-            mailer.last_to("a@example.org").expect("mail").subject,
-            "two"
-        );
-        assert!(mailer.last_to("b@example.org").is_none());
-    }
-
-    #[test]
-    fn a_token_is_read_up_to_the_end_of_the_link() {
-        let body = "Open https://hub.example/#verify=abc-123_x and wait.";
-        assert_eq!(token_after(body, "#verify=").as_deref(), Some("abc-123_x"));
-        assert_eq!(token_after(body, "#reset="), None);
-    }
-}

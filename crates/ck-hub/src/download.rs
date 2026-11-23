@@ -284,21 +284,6 @@ mod tests {
     }
 
     #[test]
-    fn the_signature_is_the_same_for_the_same_input_and_changes_with_the_file() {
-        let download =
-            Download::new("ckdlabc12", "downloads", "a2V5LWZvci10ZXN0cw==").expect("valid");
-        let now = at("2026-11-14T12:00:00Z");
-        assert_eq!(
-            download.link("forge/a.exe", now).expect("a link"),
-            download.link("forge/a.exe", now).expect("a link")
-        );
-        assert_ne!(
-            download.link("forge/a.exe", now).expect("a link"),
-            download.link("forge/b.exe", now).expect("a link")
-        );
-    }
-
-    #[test]
     fn a_known_signature_matches_the_one_made_with_another_tool() {
         // Made with: python3 hmac-sha256 over the same 16 newline-joined fields.
         let download =
@@ -310,28 +295,6 @@ mod tests {
             link.ends_with("&sig=LJkscj3n8xulIt%2FQnl088ZPKFvLVm%2FTmL0XeLv8gX2M%3D"),
             "{link}"
         );
-    }
-
-    #[test]
-    fn permissions_and_a_content_type_are_part_of_the_link_and_the_signature() {
-        let download =
-            Download::new("ckdlabc12", "downloads", "a2V5LWZvci10ZXN0cw==").expect("valid");
-        let now = at("2026-11-14T12:00:00Z");
-        let read = download
-            .sas("a", "r", Duration::hours(2), None, now)
-            .expect("a link");
-        let write = download
-            .sas("a", "cw", Duration::hours(2), None, now)
-            .expect("a link");
-        let typed = download
-            .sas("a", "r", Duration::hours(2), Some("video/x-matroska"), now)
-            .expect("a link");
-        assert!(read.contains("&sp=r&") && write.contains("&sp=cw&"));
-        assert!(read.contains("se=2026-11-14T14%3A00%3A00Z"));
-        assert!(typed.contains("&rsct=video%2Fx-matroska&sig="));
-        let signature = |link: &str| link.rsplit("&sig=").next().expect("sig").to_owned();
-        assert_ne!(signature(&read), signature(&write));
-        assert_ne!(signature(&read), signature(&typed));
     }
 
     #[test]

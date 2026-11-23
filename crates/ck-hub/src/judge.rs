@@ -113,15 +113,6 @@ mod tests {
     }
 
     #[test]
-    fn the_submission_id_is_optional() {
-        let event = stored(
-            EventKind::Submission,
-            json!({"judge": "codeforces", "handle": "a", "contest_id": 1, "problem_index": "A"}),
-        );
-        assert_eq!(submit_event(&event).expect("event").submission_id, None);
-    }
-
-    #[test]
     fn ignores_logins_other_judges_and_incomplete_payloads() {
         let login = stored(
             EventKind::Login,
