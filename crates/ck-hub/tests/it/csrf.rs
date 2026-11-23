@@ -237,7 +237,7 @@ async fn no_listed_method_is_refused_as_not_allowed() {
 
 #[test]
 fn the_list_covers_every_route_in_routes_rs() {
-    let source = include_str!("../src/routes.rs");
+    let source = include_str!("../../src/routes.rs");
     let mut paths = Vec::new();
     for (index, _) in source.match_indices("\"/api/v1/") {
         let rest = &source[index + 1..];
