@@ -20,7 +20,7 @@ At start the Hub reads a blob that does not exist in each container with a fresh
 
 ## Checking it on develop (needs someone signed in to Azure and an organizer login)
 
-1. Deploy a Hub without `CK_DOWNLOAD_KEY` (ck-infra removes the variable and its secret).
+1. Deploy a Hub without `CK_DOWNLOAD_KEY` (ck-infra#47 removed the variable and its secret; the next ck-hub develop deploy applies it).
 2. The log says `storage links are signed with the managed identity` and no `delegation key` error.
 3. Open `/download/forge` and an image link: both redirect to a `...blob.core.windows.net/...?sv=...&skoid=...` link that downloads.
 4. Upload a recording from a stick (Put Block, Put Block List), play it from the dashboard, delete it (retention).
