@@ -1,5 +1,5 @@
-//! Sending mail. The Hub only needs to hand a message over; a real provider plugs in behind
-//! [`Mailer`] later.
+//! Sending mail. The Hub hands a message to a [`Mailer`]: Azure Communication Services in a
+//! deployment, the in-memory one in tests.
 
 use std::sync::Mutex;
 
