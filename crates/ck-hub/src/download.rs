@@ -102,6 +102,44 @@ impl Download {
         )
     }
 
+    /// Asks the storage service whether it accepts this container's links: reads a blob that does
+    /// not exist. The service checks the signature before it looks for the blob, so "not found"
+    /// means the signature and the role are good, and a refusal means they are not. Nothing is
+    /// written. The answer never holds the link, which carries the signature.
+    ///
+    /// # Errors
+    /// The reason, from the service's error code, when the link is refused or the service cannot
+    /// be reached.
+    pub fn self_test(&self, now: OffsetDateTime) -> Result<String, String> {
+        let nonce = ck_crypto::sha256_hex(now.unix_timestamp_nanos().to_string().as_bytes());
+        let link = self
+            .link(&format!("selftest-{}", &nonce[..16]), now)
+            .map_err(|error| error.to_string())?;
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(15)))
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let response = agent
+            .get(&link)
+            .call()
+            .map_err(|_| "the storage service could not be reached".to_owned())?;
+        let status = response.status().as_u16();
+        let code = response
+            .headers()
+            .get("x-ms-error-code")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("none")
+            .to_owned();
+        match status {
+            200 | 404 => Ok(format!("{} accepts the links ({status})", self.container)),
+            _ => Err(format!(
+                "{} refuses the links: {status}, {code}",
+                self.container
+            )),
+        }
+    }
+
     /// A link to `blob` with exactly the permissions named (`r` read, `c` create, `w` write, `d`
     /// delete) for `lifetime` from `now`. With `content_type` the storage answers with that type
     /// whatever the file was stored as, so an uploaded file can never choose how a browser treats it.
