@@ -168,7 +168,7 @@ async fn the_code_gives_a_session_the_registry_route_accepts_as_a_bearer_token()
 
     let stick = json!({ "stick_id": "stick-1", "token": "a-secret-token-of-a-stick", "team": "Alpha",
                         "site": "Lab 1", "contest": "Spring", "machine_number": 1 });
-    let request = Request::post("/api/v1/sticks")
+    let request = Request::post("/api/v1/orgs/default/sticks")
         .header("authorization", format!("Bearer {bearer}"))
         .header("content-type", "application/json")
         .body(Body::from(stick.to_string()))
@@ -206,7 +206,7 @@ async fn a_viewer_connects_but_the_registry_route_still_needs_an_admin() {
     let (_, answer) = connect(&s.app, Some(&cookie), 49321, STATE).await;
     let code = code_of(answer["redirect"].as_str().expect("redirect"));
     let (_, token) = trade(&s.app, &code).await;
-    let request = Request::post("/api/v1/sticks")
+    let request = Request::post("/api/v1/orgs/default/sticks")
         .header(
             "authorization",
             format!("Bearer {}", token["token"].as_str().expect("token")),

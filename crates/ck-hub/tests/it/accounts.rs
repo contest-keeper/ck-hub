@@ -71,7 +71,7 @@ async fn post_login(
     let request = Request::post("/api/v1/login")
         .header("content-type", "application/json")
         .body(Body::from(
-            serde_json::json!({ "username": name, "password": password }).to_string(),
+            serde_json::json!({ "email": name, "password": password }).to_string(),
         ))
         .expect("request");
     let response = app.clone().oneshot(request).await.expect("response");
@@ -118,7 +118,7 @@ async fn the_page_is_public_but_the_data_and_the_session_need_a_login() {
     let setup = setup();
     assert_eq!(get(&setup.app, "/", None).await.0, StatusCode::OK);
     assert_eq!(
-        get(&setup.app, "/api/v1/sticks", None).await.0,
+        get(&setup.app, "/api/v1/orgs/default/sticks", None).await.0,
         StatusCode::UNAUTHORIZED
     );
     assert_eq!(
@@ -126,7 +126,12 @@ async fn the_page_is_public_but_the_data_and_the_session_need_a_login() {
         StatusCode::UNAUTHORIZED
     );
     // A cookie that is not a session gets the same answer.
-    let (status, _) = get(&setup.app, "/api/v1/sticks", Some("ck_session=made-up")).await;
+    let (status, _) = get(
+        &setup.app,
+        "/api/v1/orgs/default/sticks",
+        Some("ck_session=made-up"),
+    )
+    .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
@@ -143,7 +148,9 @@ async fn logging_in_gives_a_locked_down_cookie_that_opens_the_data_until_logout(
     let pair = cookie_pair(&set);
 
     assert_eq!(
-        get(&setup.app, "/api/v1/sticks", Some(&pair)).await.0,
+        get(&setup.app, "/api/v1/orgs/default/sticks", Some(&pair))
+            .await
+            .0,
         StatusCode::OK
     );
     let (_, me) = get(&setup.app, "/api/v1/me", Some(&pair)).await;
@@ -161,7 +168,9 @@ async fn logging_in_gives_a_locked_down_cookie_that_opens_the_data_until_logout(
             .contains("Max-Age=0")
     );
     assert_eq!(
-        get(&setup.app, "/api/v1/sticks", Some(&pair)).await.0,
+        get(&setup.app, "/api/v1/orgs/default/sticks", Some(&pair))
+            .await
+            .0,
         StatusCode::UNAUTHORIZED,
         "the session is gone, not only the cookie"
     );
@@ -392,16 +401,18 @@ fn neither_the_password_nor_the_session_token_is_what_the_store_holds() {
 }
 
 #[tokio::test]
-async fn an_account_in_several_organizations_must_name_one() {
+async fn an_account_in_several_organizations_reaches_each_by_its_address() {
     let setup = setup();
     let (status, cookie, body) = post_login(&setup.app, "ana@example.org", PASSWORD).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let pair = cookie_pair(&cookie.expect("a cookie"));
 
-    // Ana owns two organizations, so the address without one is ambiguous.
+    // Ana owns two organizations, and each answers only at its own address.
     assert_eq!(
-        get(&setup.app, "/api/v1/sticks", Some(&pair)).await.0,
-        StatusCode::CONFLICT
+        get(&setup.app, "/api/v1/orgs/default/sticks", Some(&pair))
+            .await
+            .0,
+        StatusCode::OK
     );
     assert_eq!(
         get(&setup.app, "/api/v1/orgs/other/sticks", Some(&pair))

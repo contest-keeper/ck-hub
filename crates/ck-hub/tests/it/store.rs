@@ -2167,7 +2167,7 @@ async fn a_hub_on_postgres_answers_real_http_requests() {
     let login = Request::post("/api/v1/login")
         .header("content-type", "application/json")
         .body(Body::from(
-            serde_json::json!({ "username": organizer, "password": "correct horse battery" })
+            serde_json::json!({ "email": organizer, "password": "correct horse battery" })
                 .to_string(),
         ))
         .expect("request");
@@ -2180,7 +2180,7 @@ async fn a_hub_on_postgres_answers_real_http_requests() {
     let cookie = cookie_pair(login.headers()["set-cookie"].to_str().expect("text"));
     let response = app
         .oneshot(
-            Request::get("/api/v1/sticks")
+            Request::get("/api/v1/orgs/default/sticks")
                 .header("cookie", cookie)
                 .body(Body::empty())
                 .expect("request"),

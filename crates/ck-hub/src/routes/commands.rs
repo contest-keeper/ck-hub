@@ -2,20 +2,8 @@
 
 use super::{
     Access, Arc, Bytes, CommandError, Deserialize, HeaderMap, Hub, IntoResponse, Json, Path,
-    Response, Role, State, StatusCode, denied, json, require, require_in, unavailable,
+    Response, Role, State, StatusCode, denied, json, require_in, unavailable,
 };
-
-/// The commands sent to one stick of the only organization the caller belongs to.
-pub(super) async fn commands(
-    State(hub): State<Arc<Hub>>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    match require(&hub, &headers, Role::Viewer).await {
-        Ok(access) => show_commands(hub, access, id).await,
-        Err(reason) => denied(reason),
-    }
-}
 
 pub(super) async fn commands_of(
     State(hub): State<Arc<Hub>>,
@@ -65,19 +53,6 @@ pub(super) async fn one_command(
             unavailable()
         }
         Err(_) => unavailable(),
-    }
-}
-
-/// Only an admin or an owner may send a command to a stick.
-pub(super) async fn send_command(
-    State(hub): State<Arc<Hub>>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    match require(&hub, &headers, Role::Admin).await {
-        Ok(access) => queue_command(hub, access, id, body).await,
-        Err(reason) => denied(reason),
     }
 }
 

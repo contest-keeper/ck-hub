@@ -45,7 +45,7 @@ cargo run -p ck-hub -- --registry ck-registry.json --log hub.log
 
 | Route | What it does |
 |---|---|
-| `POST /api/v1/login` | A person logs in with `{"email", "password"}` (`username` is still accepted for `email`). The answer sets the `ck_session` cookie (`HttpOnly; Secure; SameSite=Strict`, 12 hours). `401` for a wrong email or password, with the same answer for both, and `429` after 5 wrong passwords for one email (locked for 5 minutes) or 60 in a minute for all emails. |
+| `POST /api/v1/login` | A person logs in with `{"email", "password"}`. The answer sets the `ck_session` cookie (`HttpOnly; Secure; SameSite=Strict`, 12 hours). `401` for a wrong email or password, with the same answer for both, and `429` after 5 wrong passwords for one email (locked for 5 minutes) or 60 in a minute for all emails. |
 | `POST /api/v1/register` | Makes an account from `{"email", "password"}` and mails a link to confirm the address. `202` with the same answer whether or not the address already has an account (an existing one is told by mail instead), `400` for a bad email or a password under 12 characters, `503` when the Hub cannot send mail. Logging in before the link is used answers `403`. |
 | `POST /api/v1/verify-email` | Confirms an address with `{"token"}` from the link. `204`, or `400` for a link that was used, ended (24 hours) or never existed. |
 | `POST /api/v1/password-reset` | Mails a reset link to `{"email"}` when it has an account. Always `202`, so it does not tell who has one. |
@@ -64,7 +64,6 @@ cargo run -p ck-hub -- --registry ck-registry.json --log hub.log
 | `GET /api/v1/orgs/{slug}/members` | Admin or owner. `[{user_id, email, role}]`. |
 | `DELETE /api/v1/orgs/{slug}/members/{user_id}` | Anyone may remove themselves; otherwise only a higher role removes a lower one. `409` for the last owner, who stays. `204`, `403`, `404`. |
 | `POST` and `GET /api/v1/staff/organizations` | Platform staff only (`404` for everyone else, `401` without a session). `POST {"slug", "name", "owner_email"}` makes an organization and mails its first owner an invitation (`202`, `400`, `409` for a taken slug); `GET` lists slugs and names. Staff see nothing inside an organization and are not members of the ones they make. |
-| `GET` and `POST /api/v1/sticks` | The same two routes for an account that is in exactly one organization. With several it answers `409`: use the address with the slug. |
 | `GET /api/v1/profiles`, `GET`, `PUT` and `DELETE /api/v1/profiles/{id}`, `GET /api/v1/profiles/{id}/wallpaper` | Keeper Forge contest profiles of the caller's organization (a session of an admin in exactly one organization, like the route above; `401`, `403` for a viewer, `409` for several organizations). A profile of another organization is `404`. `PUT {"name", "settings": <json>, "wallpaper": {"name", "data_base64"} | null}` creates or replaces the profile with the id the client made (1 to 64 of `A-Za-z0-9_-`): `204`, `400` for a bad id, name (1 to 200 characters), wallpaper name (a plain `.png`, `.jpg` or `.jpeg` name, no `/` or `\`, not `.` or `..`) or a picture that is not what its name says, `413` for settings over 256 KiB or a picture over 5 MB. `GET` answers `{"id", "name", "settings", "wallpaper": {"name"} | null, "updated_at"}`; the list answers `[{"id", "name", "updated_at"}]`; the wallpaper route answers the bytes with `image/png` or `image/jpeg`. The wallpaper bytes are kept in the profile's row (`bytea`), so a profile is one row. |
 
 
@@ -145,7 +144,7 @@ A Hub started without a database has no accounts, so nobody can look at it.
 
 A stick is known to the Hub when its id and secret are in the database or in the `--registry` file
 (or both). The normal way is that the admin tool sends its registry over HTTPS with an admin
-account (`ck-forge registry push`, or the Hub page of the window; both use `POST /api/v1/sticks`, which works for an account in one organization).
+account (`ck-forge registry push`, or the Hub page of the window; both use `POST /api/v1/orgs/{slug}/sticks`).
 The fallback, for an admin with no connection, is to bring the registry file to the Hub:
 
 ```sh

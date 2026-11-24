@@ -15,8 +15,6 @@ pub(super) const SESSION_COOKIE: &str = "ck_session";
 
 #[derive(Deserialize)]
 pub(super) struct LoginBody {
-    // The page and the admin tool still send `username`.
-    #[serde(alias = "username")]
     email: String,
     password: String,
 }
