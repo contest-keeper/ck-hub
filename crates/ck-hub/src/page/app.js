@@ -583,7 +583,7 @@ function render() {
     const row = el("tr", needsLook(stick) ? "flag" : "");
     cell(row, stick.machine_number ?? "", "num mono");
     const team = cell(row, "");
-    team.appendChild(el("b", "", stick.team));
+    team.appendChild(el("b", "", stick.team || "Stick " + stick.stick_id));
     team.appendChild(el("span", "sub", stick.site));
     if (stick.hardware && stick.hardware.rewritten) {
       team.appendChild(el("span", "sub", "Rewritten, written " + stick.hardware.write_count + " times"));
