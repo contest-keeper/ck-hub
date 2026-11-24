@@ -47,11 +47,11 @@ use accounts::{
     SESSION_COOKIE, TokenBody, accepted_mail, bad_link, bad_request, forge_connect, forge_token,
     login, logout, me, no_mail, password_reset, password_reset_confirm, sign_up, verify_email,
 };
-use commands::{commands, commands_of, one_command, send_command, send_command_in};
+use commands::{commands_of, one_command, send_command_in};
 use downloads::{download_forge, download_image, download_source_offer, list_images};
 use enrolment::{
-    MAX_SIGN_REQUEST_BYTES, claim_enrolment, config_hash, config_hash_in, config_signing_key,
-    enrol, hardware_write, hardware_write_in, mint_code, mint_code_in, sign_config, sign_config_in,
+    MAX_SIGN_REQUEST_BYTES, claim_enrolment, config_hash_in, config_signing_key, enrol,
+    hardware_write_in, mint_code_in, sign_config_in,
 };
 use organizations::{
     accept_invitation, invitations_of, invite, members_of, remove_member, revoke_invitation,
@@ -62,14 +62,12 @@ use profiles::{
     save_profile,
 };
 use recordings::{
-    complete_upload, put_chunk, recordings, recordings_of, start_upload, upload_status,
-    view_recording,
+    complete_upload, put_chunk, recordings_of, start_upload, upload_status, view_recording,
 };
 use reports::{event, heartbeat};
 use sticks::{
-    MAX_REGISTRY_BYTES, archive_stick, delete_stick, network, network_of, register, register_in,
-    restore_stick, retire_credential, retire_credential_in, sticks, sticks_of, submissions,
-    submissions_of,
+    MAX_REGISTRY_BYTES, archive_stick, delete_stick, network_of, register_in, restore_stick,
+    retire_credential_in, sticks_of, submissions_of,
 };
 
 /// The page organizers watch. It is one file with no outside resources, so it works on a network
@@ -105,18 +103,11 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route(HEARTBEAT_PATH, post(heartbeat))
         .route(EVENTS_PATH, post(event))
         .route(
-            "/api/v1/sticks",
-            get(sticks)
-                .post(register)
-                .layer(DefaultBodyLimit::max(MAX_REGISTRY_BYTES)),
-        )
-        .route(
             "/api/v1/orgs/{slug}/sticks",
             get(sticks_of)
                 .post(register_in)
                 .layer(DefaultBodyLimit::max(MAX_REGISTRY_BYTES)),
         )
-        .route("/api/v1/sticks/{id}/credential", delete(retire_credential))
         .route(
             "/api/v1/orgs/{slug}/sticks/{id}/credential",
             delete(retire_credential_in),
@@ -138,12 +129,6 @@ pub fn router(hub: Arc<Hub>) -> Router {
             "/api/v1/orgs/{slug}/invitations/{id}",
             delete(revoke_invitation),
         )
-        .route("/api/v1/sticks/{id}/network", get(network))
-        .route("/api/v1/sticks/{id}/submissions", get(submissions))
-        .route(
-            "/api/v1/sticks/{id}/commands",
-            get(commands).post(send_command),
-        )
         .route(
             "/api/v1/orgs/{slug}/sticks/{id}/commands",
             get(commands_of).post(send_command_in),
@@ -159,7 +144,6 @@ pub fn router(hub: Arc<Hub>) -> Router {
             axum::routing::put(put_chunk).layer(DefaultBodyLimit::max(CHUNK_BYTES + 1)),
         )
         .route("/api/v1/recordings/{id}/complete", post(complete_upload))
-        .route("/api/v1/sticks/{id}/recordings", get(recordings))
         .route(
             "/api/v1/orgs/{slug}/sticks/{id}/recordings",
             get(recordings_of),
@@ -170,21 +154,14 @@ pub fn router(hub: Arc<Hub>) -> Router {
         )
         .route("/api/v1/config-signing-key", get(config_signing_key))
         .route(
-            "/api/v1/config-signatures",
-            post(sign_config).layer(DefaultBodyLimit::max(MAX_SIGN_REQUEST_BYTES)),
-        )
-        .route(
             "/api/v1/orgs/{slug}/config-signatures",
             post(sign_config_in).layer(DefaultBodyLimit::max(MAX_SIGN_REQUEST_BYTES)),
         )
-        .route("/api/v1/config-hashes", post(config_hash))
         .route("/api/v1/orgs/{slug}/config-hashes", post(config_hash_in))
-        .route("/api/v1/hardware-writes", post(hardware_write))
         .route(
             "/api/v1/orgs/{slug}/hardware-writes",
             post(hardware_write_in),
         )
-        .route("/api/v1/enrolment-codes", post(mint_code))
         .route("/api/v1/orgs/{slug}/enrolment-codes", post(mint_code_in))
         .route("/api/v1/enrol", post(enrol))
         .route("/api/v1/enrol/claim", post(claim_enrolment))
@@ -368,7 +345,7 @@ fn denied_for(reason: &AccessError) -> Denied {
     }
 }
 
-/// The caller's access to the only organization they belong to: 401 when there is no valid
+/// For the profile routes, which have no organization in the address: the caller's access to the only organization they belong to: 401 when there is no valid
 /// session, 404 when there is none, 409 when there are several, 403 when the role is not enough,
 /// 503 when the data cannot be read.
 async fn require(hub: &Arc<Hub>, headers: &HeaderMap, needed: Role) -> Result<Access, Denied> {

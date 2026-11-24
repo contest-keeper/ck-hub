@@ -2,21 +2,11 @@
 
 use super::{
     Access, Arc, Bytes, Deserialize, HeaderMap, Hub, IntoResponse, Json, NewStick, Path,
-    RegisterError, Response, Role, State, StatusCode, denied, json, require, require_in,
-    unavailable,
+    RegisterError, Response, Role, State, StatusCode, denied, json, require_in, unavailable,
 };
 
 /// A whole registry of a few hundred sticks. Only the admin-only registering route allows this much.
 pub(super) const MAX_REGISTRY_BYTES: usize = 2 * 1024 * 1024;
-
-/// The sticks of the only organization the caller belongs to. The page and the admin tool used this
-/// before organizations had addresses.
-pub(super) async fn sticks(State(hub): State<Arc<Hub>>, headers: HeaderMap) -> Response {
-    match require(&hub, &headers, Role::Viewer).await {
-        Ok(access) => list_sticks(hub, access).await,
-        Err(reason) => denied(reason),
-    }
-}
 
 pub(super) async fn sticks_of(
     State(hub): State<Arc<Hub>>,
@@ -37,17 +27,6 @@ pub(super) async fn list_sticks(hub: Arc<Hub>, access: Access) -> Response {
             unavailable()
         }
         Err(_) => unavailable(),
-    }
-}
-
-pub(super) async fn retire_credential(
-    State(hub): State<Arc<Hub>>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    match require(&hub, &headers, Role::Admin).await {
-        Ok(access) => retire_credential_of(hub, access, id).await,
-        Err(reason) => denied(reason),
     }
 }
 
@@ -153,18 +132,6 @@ pub(super) fn stick_change(
     }
 }
 
-/// The network history of one stick of the only organization the caller belongs to.
-pub(super) async fn network(
-    State(hub): State<Arc<Hub>>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    match require(&hub, &headers, Role::Viewer).await {
-        Ok(access) => show_network(hub, access, id).await,
-        Err(reason) => denied(reason),
-    }
-}
-
 pub(super) async fn network_of(
     State(hub): State<Arc<Hub>>,
     Path((slug, id)): Path<(String, String)>,
@@ -185,17 +152,6 @@ pub(super) async fn show_network(hub: Arc<Hub>, access: Access, id: String) -> R
             unavailable()
         }
         Err(_) => unavailable(),
-    }
-}
-
-pub(super) async fn submissions(
-    State(hub): State<Arc<Hub>>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    match require(&hub, &headers, Role::Viewer).await {
-        Ok(access) => show_submissions(hub, access, id).await,
-        Err(reason) => denied(reason),
     }
 }
 
@@ -235,17 +191,6 @@ pub(super) fn read_sticks(body: &[u8]) -> Result<Vec<NewStick>, String> {
         None => serde_json::from_value(value)
             .map(|stick| vec![stick])
             .map_err(invalid),
-    }
-}
-
-pub(super) async fn register(
-    State(hub): State<Arc<Hub>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    match require(&hub, &headers, Role::Admin).await {
-        Ok(access) => register_into(hub, access, body).await,
-        Err(reason) => denied(reason),
     }
 }
 

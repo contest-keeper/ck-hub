@@ -211,7 +211,7 @@ async fn organizer_cookie(app: &Router) -> String {
 
 async fn list(app: &Router) -> serde_json::Value {
     let cookie = organizer_cookie(app).await;
-    let request = Request::get("/api/v1/sticks")
+    let request = Request::get("/api/v1/orgs/default/sticks")
         .header("cookie", cookie)
         .body(Body::empty())
         .expect("request");
@@ -605,7 +605,7 @@ async fn network_events_make_a_history_with_sites_and_refused_requests() {
     assert_eq!(sticks[1]["network_requests"], 0);
 
     let cookie = organizer_cookie(&setup.app).await;
-    let request = Request::get("/api/v1/sticks/stick-a/network")
+    let request = Request::get("/api/v1/orgs/default/sticks/stick-a/network")
         .header("cookie", cookie.clone())
         .body(Body::empty())
         .expect("request");
@@ -643,7 +643,7 @@ async fn network_events_make_a_history_with_sites_and_refused_requests() {
     assert_eq!(history["hosts"][1]["host"], "docs.python.org");
     assert_eq!(history["hosts"][1]["blocked"], 2);
 
-    let request = Request::get("/api/v1/sticks/stick-b/network")
+    let request = Request::get("/api/v1/orgs/default/sticks/stick-b/network")
         .header("cookie", cookie.clone())
         .body(Body::empty())
         .expect("request");
@@ -651,13 +651,13 @@ async fn network_events_make_a_history_with_sites_and_refused_requests() {
     let empty: serde_json::Value = serde_json::from_str(&text).expect("json");
     assert_eq!(empty["requests"], 0);
 
-    let request = Request::get("/api/v1/sticks/not%20an%20id/network")
+    let request = Request::get("/api/v1/orgs/default/sticks/not%20an%20id/network")
         .header("cookie", cookie)
         .body(Body::empty())
         .expect("request");
     assert_eq!(call(&setup.app, request).await.0, StatusCode::NOT_FOUND);
 
-    let request = Request::get("/api/v1/sticks/stick-a/network")
+    let request = Request::get("/api/v1/orgs/default/sticks/stick-a/network")
         .body(Body::empty())
         .expect("request");
     assert_eq!(call(&setup.app, request).await.0, StatusCode::UNAUTHORIZED);
@@ -726,7 +726,7 @@ async fn submissions_are_compared_with_the_judge_and_the_unreported_one_is_a_sus
     send_kind(&setup.app, 2, EventKind::Submission, submit).await;
 
     let cookie = organizer_cookie(&setup.app).await;
-    let request = Request::get("/api/v1/sticks/stick-a/submissions")
+    let request = Request::get("/api/v1/orgs/default/sticks/stick-a/submissions")
         .header("cookie", cookie.clone())
         .body(Body::empty())
         .expect("request");
@@ -739,7 +739,7 @@ async fn submissions_are_compared_with_the_judge_and_the_unreported_one_is_a_sus
     assert_eq!(seen["judge"][0]["suspect"], true);
     assert_eq!(seen["judge"][1]["from_stick"], true);
 
-    let request = Request::get("/api/v1/sticks/stick-b/submissions")
+    let request = Request::get("/api/v1/orgs/default/sticks/stick-b/submissions")
         .header("cookie", cookie)
         .body(Body::empty())
         .expect("request");
@@ -747,7 +747,7 @@ async fn submissions_are_compared_with_the_judge_and_the_unreported_one_is_a_sus
     let none: serde_json::Value = serde_json::from_str(&text).expect("json");
     assert_eq!(none["suspect"], 0);
 
-    let request = Request::get("/api/v1/sticks/stick-a/submissions")
+    let request = Request::get("/api/v1/orgs/default/sticks/stick-a/submissions")
         .body(Body::empty())
         .expect("request");
     assert_eq!(call(&setup.app, request).await.0, StatusCode::UNAUTHORIZED);
@@ -757,7 +757,7 @@ async fn submissions_are_compared_with_the_judge_and_the_unreported_one_is_a_sus
 async fn without_a_judge_the_submissions_say_nothing_is_compared() {
     let setup = setup();
     let cookie = organizer_cookie(&setup.app).await;
-    let request = Request::get("/api/v1/sticks/stick-a/submissions")
+    let request = Request::get("/api/v1/orgs/default/sticks/stick-a/submissions")
         .header("cookie", cookie)
         .body(Body::empty())
         .expect("request");

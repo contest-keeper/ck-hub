@@ -16,14 +16,10 @@ use tower::ServiceExt;
 pub(crate) const STATE_CHANGING: &[(&str, &str)] = &[
     ("POST", "/api/v1/heartbeat"),
     ("POST", "/api/v1/events"),
-    ("POST", "/api/v1/config-hashes"),
-    ("POST", "/api/v1/config-signatures"),
     ("POST", "/api/v1/enrol"),
     ("POST", "/api/v1/enrol/claim"),
-    ("POST", "/api/v1/enrolment-codes"),
     ("POST", "/api/v1/forge/connect"),
     ("POST", "/api/v1/forge/token"),
-    ("POST", "/api/v1/hardware-writes"),
     ("POST", "/api/v1/invitations/accept"),
     ("POST", "/api/v1/login"),
     ("POST", "/api/v1/logout"),
@@ -49,9 +45,6 @@ pub(crate) const STATE_CHANGING: &[(&str, &str)] = &[
     ("POST", "/api/v1/recordings/r/complete"),
     ("POST", "/api/v1/register"),
     ("POST", "/api/v1/staff/organizations"),
-    ("POST", "/api/v1/sticks"),
-    ("POST", "/api/v1/sticks/s/commands"),
-    ("DELETE", "/api/v1/sticks/s/credential"),
     ("POST", "/api/v1/verify-email"),
 ];
 
@@ -69,9 +62,6 @@ pub(crate) const READ_ONLY: &[&str] = &[
     "/api/v1/profiles",
     "/api/v1/profiles/{id}/wallpaper",
     "/api/v1/recordings/{id}",
-    "/api/v1/sticks/{id}/network",
-    "/api/v1/sticks/{id}/recordings",
-    "/api/v1/sticks/{id}/submissions",
 ];
 
 fn app() -> (TempDir, Router) {
@@ -210,7 +200,7 @@ async fn the_origin_may_be_named_by_a_proxy_or_by_an_http2_authority() {
 #[tokio::test]
 async fn a_cookie_request_with_a_form_type_is_refused_even_without_a_length() {
     let (_dir, app) = app();
-    let forged = request("POST", "/api/v1/sticks")
+    let forged = request("POST", "/api/v1/orgs/o/sticks")
         .header("cookie", "ck_session=anything")
         .header("content-type", "text/plain")
         .body(Body::from("a=b"))

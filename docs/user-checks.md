@@ -83,8 +83,3 @@ gh secret set RELEASE_PLEASE_TOKEN --repo contest-keeper/ck-hub
 ```
 
 Repeat for each repository whose release workflow uses it.
-
-## 5. After a Forge release newer than 0.1.0-preview.72
-
-Mark the draft PR "refactor: remove unscoped sole-org routes and the username login alias" ready and merge it. Before
-that, confirm the new Forge build calls only `/api/v1/orgs/{slug}/...` and logs in with `email`.

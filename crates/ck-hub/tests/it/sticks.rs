@@ -69,7 +69,7 @@ async fn cookie_for(app: &Router, name: &str) -> String {
     let request = Request::post("/api/v1/login")
         .header("content-type", "application/json")
         .body(Body::from(
-            json!({ "username": name, "password": PASSWORD }).to_string(),
+            json!({ "email": name, "password": PASSWORD }).to_string(),
         ))
         .expect("request");
     let response = app.clone().oneshot(request).await.expect("response");
@@ -84,7 +84,8 @@ async fn cookie_for(app: &Router, name: &str) -> String {
 }
 
 async fn register(app: &Router, cookie: Option<&str>, body: &Value) -> (StatusCode, Value) {
-    let mut request = Request::post("/api/v1/sticks").header("content-type", "application/json");
+    let mut request =
+        Request::post("/api/v1/orgs/default/sticks").header("content-type", "application/json");
     if let Some(cookie) = cookie {
         request = request.header("cookie", cookie);
     }
@@ -219,7 +220,7 @@ async fn a_scoped_registry_credential_refuses_signed_assertions_for_another_cont
 
 async fn list(app: &Router) -> Vec<Value> {
     let cookie = cookie_for(app, "vera@example.org").await;
-    let request = Request::get("/api/v1/sticks")
+    let request = Request::get("/api/v1/orgs/default/sticks")
         .header("cookie", cookie)
         .body(Body::empty())
         .expect("request");
@@ -385,7 +386,7 @@ async fn a_stick_in_the_registry_file_cannot_be_given_another_secret() {
 async fn the_answers_never_contain_a_secret() {
     let setup = setup();
     let admin = cookie_for(&setup.app, "ana@example.org").await;
-    let request = Request::post("/api/v1/sticks")
+    let request = Request::post("/api/v1/orgs/default/sticks")
         .header("content-type", "application/json")
         .header("cookie", &admin)
         .body(Body::from(stick("stick-1", TOKEN).to_string()))
@@ -480,7 +481,7 @@ async fn retiring_a_file_key_is_idempotent_and_keeps_the_sticks_history() {
     let setup = setup_with_registry(&registry.to_string());
     let admin = cookie_for(&setup.app, "ana@example.org").await;
     let viewer = cookie_for(&setup.app, "vera@example.org").await;
-    let path = "/api/v1/sticks/legacy-stick/credential";
+    let path = "/api/v1/orgs/default/sticks/legacy-stick/credential";
     assert_eq!(
         heartbeat_status(&setup.app, id, TOKEN).await,
         StatusCode::OK
@@ -563,13 +564,6 @@ async fn sticks_and_heartbeats_of_one_organization_are_invisible_to_another() {
         send(&app, "DELETE", wrong_org, &bo, None).await.0,
         StatusCode::NOT_FOUND
     );
-    let carla = cookie_for(&app, "carla@example.org").await;
-    let no_org = "/api/v1/sticks/stick-1/credential";
-    assert_eq!(
-        send(&app, "DELETE", no_org, &carla, None).await.0,
-        StatusCode::CONFLICT
-    );
-
     // The stick reports once, and what it reports shows in its own organization only.
     assert_eq!(
         heartbeat_status(&app, "stick-1", TOKEN).await,
@@ -807,7 +801,7 @@ async fn a_stick_that_reports_other_settings_than_forge_wrote_is_flagged() {
     assert_eq!(settings_warning(&list(&setup.app).await), None);
 
     // Only an admin records it, and only a real hash.
-    let path = "/api/v1/config-hashes";
+    let path = "/api/v1/orgs/default/config-hashes";
     assert_eq!(
         send(&setup.app, "POST", path, &viewer, Some(&note(&wrote)))
             .await

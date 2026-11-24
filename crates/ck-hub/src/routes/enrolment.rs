@@ -2,7 +2,7 @@
 
 use super::{
     Access, Arc, Bytes, CACHE_CONTROL, Deserialize, EnrolError, EnrolmentSpec, HeaderMap, Hub,
-    IntoResponse, Json, Path, Response, Role, SignError, State, StatusCode, denied, json, require,
+    IntoResponse, Json, Path, Response, Role, SignError, State, StatusCode, denied, json,
     require_in, unavailable,
 };
 
@@ -23,18 +23,6 @@ pub(super) struct MintBody {
     credential_scope: Option<crate::CredentialScope>,
     #[serde(default)]
     hardware: Option<crate::Hardware>,
-}
-
-/// Only an admin or an owner may make an enrolment code.
-pub(super) async fn mint_code(
-    State(hub): State<Arc<Hub>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    match require(&hub, &headers, Role::Admin).await {
-        Ok(access) => mint(hub, access, body).await,
-        Err(reason) => denied(reason),
-    }
 }
 
 pub(super) async fn mint_code_in(
@@ -69,17 +57,6 @@ pub(super) struct HardwareWriteBody {
     stick_id: String,
     #[serde(flatten)]
     hardware: crate::Hardware,
-}
-
-pub(super) async fn hardware_write(
-    State(hub): State<Arc<Hub>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    match require(&hub, &headers, Role::Admin).await {
-        Ok(access) => record_write(hub, access, body).await,
-        Err(reason) => denied(reason),
-    }
 }
 
 pub(super) async fn hardware_write_in(
@@ -117,17 +94,6 @@ pub(super) async fn config_signing_key(State(hub): State<Arc<Hub>>) -> Response 
 #[derive(Deserialize)]
 pub(super) struct SignBody {
     config: String,
-}
-
-pub(super) async fn sign_config(
-    State(hub): State<Arc<Hub>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    match require(&hub, &headers, Role::Admin).await {
-        Ok(access) => sign(hub, access, body).await,
-        Err(reason) => denied(reason),
-    }
 }
 
 pub(super) async fn sign_config_in(
@@ -181,17 +147,6 @@ pub(super) async fn sign(hub: Arc<Hub>, access: Access, body: Bytes) -> Response
 pub(super) struct ConfigHashBody {
     stick_id: String,
     sha256: String,
-}
-
-pub(super) async fn config_hash(
-    State(hub): State<Arc<Hub>>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    match require(&hub, &headers, Role::Admin).await {
-        Ok(access) => record_config(hub, access, body).await,
-        Err(reason) => denied(reason),
-    }
 }
 
 pub(super) async fn config_hash_in(

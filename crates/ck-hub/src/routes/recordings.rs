@@ -3,7 +3,7 @@
 use super::{
     Access, Arc, Bytes, CACHE_CONTROL, HeaderMap, Hub, IntoResponse, Json, LOCATION, Path,
     RecordingError, Response, Role, State, StatusCode, UploadStatus, auth_headers, denied, json,
-    require, require_in, unavailable,
+    require_in, unavailable,
 };
 
 /// Chunks of recordings in flight at once, in the whole Hub. Each one is held in memory while it is
@@ -112,17 +112,6 @@ pub(super) fn upload_answer(
             (StatusCode::TOO_MANY_REQUESTS, "too many requests").into_response()
         }
         Ok(Err(RecordingError::Unavailable)) | Err(_) => unavailable(),
-    }
-}
-
-pub(super) async fn recordings(
-    State(hub): State<Arc<Hub>>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    match require(&hub, &headers, Role::Viewer).await {
-        Ok(access) => show_recordings(hub, access, id).await,
-        Err(reason) => denied(reason),
     }
 }
 
