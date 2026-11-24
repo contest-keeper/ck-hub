@@ -59,7 +59,7 @@ database and container CPU time, and the container may need more than 0.25 vCPU,
    cargo run --release --example loadsim -- registry --sticks 500 --out registry.json
    ```
 
-3. Run each level for 30 minutes and keep the printed table:
+3. Read the accrued cost of `rg-ckhub-dev` (Azure portal, Cost Management, "Accumulated cost") before and after each level and after the cleanup in step 5. Stop when the run's cost would pass the approved cap (5 USD for the 50 to 100 stick run); do not scale the container during the run. Then run each level for 30 minutes and keep the printed table:
 
    ```bash
    cargo run --release --example loadsim -- run --hub https://hub.dev.contestkeeper.com --registry registry.json --minutes 30

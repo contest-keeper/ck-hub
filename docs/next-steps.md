@@ -14,7 +14,8 @@ Follow [user-checks.md](user-checks.md):
 The owner approved C7 for 50 to 100 sticks with the current container (0.25 vCPU). Procedure is in [user-checks.md](user-checks.md) section 3 and [capacity.md](capacity.md):
 1. Generate a registry of 50 sticks, then 100: `cargo run --release --example loadsim -- registry --sticks 50 --out registry.json`.
 2. Push it into a throwaway organization on the dev Hub.
-3. Run each level for 30 minutes and watch Container App CPU in the portal.
+3. Before each level, read the accrued cost (Azure portal, Cost Management, scope `rg-ckhub-dev`, "Accumulated cost", or `az consumption usage list` read-only) and write it down; read it again after each level. Run each level for 30 minutes and watch Container App CPU in the portal.
+   Stop rule: do not start a level if the accrued cost of the run so far plus 1 USD would pass 5 USD, and stop a running level at once if it does. Do not scale the container up during the run (the approval is for the current 0.25 vCPU); if a scale-up is wanted, stop and ask first. Read the cost once more after the cleanup in step 5.
 4. Put the numbers into `docs/capacity.md`. If CPU is the limit, stop and ask before raising `cpu` in ck-infra (a small PR, deployed by the pipeline).
 5. Archive and delete the throwaway sticks afterwards.
 
