@@ -52,8 +52,9 @@ header { background: var(--top-bg); color: var(--top-text); border-bottom: 1px s
 [hidden] { display: none !important; }
 .live { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; }
 .live i { width: 8px; height: 8px; border-radius: 50%; background: var(--live); display: block; }
-#who { display: none; align-items: center; gap: 10px; font-size: 13px; }
-#org { min-height: 36px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-size: 13px; }
+#who { display: none; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; min-width: 0; max-width: 100%; font-size: 13px; }
+#who-name { min-width: 0; overflow-wrap: anywhere; }
+#org { min-width: 0; max-width: min(320px, 100%); text-overflow: ellipsis; min-height: 36px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-size: 13px; }
 
 button { font: inherit; cursor: pointer; }
 .btn { display: inline-flex; align-items: center; justify-content: center; min-height: 36px; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--panel); color: var(--text); font-weight: 600; font-size: 13px; }
@@ -77,15 +78,16 @@ h1 { font-size: 26px; font-weight: 700; letter-spacing: -.01em; }
 #problem { display: none; margin-bottom: 14px; padding: 10px 14px; border-radius: var(--radius); background: var(--bad-bg); color: var(--bad); border: 1px solid var(--bad-line); }
 #content { display: none; }
 .downloads-link, #image-downloads a { color: var(--accent); }
+.downloads-link, #image-downloads > a:first-child, .download-actions a { display: inline-block; padding: 6px 0; }
 #image-downloads { max-width: 760px; }
 #image-downloads h1 { margin: 12px 0 8px; }
 #image-download-list, #image-older-list { list-style: none; padding: 0; margin: 16px 0; display: grid; gap: 12px; }
 #image-download-list li, #image-older-list li { display: grid; gap: 8px; overflow-wrap: anywhere; }
 #image-download-list h2, #image-older-list h2 { font-size: 18px; }
-#image-download-list code, #image-older-list code { user-select: all; }
+#image-download-list code, #image-older-list code { font-family: var(--mono); font-size: .9em; overflow-wrap: anywhere; user-select: all; }
 .download-actions { display: flex; flex-wrap: wrap; gap: 12px 20px; }
 
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-top: 16px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-top: 16px; }
 .tile { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 16px 20px; }
 .tile b { display: block; font-size: 32px; line-height: 1.2; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
 .tile span { font-size: 13px; color: var(--muted); font-weight: 500; }
@@ -110,7 +112,7 @@ h1 { font-size: 26px; font-weight: 700; letter-spacing: -.01em; }
 .wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-lg); }
 :root[data-theme="classic"] .wrap { background: #fff; border: 0; box-shadow: var(--sunken); }
 table { border-collapse: collapse; width: 100%; min-width: 860px; }
-th { text-align: left; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); padding: 12px 16px; background: var(--soft); font-weight: 600; }
+th { white-space: nowrap; text-align: left; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); padding: 12px 16px; background: var(--soft); font-weight: 600; }
 :root[data-theme="classic"] th { background: #c0c0c0; box-shadow: var(--raised); color: #000; text-transform: none; letter-spacing: 0; }
 td { padding: 12px 16px; border-top: 1px solid var(--line); vertical-align: middle; }
 :root[data-theme="classic"] td { border-top-color: #dfdfdf; }
@@ -129,6 +131,8 @@ td .sub { display: block; font-size: 12.5px; color: var(--muted); }
 .warn { display: inline-block; padding: 3px 10px; border-radius: 8px; background: var(--warn-bg); color: var(--warn); font-weight: 600; font-size: 13px; margin: 1px 6px 1px 0; }
 :root[data-theme="classic"] .warn { border-radius: 0; font-size: 12px; }
 tr.detail > td { background: var(--soft); padding: 14px 16px 16px; }
+/* The detail row spans the whole table; keep its content in view while the table scrolls sideways. */
+tr.detail > td > * { position: sticky; left: 16px; max-width: min(100%, calc(100vw - 80px)); }
 :root[data-theme="classic"] tr.detail > td { background: #dfdfdf; }
 .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px 20px; margin: 0; }
 .facts dt { font-size: 12px; color: var(--muted); }
@@ -166,10 +170,12 @@ tr.detail > td { background: var(--soft); padding: 14px 16px 16px; }
 :root[data-theme="classic"] #login .btn { min-height: 34px; font-size: 13px; }
 #forge { max-width: 460px; margin: 48px auto; padding: 26px 28px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-lg); display: flex; flex-direction: column; gap: 14px; }
 #forge[hidden] { display: none; }
+:root[data-theme="classic"] #forge { border: 0; box-shadow: inset -1px -1px #0a0a0a, inset 1px 1px #dfdfdf, inset -2px -2px #808080, inset 2px 2px #fff; padding: 20px 18px; }
 #login-error { min-height: 1.4em; color: var(--bad); font-size: 13.5px; }
 #login-error.ok { color: var(--accent); }
 #login-links { text-align: center; font-size: 14px; color: var(--muted); }
 #login-links a { color: var(--accent); }
+#login-links a:not([hidden]) + a:not([hidden])::before { content: " · "; color: var(--muted); }
 
 #notice { display: none; margin-bottom: 14px; padding: 10px 14px; border-radius: var(--radius); background: var(--ok-bg); color: var(--ok); }
 #notice.bad { background: var(--bad-bg); color: var(--bad); border: 1px solid var(--bad-line); }
@@ -183,3 +189,18 @@ tr.detail > td { background: var(--soft); padding: 14px 16px 16px; }
 :root[data-theme="classic"] .row input, :root[data-theme="classic"] .row select { height: 30px; border: 0; box-shadow: var(--sunken); background: #fff; }
 .form-msg { min-height: 1.4em; margin-top: 8px; font-size: 13.5px; color: var(--muted); }
 .form-msg.bad { color: var(--bad); }
+
+@media (max-width: 640px) {
+  .bar { padding: 10px 16px; gap: 10px; }
+  #who { flex: 1 1 100%; justify-content: flex-start; }
+  #org { flex: 1 1 100%; max-width: none; }
+  main { padding: 16px; }
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .tile { padding: 12px 14px; }
+  .tile b { font-size: 26px; }
+  #login { margin: 24px auto; padding: 24px 20px; }
+  #forge { margin: 24px auto; padding: 22px 20px; }
+  .row input, .row select, .row .btn { flex: 1 1 100%; min-width: 0; }
+  table { min-width: 720px; }
+  th, td { padding: 10px; }
+}
