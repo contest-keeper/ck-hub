@@ -1,0 +1,8 @@
+name: House rules
+
+on:
+  pull_request:
+
+jobs:
+  house-rules:
+    uses: contest-keeper/.github/.github/workflows/house-rules.yml@main
