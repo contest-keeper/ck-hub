@@ -79,10 +79,10 @@ h1 { font-size: 26px; font-weight: 700; letter-spacing: -.01em; }
 .downloads-link, #image-downloads a { color: var(--accent); }
 #image-downloads { max-width: 760px; }
 #image-downloads h1 { margin: 12px 0 8px; }
-#image-download-list { list-style: none; padding: 0; margin: 16px 0; display: grid; gap: 12px; }
-#image-download-list li { display: grid; gap: 8px; overflow-wrap: anywhere; }
-#image-download-list h2 { font-size: 18px; }
-#image-download-list code { user-select: all; }
+#image-download-list, #image-older-list { list-style: none; padding: 0; margin: 16px 0; display: grid; gap: 12px; }
+#image-download-list li, #image-older-list li { display: grid; gap: 8px; overflow-wrap: anywhere; }
+#image-download-list h2, #image-older-list h2 { font-size: 18px; }
+#image-download-list code, #image-older-list code { user-select: all; }
 .download-actions { display: flex; flex-wrap: wrap; gap: 12px 20px; }
 
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-top: 16px; }
