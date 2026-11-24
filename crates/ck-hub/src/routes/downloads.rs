@@ -12,7 +12,7 @@ pub(super) const FORGE_INSTALLER: &str = "forge/keeper-forge-setup-x64.exe";
 /// minutes, so the storage address is never published and a copied link soon stops working.
 pub(super) async fn download_forge(State(hub): State<Arc<Hub>>) -> Response {
     let Some(download) = hub.download.as_ref() else {
-        return StatusCode::NOT_FOUND.into_response();
+        return super::not_found_page();
     };
     redirect_to(download.link(FORGE_INSTALLER, (hub.clock)()))
 }

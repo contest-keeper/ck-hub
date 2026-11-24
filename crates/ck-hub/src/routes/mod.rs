@@ -73,6 +73,7 @@ use sticks::{
 /// The page organizers watch. It is one file with no outside resources, so it works on a network
 /// with no internet.
 const PAGE: &str = include_str!("../page/index.html");
+const NOT_FOUND_PAGE: &str = include_str!("../page/not_found.html");
 const THEME_JS: &str = include_str!("../page/theme.js");
 const APP_JS: &str = include_str!("../page/app.js");
 const APP_CSS: &str = include_str!("../page/app.css");
@@ -201,6 +202,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
             "/api/v1/password-reset/confirm",
             post(password_reset_confirm),
         )
+        .fallback(unknown_address)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(axum::middleware::from_fn(crate::csrf::guard))
         .layer(axum::middleware::map_response(security_headers))
@@ -225,6 +227,26 @@ async fn security_headers(mut response: Response) -> Response {
 
 async fn page() -> impl IntoResponse {
     ([(CACHE_CONTROL, "no-store")], Html(PAGE))
+}
+
+/// An address the Hub does not know. A person who opened a page gets a page; the API and every
+/// request that is not a plain page view keep the bare `404`.
+async fn unknown_address(method: axum::http::Method, uri: axum::http::Uri) -> Response {
+    let api = uri.path() == "/api" || uri.path().starts_with("/api/");
+    if api || !(method == axum::http::Method::GET || method == axum::http::Method::HEAD) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    not_found_page()
+}
+
+/// The page for a person who followed a link to something that is not there.
+fn not_found_page() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [(CACHE_CONTROL, "no-store")],
+        Html(NOT_FOUND_PAGE),
+    )
+        .into_response()
 }
 
 async fn theme_js() -> impl IntoResponse {

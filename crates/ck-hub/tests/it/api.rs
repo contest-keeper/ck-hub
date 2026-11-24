@@ -1125,6 +1125,44 @@ async fn the_image_list_and_download_need_a_login() {
 }
 
 #[tokio::test]
+async fn an_unknown_page_answers_with_a_page_and_the_api_keeps_its_bare_404() {
+    let setup = setup();
+    for path in ["/nope", "/download/forge"] {
+        let response = setup
+            .app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).expect("request"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        let content_type = response.headers()["content-type"].to_str().expect("text");
+        assert!(
+            content_type.starts_with("text/html"),
+            "{path}: {content_type}"
+        );
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("Page not found"), "{path}");
+        assert!(text.contains("href=\"/\""), "{path}");
+    }
+    for request in [
+        Request::get("/api/v1/nope")
+            .body(Body::empty())
+            .expect("request"),
+        Request::post("/nope").body(Body::empty()).expect("request"),
+    ] {
+        let (status, body) = call(&setup.app, request).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.is_empty(), "{body}");
+    }
+}
+
+#[tokio::test]
 async fn images_are_not_found_until_they_are_set_up() {
     let setup = setup();
     let cookie = organizer_cookie(&setup.app).await;
