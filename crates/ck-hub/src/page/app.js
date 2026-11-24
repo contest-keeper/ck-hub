@@ -60,7 +60,7 @@ function matchesFilter(stick) {
 
 function matchesQuery(stick) {
   if (!query) return true;
-  const text = [stick.team, stick.site, stick.contest, stick.machine_number, stick.current_user,
+  const text = [stick.team, stick.stick_id, stick.site, stick.contest, stick.machine_number, stick.current_user,
     stick.last ? stick.last.hostname : ""].join(" ").toLowerCase();
   return text.includes(query);
 }
