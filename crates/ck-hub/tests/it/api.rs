@@ -1196,6 +1196,8 @@ async fn an_organizer_sees_the_manifest_without_the_storage_path() {
     assert_eq!(image["sha256"], "a".repeat(64));
     assert_eq!(image["family"], "ubuntu");
     assert_eq!(image["profile"], "generic");
+    assert_eq!(image["latest"], true);
+    assert_eq!(json["images"][1]["latest"], false);
     assert_eq!(
         image["source_offer_url"],
         "/download/image/keeper-os-0.3.0/source-offer"

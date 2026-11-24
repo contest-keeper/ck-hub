@@ -43,7 +43,9 @@ pub(super) async fn list_images(State(hub): State<Arc<Hub>>, headers: HeaderMap)
     .await;
     match result {
         Err(reason) | Ok(Err(reason)) => denied(reason),
-        Ok(Ok(images)) => Json(json!({
+        Ok(Ok(images)) => {
+            let latest = crate::images::latest_ids(&images);
+            Json(json!({
             "images": images
                 .iter()
                 .map(|image| {
@@ -56,6 +58,7 @@ pub(super) async fn list_images(State(hub): State<Arc<Hub>>, headers: HeaderMap)
                         "sha256": image.sha256,
                         "family": image.family,
                         "profile": image.profile,
+                        "latest": latest.contains(&image.id),
                         "source_offer_url": image.source_offer.as_ref()
                             .map(|_| format!("/download/image/{}/source-offer", image.id)),
                     });
@@ -65,8 +68,9 @@ pub(super) async fn list_images(State(hub): State<Arc<Hub>>, headers: HeaderMap)
                     entry
                 })
                 .collect::<Vec<_>>()
-        }))
-        .into_response(),
+            }))
+            .into_response()
+        }
     }
 }
 

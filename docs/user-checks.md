@@ -41,6 +41,10 @@ Log in as an organizer, open the manifest link and the source-offer link of the 
 (`/download/image/{id}` and `/download/image/{id}/source-offer`). Both must answer for a logged-in organizer and the
 image download must start.
 
+The page `/download/image` lists only the newest image of each family and profile (a normal release beats a
+development build, then the higher version wins); older images sit under "Older versions". `/api/v1/images` still returns
+every image, with `"latest": true` on the shown ones.
+
 ## 3. Capacity on Azure (needs C7 cloud-cost approval)
 
 The simulator registers fake sticks in the Hub's database and sends load for 30 minutes per level. It costs
