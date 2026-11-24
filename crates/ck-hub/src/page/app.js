@@ -643,11 +643,14 @@ const imageDownloads = document.getElementById("image-downloads");
 const imageList = document.getElementById("image-download-list");
 const imageStatus = document.getElementById("image-download-status");
 const imageRetry = document.getElementById("image-download-retry");
+const imageOlder = document.getElementById("image-older");
+const imageOlderList = document.getElementById("image-older-list");
+const imageOlderSummary = document.getElementById("image-older-summary");
 
 function imageItem(image) {
   const item = el("li", "tile");
   item.appendChild(el("h2", "", image.name + " · " + image.version));
-  const details = [image.filename, image.profile, bytesText(image.size)].filter(Boolean).join(" · ");
+  const details = [image.family, image.profile, image.filename, bytesText(image.size)].filter(Boolean).join(" · ");
   item.appendChild(el("p", "muted", details));
   const checksum = el("p", "");
   checksum.append("SHA-256 ", el("code", "", image.sha256));
@@ -668,7 +671,12 @@ async function loadImageDownloads() {
     const images = result.data?.images;
     if (!result.ok || !Array.isArray(images)) throw new Error("No image list");
     imageStatus.textContent = images.length ? "" : "No Keeper OS images are available yet.";
-    imageList.replaceChildren(...images.map(imageItem));
+    const newest = images.filter((image) => image.latest);
+    const older = images.filter((image) => !image.latest);
+    imageList.replaceChildren(...newest.map(imageItem));
+    imageOlderList.replaceChildren(...older.map(imageItem));
+    imageOlderSummary.textContent = "Older versions (" + older.length + ")";
+    imageOlder.hidden = older.length === 0;
   } catch (error) {
     imageStatus.textContent = "Keeper OS images are unavailable right now.";
     imageRetry.hidden = false;

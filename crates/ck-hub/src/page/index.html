@@ -52,7 +52,12 @@
     <p>In <a href="/download/forge">Keeper Forge</a>, choose <b>Import download…</b> under <b>Base image</b>. Select the downloaded .img.zst file and paste its SHA-256.</p>
     <p id="image-download-status" class="hint" role="status"></p>
     <button id="image-download-retry" class="btn" type="button" hidden>Try again</button>
+    <p class="hint">The newest image of each system is listed first. A normal release is preferred over a development build.</p>
     <ul id="image-download-list"></ul>
+    <details id="image-older" hidden>
+      <summary id="image-older-summary">Older versions</summary>
+      <ul id="image-older-list"></ul>
+    </details>
   </section>
   <div id="content">
     <a class="downloads-link" href="/download/image">Keeper OS downloads</a>
