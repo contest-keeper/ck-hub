@@ -257,6 +257,107 @@ fn is_safe_blob(blob: &str) -> bool {
         })
 }
 
+/// The ids of the newest image of each family and profile: what the downloads page shows first.
+///
+/// The manifest stores no publish time, so "newest" is derived from the version. A normal release
+/// (`1.2.3`) always beats a pre-release (`1.2.3-dev.7`), even a pre-release of a higher number; a
+/// group with no release falls back to its newest pre-release. Within the same kind, the higher
+/// version wins (numbers compared as numbers, pre-release parts as in semver). A version that is
+/// not `1.2.3` or `1.2.3-suffix` ranks last, and a tie goes to the entry later in the manifest,
+/// because the publish tool appends.
+#[must_use]
+pub fn latest_ids(images: &[Image]) -> std::collections::HashSet<String> {
+    let mut best: std::collections::HashMap<(&str, &str), (VersionRank, &str)> =
+        std::collections::HashMap::new();
+    for image in images {
+        let rank = VersionRank::of(&image.version);
+        let key = (image.family.as_str(), image.profile.as_str());
+        match best.get(&key) {
+            Some((current, _)) if rank < *current => {}
+            _ => {
+                best.insert(key, (rank, image.id.as_str()));
+            }
+        }
+    }
+    best.into_values().map(|(_, id)| id.to_owned()).collect()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct VersionRank {
+    valid: bool,
+    release: bool,
+    core: Vec<u64>,
+    pre: Vec<PreIdentifier>,
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum PreIdentifier {
+    Number(String),
+    Text(String),
+}
+
+impl VersionRank {
+    fn of(version: &str) -> Self {
+        let (core, pre) = version
+            .split_once('-')
+            .map_or((version, ""), |(core, pre)| (core, pre));
+        let numbers: Option<Vec<u64>> = core.split('.').map(|part| part.parse().ok()).collect();
+        let Some(core) = numbers else {
+            return Self {
+                valid: false,
+                release: false,
+                core: Vec::new(),
+                pre: Vec::new(),
+            };
+        };
+        Self {
+            valid: true,
+            release: !version.contains('-'),
+            core,
+            pre: pre
+                .split('.')
+                .filter(|part| !part.is_empty())
+                .map(|part| {
+                    if part.bytes().all(|b| b.is_ascii_digit()) {
+                        // Digit strings order like numbers by length, then text, once zeros are gone.
+                        PreIdentifier::Number(part.trim_start_matches('0').to_owned())
+                    } else {
+                        PreIdentifier::Text(part.to_owned())
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
+impl Ord for VersionRank {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let numbers = |a: &str, b: &str| a.len().cmp(&b.len()).then_with(|| a.cmp(b));
+        let pre = || {
+            self.pre
+                .iter()
+                .zip(&other.pre)
+                .map(|pair| match pair {
+                    (PreIdentifier::Number(a), PreIdentifier::Number(b)) => numbers(a, b),
+                    (a, b) => a.cmp(b),
+                })
+                .find(|order| order.is_ne())
+                .unwrap_or_else(|| self.pre.len().cmp(&other.pre.len()))
+        };
+        self.valid
+            .cmp(&other.valid)
+            .then_with(|| self.release.cmp(&other.release))
+            .then_with(|| self.core.cmp(&other.core))
+            .then_with(pre)
+    }
+}
+
+impl PartialOrd for VersionRank {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,5 +457,78 @@ mod tests {
     fn a_manifest_that_is_not_json_or_too_big_is_refused() {
         assert!(parse(b"nope").is_err());
         assert!(parse(&vec![b' '; 1024 * 1024 + 1]).is_err());
+    }
+
+    fn versioned(id: &str, version: &str, family: &str) -> Image {
+        let mut entry = image(id);
+        entry.version = version.to_owned();
+        entry.family = family.to_owned();
+        entry
+    }
+
+    fn latest(images: &[Image]) -> Vec<String> {
+        let mut ids: Vec<_> = latest_ids(images).into_iter().collect();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn a_release_beats_a_newer_looking_pre_release() {
+        let images = [
+            versioned("a", "0.1.0", "ubuntu"),
+            versioned("b", "0.1.0-dev-unlock-20261119", "ubuntu"),
+            versioned("c", "0.2.0-dev.1.1", "ubuntu"),
+            versioned("d", "0.0.9", "ubuntu"),
+        ];
+        assert_eq!(latest(&images), ["a"]);
+    }
+
+    #[test]
+    fn releases_compare_as_numbers() {
+        let images = [
+            versioned("a", "0.9.0", "ubuntu"),
+            versioned("b", "0.10.0", "ubuntu"),
+            versioned("c", "0.2.5", "ubuntu"),
+        ];
+        assert_eq!(latest(&images), ["b"]);
+    }
+
+    #[test]
+    fn without_a_release_the_newest_pre_release_wins() {
+        let images = [
+            versioned("a", "0.1.0-dev.44633031834.2", "ubuntu"),
+            versioned("b", "0.1.0-dev.44701771938.1", "ubuntu"),
+            versioned("c", "0.1.0-dev.9.9", "ubuntu"),
+        ];
+        assert_eq!(latest(&images), ["b"]);
+    }
+
+    #[test]
+    fn each_family_and_profile_gets_its_own_latest() {
+        let mut other_profile = versioned("e", "0.1.0", "ubuntu");
+        other_profile.profile = "rpi".to_owned();
+        let images = [
+            versioned("a", "0.1.0", "ubuntu"),
+            versioned("b", "0.2.0", "ubuntu"),
+            versioned("c", "0.1.0", "mint"),
+            versioned("d", "0.1.0-dev.1", "fedora"),
+            other_profile,
+        ];
+        assert_eq!(latest(&images), ["b", "c", "d", "e"]);
+    }
+
+    #[test]
+    fn an_odd_version_ranks_last_and_a_tie_goes_to_the_later_entry() {
+        let images = [
+            versioned("a", "nightly", "ubuntu"),
+            versioned("b", "0.0.1-dev", "ubuntu"),
+        ];
+        assert_eq!(latest(&images), ["b"]);
+        let images = [
+            versioned("a", "nightly", "ubuntu"),
+            versioned("b", "latest", "ubuntu"),
+        ];
+        assert_eq!(latest(&images), ["b"]);
+        assert!(latest_ids(&[]).is_empty());
     }
 }
