@@ -208,6 +208,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .fallback(unknown_address)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(axum::middleware::from_fn(crate::csrf::guard))
+        .layer(axum::middleware::from_fn(crate::source::layer))
         .layer(axum::middleware::map_response(security_headers))
         .with_state(hub)
 }

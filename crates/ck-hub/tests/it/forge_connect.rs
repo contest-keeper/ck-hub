@@ -84,8 +84,19 @@ async fn connect(
     port: u64,
     state: &str,
 ) -> (StatusCode, Value) {
-    let mut request =
-        Request::post("/api/v1/forge/connect").header("content-type", "application/json");
+    connect_from(app, cookie, port, state, "203.0.113.1").await
+}
+
+async fn connect_from(
+    app: &Router,
+    cookie: Option<&str>,
+    port: u64,
+    state: &str,
+    source: &str,
+) -> (StatusCode, Value) {
+    let mut request = Request::post("/api/v1/forge/connect")
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", format!("6.6.6.6, {source}"));
     if let Some(cookie) = cookie {
         request = request.header("cookie", cookie);
     }
@@ -233,7 +244,20 @@ async fn post_json(
     cookie: Option<&str>,
     body: Value,
 ) -> (StatusCode, Value) {
-    let mut request = Request::post(path).header("content-type", "application/json");
+    post_json_from(app, path, cookie, body, "203.0.113.1").await
+}
+
+/// As `post_json`, from the address the proxy says the caller has.
+async fn post_json_from(
+    app: &Router,
+    path: &str,
+    cookie: Option<&str>,
+    body: Value,
+    source: &str,
+) -> (StatusCode, Value) {
+    let mut request = Request::post(path)
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", format!("6.6.6.6, {source}"));
     if let Some(cookie) = cookie {
         request = request.header("cookie", cookie);
     }
@@ -375,10 +399,20 @@ async fn guessing_codes_is_stopped_after_a_few_wrong_ones() {
 #[tokio::test]
 async fn starting_pairings_is_limited_for_everyone_together() {
     let s = setup();
-    for _ in 0..30 {
-        start(&s.app).await;
+    for round in 0..30 {
+        let source = format!("198.51.100.{round}");
+        let (status, _) =
+            post_json_from(&s.app, "/api/v1/forge/pairings", None, json!({}), &source).await;
+        assert_eq!(status, StatusCode::OK);
     }
-    let (status, _) = post_json(&s.app, "/api/v1/forge/pairings", None, json!({})).await;
+    let (status, _) = post_json_from(
+        &s.app,
+        "/api/v1/forge/pairings",
+        None,
+        json!({}),
+        "198.51.100.99",
+    )
+    .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 }
 
@@ -389,7 +423,8 @@ async fn one_account_cannot_fill_the_shared_cap_of_open_codes() {
     let ana = cookie_for(&s.app, "ana@example.org").await;
     let mut first = String::new();
     for round in 0..1100 {
-        let (status, answer) = connect(&s.app, Some(&vera), 49321, STATE).await;
+        let source = format!("198.51.100.{}", round % 200);
+        let (status, answer) = connect_from(&s.app, Some(&vera), 49321, STATE, &source).await;
         assert_eq!(status, StatusCode::OK, "round {round}");
         if round == 0 {
             first = code_of(answer["redirect"].as_str().expect("redirect"));
@@ -412,4 +447,47 @@ async fn two_accounts_do_not_evict_each_others_code() {
     let vera_code = code_of(v["redirect"].as_str().expect("redirect"));
     assert_eq!(trade(&s.app, &ana_code).await.0, StatusCode::OK);
     assert_eq!(trade(&s.app, &vera_code).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn one_source_over_its_limit_does_not_block_another() {
+    let s = setup();
+    let ana = cookie_for(&s.app, "ana@example.org").await;
+    for _ in 0..10 {
+        let (status, _) = connect_from(&s.app, Some(&ana), 49321, STATE, "192.0.2.1").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, _) = connect_from(&s.app, Some(&ana), 49321, STATE, "192.0.2.1").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let (status, _) = connect_from(&s.app, Some(&ana), 49321, STATE, "192.0.2.2").await;
+    assert_eq!(status, StatusCode::OK);
+    for _ in 0..10 {
+        let (status, _) = post_json_from(
+            &s.app,
+            "/api/v1/forge/pairings",
+            None,
+            json!({}),
+            "192.0.2.1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, _) = post_json_from(
+        &s.app,
+        "/api/v1/forge/pairings",
+        None,
+        json!({}),
+        "192.0.2.1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let (status, _) = post_json_from(
+        &s.app,
+        "/api/v1/forge/pairings",
+        None,
+        json!({}),
+        "192.0.2.2",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
 }

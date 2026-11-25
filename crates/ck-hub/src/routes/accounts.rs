@@ -1,5 +1,10 @@
 //! Sign-up, login, logout, password reset and the Keeper Forge connection.
 
+use crate::source::{
+    FORGE_WINDOW_SECONDS, LOGIN_WINDOW_SECONDS, MAX_FORGE_STARTS, MAX_LOGIN_FAILURES, Source,
+};
+use axum::Extension;
+
 use super::{
     AccessError, Account, Arc, Deserialize, ForgeError, HeaderMap, Hub, IntoResponse, Json,
     LoginError, MIN_PASSWORD_LENGTH, Membership, PairingError, PairingState, Response,
@@ -19,12 +24,25 @@ pub(super) struct LoginBody {
     password: String,
 }
 
-pub(super) async fn login(State(hub): State<Arc<Hub>>, Json(body): Json<LoginBody>) -> Response {
+pub(super) async fn login(
+    State(hub): State<Arc<Hub>>,
+    Extension(source): Extension<Source>,
+    Json(body): Json<LoginBody>,
+) -> Response {
+    // One source that keeps guessing is refused before any hashing, without using up the shared
+    // allowance of everyone else.
+    if hub.source_blocked("login", &source, MAX_LOGIN_FAILURES, LOGIN_WINDOW_SECONDS) {
+        return login_refused();
+    }
     let Ok(_permit) = HASHING.acquire().await else {
         return unavailable();
     };
     // Hashing a password is slow on purpose, so it runs off the request threads.
+    let counted = Arc::clone(&hub);
     let result = tokio::task::spawn_blocking(move || hub.login(&body.email, &body.password)).await;
+    if matches!(result, Ok(Err(LoginError::BadCredentials))) {
+        counted.source_failed("login", &source, LOGIN_WINDOW_SECONDS);
+    }
     match result {
         Ok(Ok((token, account))) => (
             [(
@@ -44,13 +62,17 @@ pub(super) async fn login(State(hub): State<Arc<Hub>>, Json(body): Json<LoginBod
             Json(json!({ "error": "confirm your email first: open the link we mailed you" })),
         )
             .into_response(),
-        Ok(Err(LoginError::TooManyAttempts)) => (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(json!({ "error": "too many wrong passwords, wait a few minutes" })),
-        )
-            .into_response(),
+        Ok(Err(LoginError::TooManyAttempts)) => login_refused(),
         Ok(Err(LoginError::Unavailable)) | Err(_) => unavailable(),
     }
+}
+
+fn login_refused() -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({ "error": "too many wrong passwords, wait a few minutes" })),
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -202,9 +224,18 @@ pub(super) struct ForgeConnectBody {
 /// the Hub's own page.
 pub(super) async fn forge_connect(
     State(hub): State<Arc<Hub>>,
+    Extension(source): Extension<Source>,
     headers: HeaderMap,
     Json(body): Json<ForgeConnectBody>,
 ) -> Response {
+    if !hub.source_take(
+        "forge-code",
+        &source,
+        MAX_FORGE_STARTS,
+        FORGE_WINDOW_SECONDS,
+    ) {
+        return too_many_forge();
+    }
     let Some(token) = session_token(&headers) else {
         return denied(denied_for(&AccessError::Unauthorized));
     };
@@ -272,9 +303,28 @@ fn pairing_failed(error: &PairingError) -> Response {
     }
 }
 
+fn too_many_forge() -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({ "error": "too many requests from this address, wait a minute" })),
+    )
+        .into_response()
+}
+
 /// Keeper Forge starts a pairing. Nobody is signed in yet; the code only becomes useful once an
 /// admin agrees to it in the browser.
-pub(super) async fn pairing_start(State(hub): State<Arc<Hub>>) -> Response {
+pub(super) async fn pairing_start(
+    State(hub): State<Arc<Hub>>,
+    Extension(source): Extension<Source>,
+) -> Response {
+    if !hub.source_take(
+        "pair-start",
+        &source,
+        MAX_FORGE_STARTS,
+        FORGE_WINDOW_SECONDS,
+    ) {
+        return too_many_forge();
+    }
     match tokio::task::spawn_blocking(move || hub.start_pairing()).await {
         Ok(Ok((code, poll_key))) => Json(json!({
             "code": code,

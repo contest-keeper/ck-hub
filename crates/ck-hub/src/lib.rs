@@ -27,6 +27,7 @@ mod registry;
 mod routes;
 mod signing;
 mod signup;
+mod source;
 mod store;
 mod submissions;
 mod watcher;
