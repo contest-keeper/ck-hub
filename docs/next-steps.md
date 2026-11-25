@@ -14,8 +14,12 @@ Follow [user-checks.md](user-checks.md):
 The owner approved C7 for 50 to 100 sticks with the current container (0.25 vCPU). Procedure is in [user-checks.md](user-checks.md) section 3 and [capacity.md](capacity.md):
 1. Generate a registry of 50 sticks, then 100: `cargo run --release --example loadsim -- registry --sticks 50 --out registry.json`.
 2. Push it into a throwaway organization on the dev Hub.
-3. Before each level, read the accrued cost (Azure portal, Cost Management, scope `rg-ckhub-dev`, "Accumulated cost", or `az consumption usage list` read-only) and write it down; read it again after each level. Run each level for 30 minutes and watch Container App CPU in the portal.
-   Stop rule: do not start a level if the accrued cost of the run so far plus 1 USD would pass 5 USD, and stop a running level at once if it does. Do not scale the container up during the run (the approval is for the current 0.25 vCPU); if a scale-up is wanted, stop and ask first. Read the cost once more after the cleanup in step 5.
+3. Cost control. Cost Management data can arrive hours or days late, so readings alone cannot enforce the cap; the cap is enforced by limits that make a higher cost impossible, and the readings only reconcile it:
+   - Pre-run bound: the run adds no new chargeable resource. The Container App stays at 0.25 vCPU with `max_replicas` 1 and the database stays as it is, so the extra cost is only the extra CPU time of the container and database for the run, which is well under 1 USD for 2.5 hours. Do not scale anything up during the run; if a scale-up is wanted, stop and ask first.
+   - Runtime limit: at most the 50 and 100 stick levels, 30 minutes each, never more than 2.5 hours in total. Stop the loadsim (Ctrl+C) when the time is up, whatever the cost readings show.
+   - Baseline: before the first level, record the accrued cost of `rg-ckhub-dev` for the current month (portal: Cost Management, scope `rg-ckhub-dev`, "Accumulated cost"; or `az consumption usage list --start-date <first day of month> --end-date <today>` filtered to that resource group). The run cost is the later reading minus this baseline. If other dev usage happens in the same group during the run, say so in the notes; the bound above still holds.
+   - Stop margin: stop at once if the run cost plus 1 USD would pass 5 USD, checked before each level, once during the level at about 15 minutes, and after each level.
+   - Reconcile: read the cost again after the cleanup in step 5, and again a day later when Azure has reported the usage; note both in `docs/capacity.md`.
 4. Put the numbers into `docs/capacity.md`. If CPU is the limit, stop and ask before raising `cpu` in ck-infra (a small PR, deployed by the pipeline).
 5. Archive and delete the throwaway sticks afterwards.
 
