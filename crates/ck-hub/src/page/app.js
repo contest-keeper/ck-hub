@@ -338,6 +338,10 @@ async function sendCommand(stick, draft) {
     draft.note = (result.data && result.data.error) || "The command was not sent (HTTP " + result.status + ").";
     draft.bad = true;
   }
+  // The panel is rebuilt on every draw, so the result is spoken from a region that stays in the page.
+  const status = document.getElementById("cmd-status");
+  status.textContent = "";
+  status.textContent = teamName(stick) + " machine " + (stick.machine_number ?? "?") + ": " + draft.note;
   render();
 }
 
@@ -388,15 +392,18 @@ function commandPanel(stick) {
     bar.appendChild(act("Restore", "restore", () => changeStick(stick, "POST", "/restore", null, "Stick restored.")));
     bar.appendChild(act("Delete now…", "delete", () => {
       confirmingDelete.add(stick.stick_id);
-      render();
+      render("act:delete-no");
     }, "btn sm danger"));
     box.appendChild(bar);
     if (confirmingDelete.has(stick.stick_id)) {
       const ask = el("div", "cmd-confirm");
-      ask.appendChild(el("p", "bad", "Delete " + name + " and everything kept about it? This cannot be undone."));
+      const question = el("p", "bad", "Delete " + name + " and everything kept about it? This cannot be undone.");
+      question.id = "delete-question";
+      ask.appendChild(question);
       const buttons = el("div", "cmd-bar");
       buttons.appendChild(act("Delete everything", "delete-yes", () => changeStick(stick, "DELETE", "", null, "Stick deleted."), "btn sm danger"));
-      buttons.appendChild(act("Cancel", "delete-no", () => { confirmingDelete.delete(stick.stick_id); render(); }));
+      buttons.appendChild(act("Cancel", "delete-no", () => { confirmingDelete.delete(stick.stick_id); render("act:delete"); }));
+      for (const button of buttons.children) button.setAttribute("aria-describedby", "delete-question");
       ask.appendChild(buttons);
       box.appendChild(ask);
     }
@@ -421,14 +428,14 @@ function commandPanel(stick) {
       draft.action = action;
       draft.archiving = false;
       draft.note = "";
-      render();
+      render(action === "message" ? "msg" : "act:cancel");
     });
     button.disabled = draft.busy || !stick.online;
     if (!stick.online) button.setAttribute("aria-describedby", "cmd-off");
     list.appendChild(actionRow(title, hint, button));
   }
   list.appendChild(actionRow("Archive", "Takes it out of the list. It is deleted with its data when the time is up, and you can restore it before then.",
-    act("Archive…", "archive", () => { draft.archiving = true; draft.action = null; render(); }, "btn sm danger")));
+    act("Archive…", "archive", () => { draft.archiving = true; draft.action = null; render("act:archive-no"); }, "btn sm danger")));
   box.appendChild(list);
   if (!stick.online) box.appendChild(el("p", "hint", "Lock, Unlock, Message and Shut down work when the stick is online. This one is not.")).id = "cmd-off";
 
@@ -453,19 +460,26 @@ function commandPanel(stick) {
       unlock_screen: "Unlock the screen of ",
       shutdown: "Shut down ",
     }[draft.action];
-    ask.appendChild(el("p", draft.action === "shutdown" ? "bad" : "", what + name + "?" +
-      (draft.action === "shutdown" ? " The contestant loses any unsaved work." : "")));
+    const question = el("p", draft.action === "shutdown" ? "bad" : "", what + name + "?" +
+      (draft.action === "shutdown" ? " The contestant loses any unsaved work." : ""));
+    question.id = "cmd-question";
+    ask.appendChild(question);
     var yes = act("Confirm", "confirm", () => sendCommand(stick, draft), "btn sm pri");
     yes.disabled = draft.busy || (draft.action === "message" && !draft.text.trim());
     const buttons = el("div", "cmd-bar");
     buttons.appendChild(yes);
-    buttons.appendChild(act("Cancel", "cancel", () => { draft.action = null; render(); }));
+    const cancel = act("Cancel", "cancel", () => { const was = draft.action; draft.action = null; render("act:" + was); });
+    // The panel is not live, so the focused button carries the question for screen readers.
+    for (const button of [yes, cancel]) button.setAttribute("aria-describedby", "cmd-question");
+    buttons.appendChild(cancel);
     ask.appendChild(buttons);
     box.appendChild(ask);
   }
   if (draft.archiving) {
     const ask = el("div", "cmd-confirm");
-    ask.appendChild(el("p", "", "Archive " + name + "? It stops reporting and is deleted with all its data when the time is up."));
+    const question = el("p", "", "Archive " + name + "? It stops reporting and is deleted with all its data when the time is up.");
+    question.id = "archive-question";
+    ask.appendChild(question);
     const buttons = el("div", "cmd-bar");
     for (const days of [7, 30]) {
       buttons.appendChild(act("Archive for " + days + " days", "archive-" + days, () => {
@@ -473,11 +487,14 @@ function commandPanel(stick) {
         changeStick(stick, "POST", "/archive", { days }, "Stick archived.");
       }, "btn sm danger"));
     }
-    buttons.appendChild(act("Cancel", "archive-no", () => { draft.archiving = false; render(); }));
+    buttons.appendChild(act("Cancel", "archive-no", () => { draft.archiving = false; render("act:archive"); }));
+    for (const button of buttons.children) button.setAttribute("aria-describedby", "archive-question");
     ask.appendChild(buttons);
     box.appendChild(ask);
   }
-  if (draft.note) box.appendChild(el("p", draft.bad ? "bad" : "hint", draft.note));
+  if (draft.note) {
+    box.appendChild(el("p", draft.bad ? "bad" : "hint", draft.note));
+  }
   return box;
 }
 
@@ -682,21 +699,38 @@ function morePanel(stick) {
 
 // The list is drawn again at every refresh: give the focus back to what had it, and keep the cursor
 // in a message being typed.
-function keepFocus(draw) {
+function keepFocus(draw, goto) {
   const active = document.activeElement;
   const key = active && active.dataset ? active.dataset.key : null;
   const at = active && active.selectionStart !== undefined ? active.selectionStart : null;
   draw();
-  if (!key) return;
-  const again = Array.from(document.querySelectorAll("[data-key]")).find((n) => n.dataset.key === key);
-  if (!again || again.disabled) return;
-  again.focus();
-  if (at !== null && again.setSelectionRange) again.setSelectionRange(at, at);
+  // A button that opens or closes a confirmation names where the focus goes, so it is never dropped on the page.
+  const want = goto || key;
+  if (!want) return;
+  const again = Array.from(document.querySelectorAll("[data-key]")).find((n) => n.dataset.key === want);
+  // If the opener went disabled (the stick dropped offline), use an enabled control in the same panel.
+  const target = again && !again.disabled ? again : goto || again ? document.querySelector("#detail button:not([disabled])") : null;
+  if (!target) return;
+  target.focus();
+  if (!goto && at !== null && target.setSelectionRange) target.setSelectionRange(at, at);
 }
 
-function render() {
-  keepFocus(drawSticks);
+function render(goto) {
+  keepFocus(drawSticks, goto);
 }
+
+// Escape closes an open confirmation in the stick details and puts the focus back on the button that opened it.
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !document.getElementById("detail").contains(document.activeElement)) return;
+  const stick = sticks.find((s) => s.stick_id === selected);
+  if (!stick) return;
+  const draft = draftOf(stick);
+  let back = null;
+  if (draft.action) { back = "act:" + draft.action; draft.action = null; }
+  else if (draft.archiving) { back = "act:archive"; draft.archiving = false; }
+  else if (confirmingDelete.has(stick.stick_id)) { back = "act:delete"; confirmingDelete.delete(stick.stick_id); }
+  if (back) { event.preventDefault(); render(back); }
+});
 
 function drawSticks() {
   const body = document.getElementById("rows");

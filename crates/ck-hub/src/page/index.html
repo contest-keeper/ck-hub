@@ -119,7 +119,7 @@
     </section>
   </section>
   <section id="view-sticks" class="stack" hidden>
-    <div class="head"><div><h1>Sticks</h1></div><span class="grow"></span><span class="live" role="status" id="live"><i></i><span id="live-text">Live</span></span></div>
+    <div class="head"><div><h1>Sticks</h1></div><span class="grow"></span><span class="live" id="live"><i></i><span id="live-text">Live</span></span></div>
     <section class="hero" aria-label="Summary"><div class="big"><span id="n-online">0</span> <small id="n-of">of 0 online</small></div><p class="muted" id="hero-note"></p></section>
     <section class="attn-list" id="attn-list" aria-label="Needs a look" hidden></section>
     <div class="tools">
@@ -136,7 +136,8 @@
         <div class="wrap"><table><thead><tr><th>Team</th><th>Status</th><th>Logged in as</th><th>Last seen</th></tr></thead><tbody id="rows"></tbody></table><p class="muted" id="empty" hidden></p></div>
         <p class="hint" id="list-hint"></p>
       </div>
-      <aside class="b card" id="detail" aria-label="Stick details" aria-live="polite"></aside>
+      <aside class="b card" id="detail" aria-label="Stick details"></aside>
+      <p class="sr-only" id="cmd-status" role="status"></p>
     </div>
     <section class="card more" id="more" hidden></section>
   </section>
