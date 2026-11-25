@@ -7,8 +7,12 @@
   function read(key) { try { return localStorage.getItem(key); } catch (error) { return null; } }
   function save(key, value) { try { localStorage.setItem(key, value); } catch (error) { /* the choice lasts until the page closes */ } }
   function dark() { return window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches; }
-  function look() { return read("ck-theme") === "classic" ? "classic" : "modern"; }
-  function mode() { var stored = read("ck-mode"); return stored === "dark" || stored === "light" ? stored : (dark() ? "dark" : "light"); }
+  // Read once; a choice is kept here first, so it holds for this page even when storage refuses it.
+  var stored = read("ck-mode");
+  var chosen = { look: read("ck-theme") === "classic" ? "classic" : "modern", mode: stored === "dark" || stored === "light" ? stored : (dark() ? "dark" : "light") };
+  function look() { return chosen.look; }
+  function mode() { return chosen.mode; }
+  function choose(name, key, value) { chosen[name] = value; save(key, value); }
   function apply() { root.dataset.look = look(); root.dataset.mode = mode(); }
   apply();
 
@@ -74,10 +78,10 @@
       head.appendChild(done);
       panel.appendChild(head);
       var groups = [
-        ["Look", [["New", "Clean and modern", "m", look() === "modern", function () { save("ck-theme", "modern"); change(); }],
-                  ["Classic", "Like the browser extension", "c", look() === "classic", function () { save("ck-theme", "classic"); change(); }]]],
-        ["Theme", [["Light", "Bright background", "", mode() === "light", function () { save("ck-mode", "light"); change(); }],
-                   ["Dark", "Easy on the eyes", "", mode() === "dark", function () { save("ck-mode", "dark"); change(); }]]],
+        ["Look", [["New", "Clean and modern", "m", look() === "modern", function () { choose("look", "ck-theme", "modern"); change(); }],
+                  ["Classic", "Like the browser extension", "c", look() === "classic", function () { choose("look", "ck-theme", "classic"); change(); }]]],
+        ["Theme", [["Light", "Bright background", "", mode() === "light", function () { choose("mode", "ck-mode", "light"); change(); }],
+                   ["Dark", "Easy on the eyes", "", mode() === "dark", function () { choose("mode", "ck-mode", "dark"); change(); }]]],
       ];
       groups.forEach(function (group) {
         var box = make("div");
