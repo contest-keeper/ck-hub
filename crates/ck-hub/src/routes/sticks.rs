@@ -166,6 +166,34 @@ pub(super) async fn submissions_of(
     }
 }
 
+pub(super) async fn contest_submissions_of(
+    State(hub): State<Arc<Hub>>,
+    Path((slug, contest)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    match require_in(&hub, &headers, slug, Role::Viewer).await {
+        Ok(access) => {
+            // Read after the sign-in check, so a stranger gets 401 whatever the path says.
+            let Ok(contest) = contest.parse::<u64>() else {
+                return (StatusCode::NOT_FOUND, "there is no such contest").into_response();
+            };
+            match tokio::task::spawn_blocking(move || {
+                hub.contest_submissions(&access.organization.id, contest)
+            })
+            .await
+            {
+                Ok(Ok(view)) => Json(view).into_response(),
+                Ok(Err(error)) => {
+                    tracing::error!("{error}");
+                    unavailable()
+                }
+                Err(_) => unavailable(),
+            }
+        }
+        Err(reason) => denied(reason),
+    }
+}
+
 pub(super) async fn show_submissions(hub: Arc<Hub>, access: Access, id: String) -> Response {
     match tokio::task::spawn_blocking(move || hub.submissions_of(&access.organization.id, &id))
         .await
