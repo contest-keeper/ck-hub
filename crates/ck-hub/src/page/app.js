@@ -393,10 +393,13 @@ function commandPanel(stick) {
     box.appendChild(bar);
     if (confirmingDelete.has(stick.stick_id)) {
       const ask = el("div", "cmd-confirm");
-      ask.appendChild(el("p", "bad", "Delete " + name + " and everything kept about it? This cannot be undone."));
+      const question = el("p", "bad", "Delete " + name + " and everything kept about it? This cannot be undone.");
+      question.id = "delete-question";
+      ask.appendChild(question);
       const buttons = el("div", "cmd-bar");
       buttons.appendChild(act("Delete everything", "delete-yes", () => changeStick(stick, "DELETE", "", null, "Stick deleted."), "btn sm danger"));
       buttons.appendChild(act("Cancel", "delete-no", () => { confirmingDelete.delete(stick.stick_id); render("act:delete"); }));
+      for (const button of buttons.children) button.setAttribute("aria-describedby", "delete-question");
       ask.appendChild(buttons);
       box.appendChild(ask);
     }
