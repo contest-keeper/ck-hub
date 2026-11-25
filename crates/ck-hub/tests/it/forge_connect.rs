@@ -279,7 +279,7 @@ async fn answer(app: &Router, cookie: Option<&str>, code: &str, approve: bool) -
 async fn a_pairing_code_connects_forge_once_the_admin_agrees() {
     let s = setup();
     let (code, key) = start(&s.app).await;
-    // Eight letters and digits without look-alikes, shown as two groups of four.
+    // Eight letters and digits without characters that look alike, shown as two groups of four.
     assert_eq!(code.len(), 9);
     assert_eq!(code.as_bytes()[4], b'-');
     assert!(
