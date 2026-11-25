@@ -388,7 +388,7 @@ function commandPanel(stick) {
     bar.appendChild(act("Restore", "restore", () => changeStick(stick, "POST", "/restore", null, "Stick restored.")));
     bar.appendChild(act("Delete now…", "delete", () => {
       confirmingDelete.add(stick.stick_id);
-      render();
+      render("act:delete-no");
     }, "btn sm danger"));
     box.appendChild(bar);
     if (confirmingDelete.has(stick.stick_id)) {
@@ -396,7 +396,7 @@ function commandPanel(stick) {
       ask.appendChild(el("p", "bad", "Delete " + name + " and everything kept about it? This cannot be undone."));
       const buttons = el("div", "cmd-bar");
       buttons.appendChild(act("Delete everything", "delete-yes", () => changeStick(stick, "DELETE", "", null, "Stick deleted."), "btn sm danger"));
-      buttons.appendChild(act("Cancel", "delete-no", () => { confirmingDelete.delete(stick.stick_id); render(); }));
+      buttons.appendChild(act("Cancel", "delete-no", () => { confirmingDelete.delete(stick.stick_id); render("act:delete"); }));
       ask.appendChild(buttons);
       box.appendChild(ask);
     }
@@ -421,14 +421,14 @@ function commandPanel(stick) {
       draft.action = action;
       draft.archiving = false;
       draft.note = "";
-      render();
+      render(action === "message" ? "msg" : "act:cancel");
     });
     button.disabled = draft.busy || !stick.online;
     if (!stick.online) button.setAttribute("aria-describedby", "cmd-off");
     list.appendChild(actionRow(title, hint, button));
   }
   list.appendChild(actionRow("Archive", "Takes it out of the list. It is deleted with its data when the time is up, and you can restore it before then.",
-    act("Archive…", "archive", () => { draft.archiving = true; draft.action = null; render(); }, "btn sm danger")));
+    act("Archive…", "archive", () => { draft.archiving = true; draft.action = null; render("act:archive-no"); }, "btn sm danger")));
   box.appendChild(list);
   if (!stick.online) box.appendChild(el("p", "hint", "Lock, Unlock, Message and Shut down work when the stick is online. This one is not.")).id = "cmd-off";
 
@@ -459,7 +459,7 @@ function commandPanel(stick) {
     yes.disabled = draft.busy || (draft.action === "message" && !draft.text.trim());
     const buttons = el("div", "cmd-bar");
     buttons.appendChild(yes);
-    buttons.appendChild(act("Cancel", "cancel", () => { draft.action = null; render(); }));
+    buttons.appendChild(act("Cancel", "cancel", () => { const was = draft.action; draft.action = null; render("act:" + was); }));
     ask.appendChild(buttons);
     box.appendChild(ask);
   }
@@ -473,7 +473,7 @@ function commandPanel(stick) {
         changeStick(stick, "POST", "/archive", { days }, "Stick archived.");
       }, "btn sm danger"));
     }
-    buttons.appendChild(act("Cancel", "archive-no", () => { draft.archiving = false; render(); }));
+    buttons.appendChild(act("Cancel", "archive-no", () => { draft.archiving = false; render("act:archive"); }));
     ask.appendChild(buttons);
     box.appendChild(ask);
   }
@@ -682,21 +682,36 @@ function morePanel(stick) {
 
 // The list is drawn again at every refresh: give the focus back to what had it, and keep the cursor
 // in a message being typed.
-function keepFocus(draw) {
+function keepFocus(draw, goto) {
   const active = document.activeElement;
   const key = active && active.dataset ? active.dataset.key : null;
   const at = active && active.selectionStart !== undefined ? active.selectionStart : null;
   draw();
-  if (!key) return;
-  const again = Array.from(document.querySelectorAll("[data-key]")).find((n) => n.dataset.key === key);
+  // A button that opens or closes a confirmation names where the focus goes, so it is never dropped on the page.
+  const want = goto || key;
+  if (!want) return;
+  const again = Array.from(document.querySelectorAll("[data-key]")).find((n) => n.dataset.key === want);
   if (!again || again.disabled) return;
   again.focus();
-  if (at !== null && again.setSelectionRange) again.setSelectionRange(at, at);
+  if (!goto && at !== null && again.setSelectionRange) again.setSelectionRange(at, at);
 }
 
-function render() {
-  keepFocus(drawSticks);
+function render(goto) {
+  keepFocus(drawSticks, goto);
 }
+
+// Escape closes an open confirmation in the stick details and puts the focus back on the button that opened it.
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !document.getElementById("detail").contains(document.activeElement)) return;
+  const stick = sticks.find((s) => s.stick_id === selected);
+  if (!stick) return;
+  const draft = draftOf(stick);
+  let back = null;
+  if (draft.action) { back = "act:" + draft.action; draft.action = null; }
+  else if (draft.archiving) { back = "act:archive"; draft.archiving = false; }
+  else if (confirmingDelete.has(stick.stick_id)) { back = "act:delete"; confirmingDelete.delete(stick.stick_id); }
+  if (back) { event.preventDefault(); render(back); }
+});
 
 function drawSticks() {
   const body = document.getElementById("rows");
