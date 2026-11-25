@@ -57,9 +57,10 @@ pub fn poll_once(
 /// judge's page and keeps its hash, at most `limit` per call. Returns how many were kept. Before the
 /// end of the contest nothing is read: the code is not public then.
 ///
-/// A submission whose page shows no source is tried again later. `round` counts the calls: each one
-/// starts further along the waiting list, so a run of pages that show no source cannot keep the ones
-/// after it from being read. A failure stops the pass with an error; what was kept stays.
+/// A submission whose page shows no source, or whose page fails, is tried again later. `cursor` is
+/// where in the waiting list the next call starts: each call moves it past what it tried and did not
+/// keep, so a run of such pages cannot keep the ones after it from being read. A failure stops the
+/// pass with an error; what was kept stays.
 ///
 /// # Errors
 /// The judge or the store failing.
@@ -69,7 +70,7 @@ pub fn hash_sources(
     organization: &str,
     contest_id: u64,
     limit: usize,
-    round: usize,
+    cursor: &mut usize,
     pause: Duration,
 ) -> Result<usize, WatchError> {
     // The call before this one was a request too, and the judge allows about one every two seconds.
@@ -83,26 +84,43 @@ pub fn hash_sources(
         .into_iter()
         .filter(|submission| !known.contains_key(&submission.submission_id))
         .collect();
-    if !waiting.is_empty() {
-        let by = round.saturating_mul(limit) % waiting.len();
-        waiting.rotate_left(by);
-    }
-    let mut kept = 0;
+    let start = if waiting.is_empty() {
+        0
+    } else {
+        *cursor % waiting.len()
+    };
+    waiting.rotate_left(start);
+    let (mut tried, mut kept) = (0, 0);
+    let mut stopped = None;
     for submission in waiting.into_iter().take(limit) {
         sleep(pause);
-        if let Some(hash) = judge.source_hash(contest_id, submission.submission_id)? {
-            store.add_judge_source_hash(
-                organization,
-                "codeforces",
-                contest_id,
-                submission.submission_id,
-                &hash,
-                OffsetDateTime::now_utc(),
-            )?;
-            kept += 1;
+        tried += 1;
+        match judge.source_hash(contest_id, submission.submission_id) {
+            Ok(Some(hash)) => {
+                let added = store.add_judge_source_hash(
+                    organization,
+                    "codeforces",
+                    contest_id,
+                    submission.submission_id,
+                    &hash,
+                    OffsetDateTime::now_utc(),
+                );
+                if let Err(error) = added {
+                    stopped = Some(WatchError::from(error));
+                    break;
+                }
+                kept += 1;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                stopped = Some(WatchError::from(error));
+                break;
+            }
         }
     }
-    Ok(kept)
+    // What was tried and not kept stays in the list before the next start.
+    *cursor = start + tried - kept;
+    stopped.map_or(Ok(kept), Err)
 }
 
 /// Polls forever: every `interval`, and after a failure the wait doubles up to `max_wait`, then
@@ -117,16 +135,22 @@ pub fn run(
     max_wait: Duration,
 ) {
     let mut wait = interval;
-    let mut round = 0usize;
+    let mut cursor = 0usize;
     loop {
-        round = round.wrapping_add(1);
         let pause = Duration::from_secs(2);
         let result =
             poll_once(client, store, organization, contest_id, 100, pause).and_then(|new| {
                 // `shortcut:` 50 pages per round so the next poll is not far behind; raise it if a
                 // big contest takes too many rounds to hash.
-                let hashed =
-                    hash_sources(client, store, organization, contest_id, 50, round, pause)?;
+                let hashed = hash_sources(
+                    client,
+                    store,
+                    organization,
+                    contest_id,
+                    50,
+                    &mut cursor,
+                    pause,
+                )?;
                 Ok((new, hashed))
             });
         match result {
@@ -207,7 +231,7 @@ mod tests {
     }
 
     fn run_pass(judge: &FakeJudge, store: &MemoryStore) -> Result<usize, WatchError> {
-        hash_sources(judge, store, "org", 7, 50, 0, Duration::ZERO)
+        hash_sources(judge, store, "org", 7, 50, &mut 0, Duration::ZERO)
     }
 
     #[test]
@@ -243,14 +267,33 @@ mod tests {
             hidden_all: vec![1, 2],
             ..judge("FINISHED", None, None)
         };
-        let kept = |round| hash_sources(&hidden, &store, "org", 7, 1, round, Duration::ZERO);
-        assert_eq!(kept(0).expect("round"), 0);
-        assert_eq!(kept(1).expect("round"), 0);
-        assert_eq!(kept(2).expect("round"), 1, "the third was reached");
+        let mut cursor = 0;
+        let mut round = || hash_sources(&hidden, &store, "org", 7, 1, &mut cursor, Duration::ZERO);
+        assert_eq!(round().expect("round"), 0);
+        assert_eq!(round().expect("round"), 0);
+        assert_eq!(round().expect("round"), 1, "the third was reached");
         let hashes = store
             .judge_source_hashes("org", "codeforces", 7)
             .expect("hashes");
         assert!(hashes.contains_key(&3));
+    }
+
+    #[test]
+    fn a_page_that_keeps_failing_does_not_keep_the_others_from_being_read() {
+        let store = store_with(&[1, 2, 3]);
+        // The limit covers the whole list, so the first page fails at the start of every round.
+        let failing = judge("FINISHED", Some(1), None);
+        let mut cursor = 0;
+        let mut round = || hash_sources(&failing, &store, "org", 7, 3, &mut cursor, Duration::ZERO);
+        assert!(round().is_err());
+        assert!(
+            round().is_err(),
+            "the first page fails again, after the others"
+        );
+        let hashes = store
+            .judge_source_hashes("org", "codeforces", 7)
+            .expect("hashes");
+        assert!(hashes.contains_key(&2) && hashes.contains_key(&3));
     }
 
     #[test]
