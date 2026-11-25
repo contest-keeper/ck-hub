@@ -57,6 +57,7 @@ pub(crate) const READ_ONLY: &[&str] = &[
     "/api/v1/images",
     "/api/v1/me",
     "/api/v1/orgs/{slug}/commands/{command_id}",
+    "/api/v1/orgs/{slug}/contests/{contest}/submissions",
     "/api/v1/orgs/{slug}/members",
     "/api/v1/orgs/{slug}/recordings/{recording_id}/view",
     "/api/v1/orgs/{slug}/sticks/{id}/network",

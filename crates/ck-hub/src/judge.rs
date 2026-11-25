@@ -32,6 +32,8 @@ pub struct SubmitEvent {
     /// The hash of the source as the stick saw it, after `normalize_source`. Missing when the
     /// stick saw only a cut of the code.
     pub source_sha256_norm: Option<String>,
+    /// `false` when the stick saw the site refuse the form, so this submit explains no judge one.
+    pub accepted: bool,
 }
 
 /// Reads a Codeforces submit event. Anything else, or a payload that lacks a field, is `None`:
@@ -76,6 +78,7 @@ pub fn submit_event(stored: &StoredEvent) -> Option<SubmitEvent> {
             .get("source_sha256_norm")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
+        accepted: payload.get("accepted").and_then(serde_json::Value::as_bool) != Some(false),
     })
 }
 

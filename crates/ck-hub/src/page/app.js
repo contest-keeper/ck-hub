@@ -1,3 +1,77 @@
+// Every judge submission of one contest across all sticks, opened from a stick's submissions.
+const contestViews = new Map();
+const openContests = new Set();
+const suspectOnly = new Set();
+
+async function fetchContest(contest) {
+  const before = contestViews.get(contest);
+  contestViews.set(contest, { at: Date.now(), data: before ? before.data : null, failed: false });
+  let data = before ? before.data : null;
+  let failed = false;
+  try {
+    const response = await fetch("/api/v1/orgs/" + encodeURIComponent(org) + "/contests/" + encodeURIComponent(contest) + "/submissions", { cache: "no-store" });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    data = await response.json();
+  } catch (error) {
+    failed = true;
+  }
+  contestViews.set(contest, { at: Date.now(), data, failed });
+  render();
+}
+
+function codeText(code) {
+  switch (code) {
+    case "same": return "same code";
+    case "different": return "DIFFERENT CODE";
+    case "not_read_yet": return "code not read yet";
+    case "not_comparable": return "not comparable";
+    default: return "—";
+  }
+}
+
+function contestPanel(contest) {
+  const box = el("div", "net");
+  const open = openContests.has(contest);
+  const toggle = el("button", "", (open ? "Hide" : "Show") + " all submissions of contest " + contest);
+  toggle.type = "button";
+  toggle.addEventListener("click", () => {
+    if (openContests.has(contest)) openContests.delete(contest); else openContests.add(contest);
+    render();
+  });
+  box.appendChild(toggle);
+  if (!open) return box;
+  const cached = contestViews.get(contest);
+  if (!cached || Date.now() - cached.at > 30000) fetchContest(contest);
+  if (!cached || !cached.data) {
+    box.appendChild(el("p", "muted", cached && cached.failed ? "The contest could not be loaded." : "Loading…"));
+    return box;
+  }
+  const data = cached.data;
+  box.appendChild(el("p", data.suspect ? "bad" : "", data.submissions.length + " on Codeforces, " + data.matched + " reported by a stick, " + data.suspect + " suspect."));
+  const label = el("label", "", " only the suspect ones");
+  const check = el("input");
+  check.type = "checkbox";
+  check.checked = suspectOnly.has(contest);
+  check.addEventListener("change", () => {
+    if (check.checked) suspectOnly.add(contest); else suspectOnly.delete(contest);
+    render();
+  });
+  label.prepend(check);
+  box.appendChild(label);
+  const shown = data.submissions.filter((s) => !suspectOnly.has(contest) || s.suspect);
+  box.appendChild(proofTable(["Time", "User", "Problem", "Submission", "Stick", "Matched by", "Code"],
+    shown.map((s) => [[
+      new Date(s.submitted_at).toLocaleTimeString(),
+      handleLink(s.handles[0]),
+      s.problem,
+      submissionLink(data.contest_id, s.submission_id),
+      s.stick_id || "SUSPECT: no stick reported it",
+      s.matched_by ? (s.matched_by === "id" ? "id" : "time (" + s.time_gap_s + " s apart)") : "—",
+      codeText(s.code),
+    ], s.suspect ? "refused" : "ok"])));
+  return box;
+}
+
 // Written in two parts: the page must hold no outside address as text; this is only a name the browser needs.
 const SVG_NS = "http" + "://www.w3.org/2000/svg";
 const REFRESH_MS = 5000;
@@ -228,16 +302,18 @@ function proofPanel(stick) {
   }
   if (data.judge.length) {
     box.appendChild(el("h4", "", "Seen on Codeforces"));
-    box.appendChild(proofTable(["Time", "User", "Contest", "Problem", "Submission", "From this stick"],
+    box.appendChild(proofTable(["Time", "User", "Contest", "Problem", "Submission", "From this stick", "Code"],
       data.judge.map((j) => [[
         new Date(j.submitted_at).toLocaleTimeString(),
         handleLink(j.handles[0]),
         contestLink(j.contest_id),
         j.problem,
         submissionLink(j.contest_id, j.submission_id),
-        j.suspect ? "SUSPECT: the stick did not report it" : "yes",
+        j.from_stick ? "yes" : "SUSPECT: the stick did not report it",
+        codeText(j.code),
       ], j.suspect ? "refused" : "ok"])));
   }
+  for (const contest of data.contests) box.appendChild(contestPanel(contest));
   return box;
 }
 
