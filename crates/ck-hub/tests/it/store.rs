@@ -2579,3 +2579,76 @@ fn invitations_contract(store: &dyn Store) {
         .collect();
     assert!(slugs.contains(&format!("{id}-invite")) && slugs.contains(&format!("{id}-other")));
 }
+
+#[test]
+fn postgres_keeps_one_copy_of_an_event_and_the_migration_removes_old_copies() {
+    let Some(url) = database_url() else { return };
+    let store = PostgresStore::connect(&url).expect("connect");
+    let org = store
+        .ensure_organization(&unique(), "Once")
+        .expect("organization")
+        .id;
+    let stick = StickId::parse("stick-once").expect("id");
+    let mut first = event("stick-once", 1, "ana");
+    first.boot_id = unique();
+    store
+        .append_event(&org, first.clone(), time(0), None)
+        .expect("first");
+    store
+        .append_event(&org, first, time(1), None)
+        .expect("a second copy is dropped, not an error");
+    assert_eq!(store.events(&org, &stick).expect("read").len(), 1);
+    assert_eq!(store.event_count(&org, &stick).expect("count"), 1);
+
+    // Copies written before the index existed: the migration keeps the earliest of each. This runs
+    // in a database of its own, because the index is dropped for a moment.
+    let (server, _) = url.rsplit_once('/').expect("a database url");
+    let scratch = format!("ckonce{}", unique());
+    let mut admin = postgres::Client::connect(&url, postgres::NoTls).expect("client");
+    admin
+        .batch_execute(&format!("CREATE DATABASE {scratch}"))
+        .expect("create the scratch database");
+    let scratch_url = format!("{server}/{scratch}");
+    let scratch_org = PostgresStore::connect(&scratch_url)
+        .expect("migrated scratch database")
+        .ensure_organization("once", "Once")
+        .expect("organization")
+        .id;
+    let mut client = postgres::Client::connect(&scratch_url, postgres::NoTls).expect("client");
+    client
+        .batch_execute("DROP INDEX events_once")
+        .expect("drop the index");
+    // Row security binds the table's owner too, unless it is a superuser: name the organization.
+    client
+        .execute("SELECT set_config('ck.org_id', $1, false)", &[&scratch_org])
+        .expect("organization");
+    let insert = "INSERT INTO events (organization_id, stick_id, boot_id, seq, received_at, event)
+                  VALUES ($1, 'stick-once', 'old-boot', 1, now(), $2)";
+    let json = serde_json::json!({ "n": 1 });
+    client
+        .execute(insert, &[&scratch_org, &json])
+        .expect("copy 1");
+    let json2 = serde_json::json!({ "n": 2 });
+    client
+        .execute(insert, &[&scratch_org, &json2])
+        .expect("copy 2");
+    client
+        .batch_execute("SELECT set_config('ck.org_id', '', false)")
+        .expect("forget the organization");
+    client
+        .batch_execute(include_str!("../../migrations/0023_events_once.sql"))
+        .expect("the migration runs over duplicates");
+    client
+        .execute("SELECT set_config('ck.org_id', $1, false)", &[&scratch_org])
+        .expect("organization");
+    let rows = client
+        .query("SELECT event FROM events WHERE boot_id = 'old-boot'", &[])
+        .expect("rows");
+    assert_eq!(rows.len(), 1);
+    let kept: serde_json::Value = rows[0].get(0);
+    assert_eq!(kept, json, "the earliest copy stays");
+    drop(client);
+    admin
+        .batch_execute(&format!("DROP DATABASE {scratch}"))
+        .expect("drop the scratch database");
+}

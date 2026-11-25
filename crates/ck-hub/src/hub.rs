@@ -39,6 +39,17 @@ struct ContestAssertion {
 /// stops a stick with a leaked secret from filling the database.
 const MAX_MESSAGES_PER_MINUTE: u32 = 120;
 
+/// Events kept for one boot of one stick: its sequence number may not pass this. The message limit
+/// of 120 a minute fills it after about 7 hours; a longer boot is refused with a 429, which a stick
+/// keeps queued and tries again later, so nothing is lost on its side.
+pub const MAX_EVENTS_PER_BOOT: u64 = 50_000;
+
+/// Events kept for one stick over all its boots, so a stick that boots again and again, or a stolen
+/// secret, cannot fill the database. Checked at the first event of a boot and then every
+/// [`EVENT_COUNT_EVERY`] events of it.
+pub const MAX_EVENTS_PER_STICK: u64 = 200_000;
+const EVENT_COUNT_EVERY: u64 = 256;
+
 /// How many locks the sticks share to keep their own messages in order.
 const WRITE_LOCKS: usize = 64;
 
@@ -573,11 +584,20 @@ impl Hub {
         }
         storable(body, event.seq)?;
 
+        if event.seq > MAX_EVENTS_PER_BOOT {
+            return Err(Rejection::TooManyRequests);
+        }
+
         let _one_at_a_time = self.write_lock(&id);
         let last_of_boot = self
             .store
             .last_event_of_boot(&organization, &id, &event.boot_id)?;
         let last_of_boot = last_of_boot.as_ref();
+        if (last_of_boot.is_none() || event.seq.is_multiple_of(EVENT_COUNT_EVERY))
+            && self.store.event_count(&organization, &id)? >= MAX_EVENTS_PER_STICK
+        {
+            return Err(Rejection::TooManyRequests);
+        }
         let integrity = match last_of_boot {
             Some(last) if event.seq <= last.event.seq => {
                 return Err(Rejection::Conflict(format!(

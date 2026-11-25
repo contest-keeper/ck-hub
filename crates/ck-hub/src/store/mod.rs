@@ -290,6 +290,9 @@ pub trait Store: Send + Sync {
     /// Every event of the stick, in the order they were received.
     fn events(&self, organization: &str, stick: &StickId) -> Result<Vec<StoredEvent>, StoreError>;
 
+    /// How many events the stick has stored.
+    fn event_count(&self, organization: &str, stick: &StickId) -> Result<u64, StoreError>;
+
     /// Keeps the submissions the judge reported that are not kept yet. Returns how many were new.
     fn add_judge_submissions(
         &self,

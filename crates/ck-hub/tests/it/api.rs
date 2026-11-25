@@ -5,8 +5,8 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use ck_hub::{
-    Download, Hub, Image, Judge, MemoryStore, ONLINE_WINDOW_SECONDS, PasswordCost, Registry, Role,
-    StaticImages, Store, router,
+    Download, Hub, Image, Judge, MAX_EVENTS_PER_BOOT, MAX_EVENTS_PER_STICK, MemoryStore,
+    ONLINE_WINDOW_SECONDS, PasswordCost, Registry, Role, StaticImages, Store, router,
 };
 use ck_protocol::{
     Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, RecorderStatus, RecordingMode,
@@ -1516,4 +1516,52 @@ async fn the_page_has_the_command_buttons_with_a_confirm_step() {
     // Only admins and owners see the buttons, and nothing is put into the page as markup.
     assert!(page.contains("myRole === \"owner\" || myRole === \"admin\""));
     assert!(!page.contains("innerHTML"));
+}
+
+#[tokio::test]
+async fn a_boot_over_its_event_budget_is_told_to_wait_and_a_sequence_at_the_limit_is_kept() {
+    let setup = setup();
+    let (status, _) = send_event(&setup.app, "b", MAX_EVENTS_PER_BOOT + 1, "", "ana").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let (status, _) = send_event(&setup.app, "b", MAX_EVENTS_PER_BOOT, "", "ana").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_stick_over_its_total_event_budget_is_told_to_wait_at_the_start_of_a_boot() {
+    let dir = TempDir::new().expect("temp dir");
+    fs::write(
+        dir.path().join("registry.json"),
+        registry_json(&[("stick-a", TOKEN_A, "Team A", 1)]),
+    )
+    .expect("registry");
+    let registry = Registry::open(dir.path().join("registry.json")).expect("open");
+    let store = Arc::new(MemoryStore::default());
+    let hub = Hub::new(
+        registry,
+        store.clone(),
+        None,
+        Box::new(OffsetDateTime::now_utc),
+    );
+    let organization = store
+        .ensure_organization("default", "Default")
+        .expect("org");
+    let stick = StickId::parse("stick-a").expect("id");
+    for seq in 1..=MAX_EVENTS_PER_STICK {
+        let event = Event {
+            stick_id: stick.clone(),
+            boot_id: "old".to_owned(),
+            seq,
+            prev_hash: String::new(),
+            sent_at: "2026-11-12T10:00:00Z".parse().expect("time"),
+            kind: EventKind::Login,
+            payload: serde_json::json!({}),
+        };
+        store
+            .append_event(&organization.id, event, OffsetDateTime::now_utc(), None)
+            .expect("fill");
+    }
+    let app = router(Arc::new(hub));
+    let (status, _) = send_event(&app, "new", 1, FIRST_PREV_HASH, "ana").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 }

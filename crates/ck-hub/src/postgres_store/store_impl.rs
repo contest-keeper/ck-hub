@@ -165,7 +165,8 @@ impl Store for PostgresStore {
             transaction.execute(
                 "INSERT INTO events
                      (organization_id, stick_id, boot_id, seq, received_at, integrity, event)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT (organization_id, stick_id, boot_id, seq) DO NOTHING",
                 &[
                     &organization,
                     &event.stick_id.as_str(),
@@ -178,6 +179,16 @@ impl Store for PostgresStore {
             )
         })?;
         Ok(())
+    }
+
+    fn event_count(&self, organization: &str, stick: &StickId) -> Result<u64, StoreError> {
+        let row = self.in_org(organization, |transaction| {
+            transaction.query_one(
+                "SELECT count(*) FROM events WHERE organization_id = $1 AND stick_id = $2",
+                &[&organization, &stick.as_str()],
+            )
+        })?;
+        u64::try_from(row.get::<_, i64>(0)).map_err(failed)
     }
 
     fn events(&self, organization: &str, stick: &StickId) -> Result<Vec<StoredEvent>, StoreError> {

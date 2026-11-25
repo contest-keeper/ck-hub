@@ -286,6 +286,13 @@ impl Store for MemoryStore {
         Ok(())
     }
 
+    fn event_count(&self, organization: &str, stick: &StickId) -> Result<u64, StoreError> {
+        let events = self.events.lock().expect("events lock");
+        Ok(events
+            .get(&(organization.to_owned(), stick.clone()))
+            .map_or(0, |kept| kept.len() as u64))
+    }
+
     fn events(&self, organization: &str, stick: &StickId) -> Result<Vec<StoredEvent>, StoreError> {
         Ok(self
             .events
