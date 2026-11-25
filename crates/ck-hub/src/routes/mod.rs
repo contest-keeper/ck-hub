@@ -93,6 +93,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route("/assets/app.js", get(app_js))
         .route("/assets/app.css", get(app_css))
         .route("/forge/connect", get(page))
+        .route("/people", get(page))
         .route("/download/forge", get(download_forge))
         .route("/download/image", get(page))
         .route("/download/image/{id}", get(download_image))

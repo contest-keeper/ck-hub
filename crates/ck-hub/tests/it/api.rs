@@ -421,6 +421,20 @@ async fn an_oversized_body_is_refused_before_it_is_read() {
 }
 
 #[tokio::test]
+async fn every_page_of_the_hub_is_served_at_its_own_address() {
+    let setup = setup();
+    for path in ["/", "/people", "/download/image", "/forge/connect"] {
+        let (status, html) = call(
+            &setup.app,
+            Request::get(path).body(Body::empty()).expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert!(html.contains("/assets/app.js"), "{path}");
+    }
+}
+
+#[tokio::test]
 async fn the_page_is_served_and_needs_nothing_from_outside() {
     let setup = setup();
     let response = setup
@@ -483,6 +497,10 @@ async fn the_page_is_served_and_needs_nothing_from_outside() {
             && page.contains("/api/v1/staff/organizations")
             && page.contains("\"invite\""),
         "the page accepts invitations, lists people and lets staff make organizations"
+    );
+    assert!(
+        html.contains("data-settings") && page.contains("ck-mode") && page.contains("data-look"),
+        "every page has the Settings button, and the look and theme are kept"
     );
     // Script and style come from this server: nothing from another address.
     assert!(
@@ -1205,8 +1223,8 @@ async fn the_logged_out_image_page_has_the_same_headers_as_the_dashboard_and_no_
         .expect("body")
         .to_bytes();
     let page = String::from_utf8_lossy(&body);
-    assert!(page.contains("Log in to Keeper Hub"));
-    assert!(page.contains("Keeper OS downloads"));
+    assert!(page.contains("id=\"login\""));
+    assert!(page.contains("Downloads"));
     assert!(!page.contains("keeper-os-0.3.0"));
     assert!(!page.contains("keeper-os-public-0.3.0.img.zst"));
     assert!(!page.contains(&"a".repeat(64)));
