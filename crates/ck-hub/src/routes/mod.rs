@@ -21,7 +21,7 @@ use crate::accounts::{
 };
 use crate::commands::CommandError;
 use crate::enrol::{EnrolError, EnrolmentSpec};
-use crate::forge::ForgeError;
+use crate::forge::{ForgeError, PairingError, PairingState};
 use crate::hub::{Hub, Rejection};
 use crate::invite::{AcceptError, InviteError, MemberError, StaffError};
 use crate::profiles::{
@@ -45,7 +45,8 @@ mod sticks;
 
 use accounts::{
     SESSION_COOKIE, TokenBody, accepted_mail, bad_link, bad_request, forge_connect, forge_token,
-    login, logout, me, no_mail, password_reset, password_reset_confirm, sign_up, verify_email,
+    login, logout, me, no_mail, pairing_answer, pairing_poll, pairing_start, password_reset,
+    password_reset_confirm, sign_up, verify_email,
 };
 use commands::{commands_of, one_command, send_command_in};
 use downloads::{download_forge, download_image, download_source_offer, list_images};
@@ -187,6 +188,9 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/me", get(me))
         .route("/api/v1/forge/connect", post(forge_connect))
         .route("/api/v1/forge/token", post(forge_token))
+        .route("/api/v1/forge/pairings", post(pairing_start))
+        .route("/api/v1/forge/pairings/poll", post(pairing_poll))
+        .route("/api/v1/forge/pairings/answer", post(pairing_answer))
         .route("/api/v1/profiles", get(list_profiles))
         .route(
             "/api/v1/profiles/{id}",
