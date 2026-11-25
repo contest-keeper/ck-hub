@@ -108,6 +108,8 @@ pub struct Access {
 struct Failures {
     count: u32,
     since: OffsetDateTime,
+    /// How long this count lasts; counters with different windows share the map.
+    window: i64,
 }
 
 /// What the Hub keeps for accounts besides the database.
@@ -119,6 +121,8 @@ pub struct Accounts {
     failures: Mutex<HashMap<String, Failures>>,
     /// Codes the forge may trade for a session, see `forge.rs`.
     pub(crate) forge_codes: Mutex<crate::forge::OpenCodes>,
+    /// Pairing codes waiting for an answer in the browser, see `forge.rs`.
+    pub(crate) forge_pairings: Mutex<crate::forge::OpenPairings>,
 }
 
 impl Accounts {
@@ -128,30 +132,57 @@ impl Accounts {
             dummy_hash: hash(cost, "a password nobody uses").expect("the dummy hash"),
             failures: Mutex::new(HashMap::new()),
             forge_codes: Mutex::new(HashMap::new()),
+            forge_pairings: Mutex::new(HashMap::new()),
         }
     }
 
     fn blocked(&self, key: &str, now: OffsetDateTime, max: u32, window: i64) -> bool {
         let failures = self.failures.lock().expect("failures lock");
+        Self::over(&failures, key, now, max, window)
+    }
+
+    fn over(
+        failures: &HashMap<String, Failures>,
+        key: &str,
+        now: OffsetDateTime,
+        max: u32,
+        window: i64,
+    ) -> bool {
         failures
             .get(key)
             .is_some_and(|f| f.count >= max && now < f.since + Duration::seconds(window))
     }
 
     fn fail(&self, key: &str, now: OffsetDateTime, window: i64) {
-        let mut failures = self.failures.lock().expect("failures lock");
-        // Failures older than the longest lockout no longer count, so they are dropped here and
-        // the map cannot grow for ever.
-        failures.retain(|_, f| now < f.since + Duration::seconds(NAME_LOCKOUT_SECONDS));
+        Self::record(
+            &mut self.failures.lock().expect("failures lock"),
+            key,
+            now,
+            window,
+        );
+    }
+
+    fn record(
+        failures: &mut HashMap<String, Failures>,
+        key: &str,
+        now: OffsetDateTime,
+        window: i64,
+    ) {
+        // Each count is dropped when its own window is over, not earlier: a shorter-lived count
+        // must not cut a longer one (pairing tries last 600 s). Dropping keeps the map from
+        // growing for ever.
+        failures.retain(|_, f| now < f.since + Duration::seconds(f.window));
         let entry = failures.entry(key.to_owned()).or_insert(Failures {
             count: 0,
             since: now,
+            window,
         });
         // A new window starts when the old one is over.
         if now >= entry.since + Duration::seconds(window) {
             *entry = Failures {
                 count: 0,
                 since: now,
+                window,
             };
         }
         entry.count += 1;
@@ -159,6 +190,39 @@ impl Accounts {
 
     pub(crate) fn clear(&self, key: &str) {
         self.failures.lock().expect("failures lock").remove(key);
+    }
+
+    /// Whether `key` is still under `max` counted events in `window` seconds. Does not count.
+    pub(crate) fn under_limit(
+        &self,
+        key: &str,
+        now: OffsetDateTime,
+        max: u32,
+        window: i64,
+    ) -> bool {
+        !self.blocked(key, now, max, window)
+    }
+
+    /// Counts one event for `key` when it is still under `max`, in one step so that parallel
+    /// callers cannot all pass the check before any of them counts. False when over the limit.
+    pub(crate) fn count_if_under(
+        &self,
+        key: &str,
+        now: OffsetDateTime,
+        max: u32,
+        window: i64,
+    ) -> bool {
+        let mut failures = self.failures.lock().expect("failures lock");
+        if Self::over(&failures, key, now, max, window) {
+            return false;
+        }
+        Self::record(&mut failures, key, now, window);
+        true
+    }
+
+    /// Counts one event for `key`.
+    pub(crate) fn count(&self, key: &str, now: OffsetDateTime, window: i64) {
+        self.fail(key, now, window);
     }
 
     /// Whether one more mail may go to `email`. Counts the mail when it may.
@@ -508,6 +572,37 @@ mod tests {
 
     fn remembered(hub: &Hub) -> usize {
         hub.accounts.failures.lock().expect("failures lock").len()
+    }
+
+    #[test]
+    fn a_long_count_survives_the_end_of_a_shorter_one() {
+        let now = Arc::new(Mutex::new(OffsetDateTime::now_utc()));
+        let hub = hub(Arc::clone(&now));
+        let accounts = &hub.accounts;
+        let start = *now.lock().expect("clock");
+
+        for _ in 0..2 {
+            accounts.count("long", start, 600);
+        }
+        // A count with a window shorter than the long one starts after the shorter lockout time.
+        let later = start + Duration::seconds(NAME_LOCKOUT_SECONDS + 1);
+        accounts.count("short", later, 60);
+        assert_eq!(
+            accounts.failures.lock().expect("failures lock")["long"].count,
+            2,
+            "the long count is kept for its whole window"
+        );
+    }
+
+    #[test]
+    fn counting_stops_at_the_limit_in_one_step() {
+        let now = Arc::new(Mutex::new(OffsetDateTime::now_utc()));
+        let hub = hub(Arc::clone(&now));
+        let at = *now.lock().expect("clock");
+        let allowed = (0..5)
+            .filter(|_| hub.accounts.count_if_under("k", at, 3, 60))
+            .count();
+        assert_eq!(allowed, 3);
     }
 
     #[test]

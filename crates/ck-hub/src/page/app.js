@@ -864,16 +864,71 @@ async function loadImageDownloads() {
 
 imageRetry.addEventListener("click", loadImageDownloads);
 
+// Keeper Forge opens /forge/connect?code=K7QM-42XP: the code it shows on its own screen. The older
+// /forge/connect?port=..&state=.. still works for a Forge that has not been updated.
+const pairingCode = forgeAsk ? (forgeAsk.get("code") || "").toUpperCase() : "";
+const validPairingCode = /^[A-Z0-9]{4}-?[A-Z0-9]{4}$/.test(pairingCode);
+
 function showForge(email, organization) {
   document.getElementById("forge-who").textContent = email;
   document.getElementById("forge-org").textContent = organization || "None yet";
+  const pairing = forgeAsk.has("code");
+  document.getElementById("forge-code-box").hidden = !pairing;
+  if (pairing) document.getElementById("forge-code").textContent = pairingCode;
+  document.getElementById("forge-yes").textContent = pairing ? "Yes, connect Forge" : "Connect Keeper Forge";
+  document.getElementById("forge-no").textContent = pairing ? "It is not my code" : "Cancel";
+  if (pairing && !validPairingCode) {
+    forgeMessage("bad", "This link has no valid code. Start the sign-in again in Keeper Forge.");
+    document.getElementById("forge-yes").disabled = true;
+  }
 }
 
-document.getElementById("forge-yes").addEventListener("click", async () => {
+function forgeMessage(kind, text) {
   const result = document.getElementById("forge-result");
+  result.hidden = false;
+  result.className = "banner " + kind;
+  result.textContent = text;
+}
+
+function forgeDone(text) {
+  forgeMessage("ok", text);
+  document.getElementById("forge-yes").hidden = true;
+  document.getElementById("forge-no").hidden = true;
+}
+
+async function answerPairing(approve) {
+  const response = await fetch("/api/v1/forge/pairings/answer", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code: pairingCode, approve }),
+  });
+  if (response.ok) return true;
+  document.getElementById("forge-yes").disabled = false;
+  forgeMessage("bad", response.status === 429 ? "Too many tries. Wait a few minutes, then start again in Keeper Forge."
+    : "That code is not waiting any more. Start the sign-in again in Keeper Forge.");
+  return false;
+}
+
+document.getElementById("forge-no").addEventListener("click", async () => {
+  if (!forgeAsk.has("code")) { location.assign("/"); return; }
+  document.getElementById("forge-yes").disabled = true;
+  try { if (await answerPairing(false)) forgeDone("Not connected. If you did not start this, you can close the tab."); }
+  catch (error) {
+    // An invalid code stays unanswerable; a valid one can still be approved after a network failure.
+    document.getElementById("forge-yes").disabled = !validPairingCode;
+    forgeMessage("bad", "Could not reach the Hub. Check the connection and try again.");
+  }
+});
+
+document.getElementById("forge-yes").addEventListener("click", async () => {
   const button = document.getElementById("forge-yes");
-  const fail = (text) => { result.hidden = false; result.className = "banner bad"; result.textContent = text; button.disabled = false; };
+  const fail = (text) => { forgeMessage("bad", text); button.disabled = false; };
   button.disabled = true;
+  if (forgeAsk.has("code")) {
+    try { if (await answerPairing(true)) forgeDone("Keeper Forge is connected. You can close this tab; Keeper Forge carries on by itself within a few seconds."); }
+    catch (error) { fail("Could not reach the Hub. Check the connection and try again."); }
+    return;
+  }
   let response;
   try {
     response = await fetch("/api/v1/forge/connect", {
@@ -884,11 +939,7 @@ document.getElementById("forge-yes").addEventListener("click", async () => {
   } catch (error) { fail("Could not reach the Hub. Check the connection and try again."); return; }
   if (!response.ok) { fail("That request did not come from Keeper Forge. Start the sign-in again in Keeper Forge."); return; }
   const { redirect } = await response.json();
-  result.hidden = false;
-  result.className = "banner ok";
-  result.textContent = "Connected. You can close this tab and go back to Keeper Forge.";
-  button.hidden = true;
-  document.getElementById("forge-no").hidden = true;
+  forgeDone("Connected. You can close this tab and go back to Keeper Forge.");
   location.assign(redirect);
 });
 

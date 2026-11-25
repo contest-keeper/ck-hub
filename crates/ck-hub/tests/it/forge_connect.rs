@@ -226,3 +226,158 @@ async fn the_connect_page_is_served_without_a_session() {
     let response = s.app.clone().oneshot(request).await.expect("response");
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+async fn post_json(
+    app: &Router,
+    path: &str,
+    cookie: Option<&str>,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut request = Request::post(path).header("content-type", "application/json");
+    if let Some(cookie) = cookie {
+        request = request.header("cookie", cookie);
+    }
+    call(
+        app,
+        request.body(Body::from(body.to_string())).expect("request"),
+    )
+    .await
+}
+
+async fn start(app: &Router) -> (String, String) {
+    let (status, answer) = post_json(app, "/api/v1/forge/pairings", None, json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(answer["expires_in"], 600);
+    (
+        answer["code"].as_str().expect("code").to_owned(),
+        answer["poll_key"].as_str().expect("key").to_owned(),
+    )
+}
+
+async fn poll(app: &Router, key: &str) -> (StatusCode, Value) {
+    post_json(
+        app,
+        "/api/v1/forge/pairings/poll",
+        None,
+        json!({ "poll_key": key }),
+    )
+    .await
+}
+
+async fn answer(app: &Router, cookie: Option<&str>, code: &str, approve: bool) -> StatusCode {
+    post_json(
+        app,
+        "/api/v1/forge/pairings/answer",
+        cookie,
+        json!({ "code": code, "approve": approve }),
+    )
+    .await
+    .0
+}
+
+#[tokio::test]
+async fn a_pairing_code_connects_forge_once_the_admin_agrees() {
+    let s = setup();
+    let (code, key) = start(&s.app).await;
+    // Eight letters and digits without characters that look alike, shown as two groups of four.
+    assert_eq!(code.len(), 9);
+    assert_eq!(code.as_bytes()[4], b'-');
+    assert!(
+        code.chars()
+            .all(|c| c == '-' || "ABCDEFGHJKLMNPQRSTUVWXYZ23456789".contains(c))
+    );
+    assert_eq!(poll(&s.app, &key).await.1["status"], "waiting");
+
+    let cookie = cookie_for(&s.app, "ana@example.org").await;
+    // The page may send the code in lower case, with or without the dash.
+    let sloppy = code.to_lowercase().replace('-', " ");
+    assert_eq!(
+        answer(&s.app, Some(&cookie), &sloppy, true).await,
+        StatusCode::NO_CONTENT
+    );
+
+    let (status, done) = poll(&s.app, &key).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(done["status"], "approved");
+    assert_eq!(done["email"], "ana@example.org");
+    assert_eq!(done["expires_in"], 12 * 3600);
+    let token = done["token"].as_str().expect("token");
+    let me = Request::get("/api/v1/me")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("request");
+    assert_eq!(call(&s.app, me).await.0, StatusCode::OK);
+    // The pairing is used up: the same key gets nothing again, and the code is gone.
+    assert_eq!(poll(&s.app, &key).await.0, StatusCode::GONE);
+    assert_eq!(
+        answer(&s.app, Some(&cookie), &code, true).await,
+        StatusCode::GONE
+    );
+}
+
+#[tokio::test]
+async fn a_pairing_nobody_agrees_to_ends_after_ten_minutes() {
+    let s = setup();
+    let (code, key) = start(&s.app).await;
+    *s.now.lock().expect("clock") += Duration::minutes(11);
+    let cookie = cookie_for(&s.app, "ana@example.org").await;
+    assert_eq!(
+        answer(&s.app, Some(&cookie), &code, true).await,
+        StatusCode::GONE
+    );
+    assert_eq!(poll(&s.app, &key).await.0, StatusCode::GONE);
+}
+
+#[tokio::test]
+async fn refusing_a_pairing_ends_it_and_no_session_is_made() {
+    let s = setup();
+    let (code, key) = start(&s.app).await;
+    let cookie = cookie_for(&s.app, "ana@example.org").await;
+    assert_eq!(
+        answer(&s.app, Some(&cookie), &code, false).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(poll(&s.app, &key).await.0, StatusCode::GONE);
+}
+
+#[tokio::test]
+async fn only_a_signed_in_person_can_answer_and_only_the_key_holder_can_collect() {
+    let s = setup();
+    let (code, key) = start(&s.app).await;
+    assert_eq!(
+        answer(&s.app, None, &code, true).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(poll(&s.app, "not-the-key").await.0, StatusCode::GONE);
+    // The code is what people read aloud; it never collects anything.
+    assert_eq!(poll(&s.app, &code).await.0, StatusCode::GONE);
+    assert_eq!(poll(&s.app, &key).await.1["status"], "waiting");
+}
+
+#[tokio::test]
+async fn guessing_codes_is_stopped_after_a_few_wrong_ones() {
+    let s = setup();
+    let (code, _key) = start(&s.app).await;
+    let cookie = cookie_for(&s.app, "vera@example.org").await;
+    for _ in 0..5 {
+        assert_eq!(
+            answer(&s.app, Some(&cookie), "AAAA-AAAA", true).await,
+            StatusCode::GONE
+        );
+    }
+    // A sixth try is refused even with the right code: a guesser cannot keep going.
+    assert_eq!(
+        answer(&s.app, Some(&cookie), &code, true).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn starting_pairings_is_limited_for_everyone_together() {
+    let s = setup();
+    for _ in 0..30 {
+        start(&s.app).await;
+    }
+    let (status, _) = post_json(&s.app, "/api/v1/forge/pairings", None, json!({})).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}

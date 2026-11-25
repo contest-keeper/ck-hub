@@ -2,9 +2,9 @@
 
 use super::{
     AccessError, Account, Arc, Deserialize, ForgeError, HeaderMap, Hub, IntoResponse, Json,
-    LoginError, MIN_PASSWORD_LENGTH, Membership, Response, SESSION_LIFETIME_HOURS, SET_COOKIE,
-    SignupError, State, StatusCode, TokenError, denied, denied_for, json, session_cookie,
-    session_token, unavailable,
+    LoginError, MIN_PASSWORD_LENGTH, Membership, PairingError, PairingState, Response,
+    SESSION_LIFETIME_HOURS, SET_COOKIE, SignupError, State, StatusCode, TokenError, denied,
+    denied_for, json, session_cookie, session_token, unavailable,
 };
 
 /// Argon2 uses about 19 MiB per hash, so only a few logins may hash at the same time; the rest
@@ -241,6 +241,90 @@ pub(super) async fn forge_token(
             bad_request("this code is not valid any more")
         }
         Ok(Err(TokenError::Unavailable)) | Err(_) => unavailable(),
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct PollBody {
+    poll_key: String,
+}
+
+#[derive(Deserialize)]
+pub(super) struct AnswerBody {
+    code: String,
+    approve: bool,
+}
+
+fn pairing_failed(error: &PairingError) -> Response {
+    match error {
+        PairingError::Ended => (
+            StatusCode::GONE,
+            Json(json!({ "error": "that code is not waiting any more" })),
+        )
+            .into_response(),
+        PairingError::TooManyAttempts => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": "too many tries, wait a few minutes" })),
+        )
+            .into_response(),
+        PairingError::Unauthorized => denied(denied_for(&AccessError::Unauthorized)),
+        PairingError::Unavailable => unavailable(),
+    }
+}
+
+/// Keeper Forge starts a pairing. Nobody is signed in yet; the code only becomes useful once an
+/// admin agrees to it in the browser.
+pub(super) async fn pairing_start(State(hub): State<Arc<Hub>>) -> Response {
+    match tokio::task::spawn_blocking(move || hub.start_pairing()).await {
+        Ok(Ok((code, poll_key))) => Json(json!({
+            "code": code,
+            "poll_key": poll_key,
+            "expires_in": crate::forge::PAIRING_LIFETIME_SECONDS,
+        }))
+        .into_response(),
+        Ok(Err(error)) => pairing_failed(&error),
+        Err(_) => unavailable(),
+    }
+}
+
+/// Keeper Forge asks whether the admin agreed. A session is handed out once.
+pub(super) async fn pairing_poll(
+    State(hub): State<Arc<Hub>>,
+    Json(body): Json<PollBody>,
+) -> Response {
+    match tokio::task::spawn_blocking(move || hub.poll_pairing(&body.poll_key)).await {
+        Ok(Ok(PairingState::Waiting)) => Json(json!({ "status": "waiting" })).into_response(),
+        Ok(Ok(PairingState::Approved(token, account))) => Json(json!({
+            "status": "approved",
+            "token": token,
+            "email": account.email,
+            "expires_in": SESSION_LIFETIME_HOURS * 3600,
+        }))
+        .into_response(),
+        Ok(Err(error)) => pairing_failed(&error),
+        Err(_) => unavailable(),
+    }
+}
+
+/// The signed-in admin agrees or refuses. The browser's cookie is the proof.
+pub(super) async fn pairing_answer(
+    State(hub): State<Arc<Hub>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    // The session is checked before the body is read, so a request without one is always a 401.
+    let Some(token) = session_token(&headers) else {
+        return denied(denied_for(&AccessError::Unauthorized));
+    };
+    let Ok(body) = serde_json::from_slice::<AnswerBody>(&body) else {
+        return bad_request("send the code and whether you agree");
+    };
+    match tokio::task::spawn_blocking(move || hub.answer_pairing(&token, &body.code, body.approve))
+        .await
+    {
+        Ok(Ok(())) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Err(error)) => pairing_failed(&error),
+        Err(_) => unavailable(),
     }
 }
 

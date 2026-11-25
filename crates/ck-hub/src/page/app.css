@@ -484,3 +484,5 @@ td .sub { display: block; }
 .b .facts { grid-template-columns: 1fr 1fr; }
 :root[data-look="classic"] .nav a, :root[data-look="classic"] .nav a:visited { color: var(--text); }
 .field .row .input { flex: 1 1 280px; width: auto; }
+.pair { align-items: center; text-align: center; gap: 6px; }
+.pair-code { font-size: 34px; letter-spacing: .14em; font-family: var(--mono); }

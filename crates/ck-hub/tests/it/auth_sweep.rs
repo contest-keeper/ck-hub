@@ -30,6 +30,10 @@ const PUBLIC: &[&str] = &[
     "/api/v1/invitations/accept",
     // The forge trades a code the person got after logging in.
     "/api/v1/forge/token",
+    // Forge starts a pairing and collects the answer with a secret only it holds; the person answers
+    // with a session, which the sweep checks.
+    "/api/v1/forge/pairings",
+    "/api/v1/forge/pairings/poll",
     // The public half of a key.
     "/api/v1/config-signing-key",
     // The list of images is public: the download itself needs a session.
