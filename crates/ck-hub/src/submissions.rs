@@ -12,7 +12,7 @@ use serde_json::Value;
 use time::{Duration, OffsetDateTime};
 
 use crate::codeforces::CodeforcesError;
-use crate::judge::{EventKey, JudgeSubmission, SubmitEvent, join_follow_ups, submit_event};
+use crate::judge::{EventKey, JudgeSubmission, SubmitEvent, submit_event};
 use crate::matcher::{Code, Verdict, code_check, match_submissions};
 use crate::store::StoredEvent;
 
@@ -237,7 +237,7 @@ fn stick_submissions(
             item.event.boot_id.clone(),
             item.event.seq,
         );
-        // A second event that only told an id joined its first one: it is not listed again.
+        // An event the Hub cannot read as a submit (no contest, say) is listed without a verdict.
         let Some(event) = events.iter().find(|event| event.key == key) else {
             if submit_event(item).is_none() {
                 submissions.push(stick_submission(item, None, false));
@@ -330,8 +330,7 @@ pub fn view(
     judged.sort_by_key(|s| (s.contest_id, s.submission_id));
     judged.dedup_by_key(|s| (s.contest_id, s.submission_id));
 
-    // The id a second event told joins the first, so one submit is one event.
-    let all_events = join_follow_ups(stored.iter().filter_map(submit_event).collect());
+    let all_events: Vec<SubmitEvent> = stored.iter().filter_map(submit_event).collect();
     // A submission the stick saw refused cannot explain one on the judge.
     let events: Vec<SubmitEvent> = all_events
         .iter()
@@ -505,8 +504,7 @@ mod tests {
             seconds,
             EventKind::Submission,
             json!({"platform": "codeforces", "username": "ana", "contest_id": "2285",
-                   "problem": problem, "accepted": true, "submission_id": id,
-                   "submitted_at": 1_800_000_000 + seconds}),
+                   "problem": problem, "accepted": true, "submission_id": id}),
         )
     }
 
@@ -535,25 +533,6 @@ mod tests {
         let down = |_: u64, _: &str| Err(CodeforcesError::Request(NOTHING_KEPT.to_owned()));
         let unknown = view(&stored, Some(&down), &|_| HashMap::new(), at(10_000));
         assert_eq!(unknown.not_on_judge, 0);
-    }
-
-    #[test]
-    fn the_id_told_in_a_second_event_joins_the_first_and_is_one_submit() {
-        let stored = vec![
-            login(0),
-            submit_with_id(2, 100, "A", None),
-            // The second event has the same submitted_at, so it is the same submit.
-            StoredEvent {
-                received_at: at(105),
-                ..submit_with_id(3, 100, "A", Some(20))
-            },
-        ];
-        let ask = |_: u64, _: &str| Ok(vec![judged(20, "A", 101)]);
-        let seen = view(&stored, Some(&ask), &|_| HashMap::new(), at(10_000));
-        assert_eq!(seen.submissions.len(), 1);
-        assert_eq!(seen.submissions[0].judge_id, Some(20));
-        assert_eq!(seen.suspect, 0);
-        assert_eq!(seen.not_on_judge, 0);
     }
 
     #[test]

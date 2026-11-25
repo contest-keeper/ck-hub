@@ -55,9 +55,7 @@ Runs in this order for each judge submission:
 
 1. Id match: a stick `submit` event whose `submission_id` equals the judge submission id.
 2. Fallback: same handle and problem, with `at` within a time window of the judge submission time.
-   ±30 s (`WINDOW` in `submissions.rs`). The stick's time is `submitted_at` (when it saw the
-   submit), else `sent_at`. The stick tells a submit at once and its id in a second event with the
-   same `submitted_at`; the Hub joins the two.
+   ±30 s (`WINDOW` in `submissions.rs`).
 3. Each stick event matches at most one judge submission.
 4. An id match whose time is outside the window is flagged too: id and time are both checked.
 5. Anything left unmatched is flagged. A stick submit the judge does not show is flagged once

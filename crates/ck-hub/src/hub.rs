@@ -19,7 +19,7 @@ use crate::contest::{self, ContestView};
 use crate::credentials::CredentialScope;
 use crate::download::Download;
 use crate::images::ImageSource;
-use crate::judge::{JudgeSubmission, SubmitEvent, join_follow_ups};
+use crate::judge::{JudgeSubmission, SubmitEvent};
 use crate::mail::Mailer;
 use crate::network::{self, NetworkView};
 use crate::recordings::Blobs;
@@ -692,16 +692,12 @@ impl Hub {
         let judged = self
             .store
             .judge_submissions(organization, "codeforces", contest_id)?;
-        let events: Vec<SubmitEvent> = join_follow_ups(
-            self.store
-                .submission_events(organization)?
-                .into_iter()
-                .filter(|event| event.contest_id == contest_id)
-                .collect(),
-        )
-        .into_iter()
-        .filter(|event| event.accepted)
-        .collect();
+        let events: Vec<SubmitEvent> = self
+            .store
+            .submission_events(organization)?
+            .into_iter()
+            .filter(|event| event.contest_id == contest_id && event.accepted)
+            .collect();
         let hashes = self
             .store
             .judge_source_hashes(organization, "codeforces", contest_id)?;
