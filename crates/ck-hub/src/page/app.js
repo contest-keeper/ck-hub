@@ -117,6 +117,7 @@ const needsLook = (stick) => !isArchived(stick) && (stick.warnings.length > 0 ||
 function fixFor(warning) {
   if (/different users/.test(warning)) return "Ask the team who was logged in. If it was not planned, tell the contest organizer.";
   if (/two machines/.test(warning)) return "Check that the stick was not copied to another disk. If it was, make a new stick in Keeper Forge.";
+  if (/do not agree with the judge/.test(warning)) return "Open the details: they show which submissions are not from this stick, or are not on the judge.";
   if (/^Settings refused/.test(warning)) return "Make this stick again in Keeper Forge if its settings are wrong.";
   if (/^Settings changed/.test(warning)) return "Someone may have edited the stick. Make it again in Keeper Forge if it should not have changed.";
   return "Open the details to see more.";
@@ -129,7 +130,7 @@ function issuesOf(stick) {
     list.push({ text: "Offline for " + span(stick.last.seconds_ago), bad: true,
       fix: "Check the power cable and the network at " + stick.last.hostname + ". It reconnects by itself." });
   }
-  for (const warning of stick.warnings) list.push({ text: warning, fix: fixFor(warning), bad: false });
+  for (const warning of stick.warnings) list.push({ text: warning, fix: fixFor(warning), bad: /do not agree with the judge/.test(warning) });
   return list;
 }
 
@@ -282,8 +283,12 @@ function proofPanel(stick) {
   }
   const data = cached.data;
   const who = data.handles.length ? " by " + data.handles.join(", ") : "";
-  const summary = el("p", data.suspect ? "bad" : "", data.submissions.length + " reported by the stick" + who + ". " +
-    (data.suspect ? data.suspect + " on Codeforces not from this stick: SUSPECT." : "Every Codeforces submission seen was made from this stick."));
+  const problems = data.suspect + data.not_on_judge;
+  const summary = el("p", problems ? "bad" : "", data.submissions.length + " reported by the stick" + who + ". " +
+    (problems ? [
+      data.suspect ? data.suspect + " on Codeforces not from this stick, or with a different time or code" : "",
+      data.not_on_judge ? data.not_on_judge + " reported by the stick but not on Codeforces" : "",
+    ].filter(Boolean).join("; ") + ": CHECK." : "Every Codeforces submission seen was made from this stick."));
   box.appendChild(summary);
   if (data.judge_note) box.appendChild(el("p", "hint", data.judge_note));
 
@@ -297,8 +302,8 @@ function proofPanel(stick) {
         s.problem || "—",
         s.language || "—",
         s.source_sha256 ? s.source_sha256 + (s.source_bytes ? " (" + s.source_bytes + " B" + (s.source_cut ? ", cut" : "") + ")" : "") : "—",
-        !s.accepted ? "refused by the site" : s.judge_id ? submissionLink(s.contest_id, s.judge_id) : "not found",
-      ], !s.accepted ? "" : s.judge_id ? "ok" : "unconfirmed"])));
+        !s.accepted ? "refused by the site" : s.judge_id ? submissionLink(s.contest_id, s.judge_id) : s.not_on_judge ? "NOT on Codeforces" : "not found yet",
+      ], !s.accepted ? "" : s.judge_id ? "ok" : s.not_on_judge ? "refused" : "unconfirmed"])));
   }
   if (data.judge.length) {
     box.appendChild(el("h4", "", "Seen on Codeforces"));
@@ -309,7 +314,7 @@ function proofPanel(stick) {
         contestLink(j.contest_id),
         j.problem,
         submissionLink(j.contest_id, j.submission_id),
-        j.from_stick ? "yes" : "SUSPECT: the stick did not report it",
+        j.from_stick ? (j.time_off ? "yes, but its time is " + Math.abs(j.time_gap_s) + " s off" : "yes") : "SUSPECT: the stick did not report it",
         codeText(j.code),
       ], j.suspect ? "refused" : "ok"])));
   }

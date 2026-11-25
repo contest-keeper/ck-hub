@@ -43,6 +43,8 @@ pub struct ContestRow {
     pub matched_by: Option<MatchedBy>,
     /// Seconds between the stick's clock and the judge's, when a stick reported it.
     pub time_gap_s: Option<i64>,
+    /// A stick reported it, but its time is further from the judge's than the window.
+    pub time_off: bool,
     pub code: Option<Code>,
     pub suspect: bool,
 }
@@ -69,6 +71,10 @@ pub fn view(
                 hashes.get(&submission.submission_id).map(String::as_str),
             )
         });
+        let time_gap_s =
+            explained.map(|event| (event.at - submission.submitted_at).whole_seconds());
+        // An id that matches does not excuse a time that does not: both are checked.
+        let time_off = time_gap_s.is_some_and(|gap| gap.abs() > WINDOW.whole_seconds());
         rows.push(ContestRow {
             submission_id: submission.submission_id,
             problem: submission.problem_index.clone(),
@@ -82,8 +88,9 @@ pub fn view(
                     MatchedBy::Time
                 }
             }),
-            time_gap_s: explained.map(|event| (event.at - submission.submitted_at).whole_seconds()),
-            suspect: explained.is_none() || code == Some(Code::Different),
+            time_gap_s,
+            time_off,
+            suspect: explained.is_none() || time_off || code == Some(Code::Different),
             code,
         });
     }
