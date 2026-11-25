@@ -913,7 +913,11 @@ document.getElementById("forge-no").addEventListener("click", async () => {
   if (!forgeAsk.has("code")) { location.assign("/"); return; }
   document.getElementById("forge-yes").disabled = true;
   try { if (await answerPairing(false)) forgeDone("Not connected. If you did not start this, you can close the tab."); }
-  catch (error) { forgeMessage("bad", "Could not reach the Hub. Check the connection and try again."); }
+  catch (error) {
+    // An invalid code stays unanswerable; a valid one can still be approved after a network failure.
+    document.getElementById("forge-yes").disabled = !validPairingCode;
+    forgeMessage("bad", "Could not reach the Hub. Check the connection and try again.");
+  }
 });
 
 document.getElementById("forge-yes").addEventListener("click", async () => {

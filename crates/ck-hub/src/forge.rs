@@ -180,7 +180,7 @@ impl Hub {
     /// about the answer with; nothing is tied to an account yet.
     pub fn start_pairing(&self) -> Result<(String, String), PairingError> {
         let now = (self.clock)();
-        if !self.accounts.under_limit(
+        if !self.accounts.count_if_under(
             "pair-start:*",
             now,
             MAX_PAIRING_STARTS,
@@ -188,8 +188,6 @@ impl Hub {
         ) {
             return Err(PairingError::TooManyAttempts);
         }
-        self.accounts
-            .count("pair-start:*", now, PAIRING_START_WINDOW_SECONDS);
         let secret = ck_crypto::generate_stick_token().expose().to_owned();
         let mut open = self.accounts.forge_pairings.lock().expect("pairings lock");
         open.retain(|_, p| now < p.ends);
@@ -224,13 +222,15 @@ impl Hub {
         })?;
         let now = (self.clock)();
         let key = format!("pair-try:{}", account.id);
+        // The pairings lock is taken before the limit is checked and kept until a wrong code is
+        // counted, so parallel answers cannot all pass the check before any of them counts.
+        let mut open = self.accounts.forge_pairings.lock().expect("pairings lock");
         if !self
             .accounts
             .under_limit(&key, now, MAX_WRONG_CODES, WRONG_CODE_WINDOW_SECONDS)
         {
             return Err(PairingError::TooManyAttempts);
         }
-        let mut open = self.accounts.forge_pairings.lock().expect("pairings lock");
         open.retain(|_, p| now < p.ends);
         let code = clean_code(code);
         if !approve {
