@@ -24,6 +24,8 @@ pub struct MemoryStore {
     boot_times: Mutex<HashMap<(String, StickId, String), FirstAndLast>>,
     events: Mutex<HashMap<(String, StickId), Vec<StoredEvent>>>,
     judge_submissions: Mutex<Vec<(String, String, JudgeSubmission)>>,
+    /// Organization, judge, contest and submission id, with the source hash.
+    judge_source_hashes: Mutex<HashMap<(String, String, u64, u64), String>>,
     users: Mutex<Vec<User>>,
     sessions: Mutex<HashMap<String, (String, OffsetDateTime)>>,
     email_tokens: Mutex<Vec<MailedToken>>,
@@ -340,6 +342,45 @@ impl Store for MemoryStore {
             .collect();
         found.sort_by_key(|s| s.submitted_at);
         Ok(found)
+    }
+
+    fn add_judge_source_hash(
+        &self,
+        organization: &str,
+        judge: &str,
+        contest_id: u64,
+        submission_id: u64,
+        source_sha256: &str,
+        _fetched_at: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        let key = (
+            organization.to_owned(),
+            judge.to_owned(),
+            contest_id,
+            submission_id,
+        );
+        let mut kept = self.judge_source_hashes.lock().expect("hashes lock");
+        if kept.contains_key(&key) {
+            return Ok(false);
+        }
+        kept.insert(key, source_sha256.to_owned());
+        Ok(true)
+    }
+
+    fn judge_source_hashes(
+        &self,
+        organization: &str,
+        judge: &str,
+        contest_id: u64,
+    ) -> Result<HashMap<u64, String>, StoreError> {
+        let kept = self.judge_source_hashes.lock().expect("hashes lock");
+        Ok(kept
+            .iter()
+            .filter(|((org, kind, contest, _), _)| {
+                org == organization && kind == judge && *contest == contest_id
+            })
+            .map(|((_, _, _, id), hash)| (*id, hash.clone()))
+            .collect())
     }
 
     fn submission_events(&self, organization: &str) -> Result<Vec<SubmitEvent>, StoreError> {
