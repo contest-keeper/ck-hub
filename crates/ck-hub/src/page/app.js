@@ -453,19 +453,26 @@ function commandPanel(stick) {
       unlock_screen: "Unlock the screen of ",
       shutdown: "Shut down ",
     }[draft.action];
-    ask.appendChild(el("p", draft.action === "shutdown" ? "bad" : "", what + name + "?" +
-      (draft.action === "shutdown" ? " The contestant loses any unsaved work." : "")));
+    const question = el("p", draft.action === "shutdown" ? "bad" : "", what + name + "?" +
+      (draft.action === "shutdown" ? " The contestant loses any unsaved work." : ""));
+    question.id = "cmd-question";
+    ask.appendChild(question);
     var yes = act("Confirm", "confirm", () => sendCommand(stick, draft), "btn sm pri");
     yes.disabled = draft.busy || (draft.action === "message" && !draft.text.trim());
     const buttons = el("div", "cmd-bar");
     buttons.appendChild(yes);
-    buttons.appendChild(act("Cancel", "cancel", () => { const was = draft.action; draft.action = null; render("act:" + was); }));
+    const cancel = act("Cancel", "cancel", () => { const was = draft.action; draft.action = null; render("act:" + was); });
+    // The panel is not live, so the focused button carries the question for screen readers.
+    for (const button of [yes, cancel]) button.setAttribute("aria-describedby", "cmd-question");
+    buttons.appendChild(cancel);
     ask.appendChild(buttons);
     box.appendChild(ask);
   }
   if (draft.archiving) {
     const ask = el("div", "cmd-confirm");
-    ask.appendChild(el("p", "", "Archive " + name + "? It stops reporting and is deleted with all its data when the time is up."));
+    const question = el("p", "", "Archive " + name + "? It stops reporting and is deleted with all its data when the time is up.");
+    question.id = "archive-question";
+    ask.appendChild(question);
     const buttons = el("div", "cmd-bar");
     for (const days of [7, 30]) {
       buttons.appendChild(act("Archive for " + days + " days", "archive-" + days, () => {
@@ -474,6 +481,7 @@ function commandPanel(stick) {
       }, "btn sm danger"));
     }
     buttons.appendChild(act("Cancel", "archive-no", () => { draft.archiving = false; render("act:archive"); }));
+    for (const button of buttons.children) button.setAttribute("aria-describedby", "archive-question");
     ask.appendChild(buttons);
     box.appendChild(ask);
   }
