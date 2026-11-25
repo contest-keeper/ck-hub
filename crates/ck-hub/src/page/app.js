@@ -647,10 +647,14 @@ const imageOlder = document.getElementById("image-older");
 const imageOlderList = document.getElementById("image-older-list");
 const imageOlderSummary = document.getElementById("image-older-summary");
 
+// What organizers call each Linux; a family not listed shows its own name capitalised.
+const LINUX_NAMES = { ubuntu: "Ubuntu", debian: "Debian", mint: "Linux Mint" };
+
 function imageItem(image) {
   const item = el("li", "tile");
-  item.appendChild(el("h2", "", image.name + " · " + image.version));
-  const details = [image.family, image.profile, image.filename, bytesText(image.size)].filter(Boolean).join(" · ");
+  const linux = LINUX_NAMES[image.family] || image.family.charAt(0).toUpperCase() + image.family.slice(1);
+  item.appendChild(el("h2", "", linux + " · " + image.version));
+  const details = [image.name, image.profile, image.filename, bytesText(image.size)].filter(Boolean).join(" · ");
   item.appendChild(el("p", "muted", details));
   const checksum = el("p", "");
   checksum.append("SHA-256 ", el("code", "", image.sha256));
