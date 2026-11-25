@@ -99,6 +99,7 @@ mod tests {
             problem_index: problem.to_owned(),
             at: at(seconds),
             submission_id: id,
+            source_sha256_norm: None,
         }
     }
 

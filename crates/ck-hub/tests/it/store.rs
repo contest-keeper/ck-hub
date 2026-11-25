@@ -700,6 +700,32 @@ fn organizations_are_kept_apart(store: &dyn Store) {
 
 /// Judge submissions are kept once, per organization, and the stick side of the matching can be
 /// read back.
+/// The hash of a source is kept once and never replaced, and stays inside its organization.
+fn source_hash_contract(store: &dyn Store, org: &str, other: &str) {
+    assert!(
+        store
+            .add_judge_source_hash(org, "codeforces", 1900, 10, "aa", time(20))
+            .expect("write")
+    );
+    assert!(
+        !store
+            .add_judge_source_hash(org, "codeforces", 1900, 10, "bb", time(21))
+            .expect("write"),
+        "a kept hash is not replaced"
+    );
+    let hashes = store
+        .judge_source_hashes(org, "codeforces", 1900)
+        .expect("read");
+    assert_eq!(hashes.len(), 1);
+    assert_eq!(hashes.get(&10).map(String::as_str), Some("aa"));
+    assert!(
+        store
+            .judge_source_hashes(other, "codeforces", 1900)
+            .expect("read")
+            .is_empty()
+    );
+}
+
 fn judge_contract(store: &dyn Store) {
     let id = unique();
     let make = |tag: &str| {
@@ -759,6 +785,8 @@ fn judge_contract(store: &dyn Store) {
             .expect("read"),
         Vec::new()
     );
+
+    source_hash_contract(store, &org, &other);
 
     // What sticks said: two sticks' Codeforces submits come back in the order received; a login,
     // another judge's submit and another organization's submit do not.

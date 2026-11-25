@@ -82,4 +82,4 @@ pub use store::{
     StoreError, StoredEvent, TokenPurpose, User, Wallpaper,
 };
 pub use submissions::{JudgeRow, StickSubmission, SubmissionsView};
-pub use watcher::{WatchError, poll_once, run as watch};
+pub use watcher::{WatchError, hash_sources, poll_once, run as watch};
