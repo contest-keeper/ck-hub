@@ -27,6 +27,7 @@ jobs:
     secrets:
       registry_token: ${{ secrets.GHCR_PULL_TOKEN }}
       cloudflare_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      config_signing_key: ${{ secrets.CK_CONFIG_SIGNING_KEY }}
     with:
       environment: develop
       infra_ref: develop
