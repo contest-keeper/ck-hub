@@ -618,3 +618,21 @@ async fn an_unsigned_chunk_is_refused_before_its_body_is_read() {
     let (code, _, _) = call(&s.app, request).await;
     assert_eq!(code, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn a_duration_the_database_cannot_keep_is_a_bad_request() {
+    let s = setup(true);
+    let data = bytes_of(10);
+    let body = json!({
+        "file": "a.mkv", "kind": "video", "size": data.len(), "sha256": sha(&data),
+        "duration_s": u64::MAX
+    })
+    .to_string();
+    let request = Request::post("/api/v1/recordings")
+        .header(STICK_HEADER, "stick-a")
+        .header(SIGNATURE_HEADER, sign("token-of-stick-a", body.as_bytes()))
+        .body(Body::from(body))
+        .expect("request");
+    let (code, _, _) = call(&s.app, request).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+}

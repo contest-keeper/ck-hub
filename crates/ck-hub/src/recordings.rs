@@ -590,6 +590,14 @@ impl Hub {
         if request.size > MAX_FILE_BYTES {
             return Err(RecordingError::TooBig);
         }
+        // PostgreSQL cannot keep it; refused here, the stick is told once instead of getting a 503
+        // and retrying for ever.
+        if request
+            .duration_s
+            .is_some_and(|s| i64::try_from(s).is_err())
+        {
+            return Err(RecordingError::BadRequest("the duration is not valid"));
+        }
         let existing = self.store.recordings_of(&organization, &stick, 10_000)?;
         if let Some(same) = existing.iter().find(|r| r.file == request.file) {
             if same.size != request.size || same.sha256 != request.sha256 {
