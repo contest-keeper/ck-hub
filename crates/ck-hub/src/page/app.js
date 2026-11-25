@@ -341,7 +341,7 @@ async function sendCommand(stick, draft) {
   // The panel is rebuilt on every draw, so the result is spoken from a region that stays in the page.
   const status = document.getElementById("cmd-status");
   status.textContent = "";
-  status.textContent = draft.note;
+  status.textContent = teamName(stick) + " machine " + (stick.machine_number ?? "?") + ": " + draft.note;
   render();
 }
 
