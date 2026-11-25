@@ -57,8 +57,9 @@ pub fn poll_once(
 /// judge's page and keeps its hash, at most `limit` per call. Returns how many were kept. Before the
 /// end of the contest nothing is read: the code is not public then.
 ///
-/// A submission whose page shows no source is tried again on the next call. A failure stops the pass
-/// with an error; what was kept stays.
+/// A submission whose page shows no source is tried again later. `round` counts the calls: each one
+/// starts further along the waiting list, so a run of pages that show no source cannot keep the ones
+/// after it from being read. A failure stops the pass with an error; what was kept stays.
 ///
 /// # Errors
 /// The judge or the store failing.
@@ -68,19 +69,26 @@ pub fn hash_sources(
     organization: &str,
     contest_id: u64,
     limit: usize,
+    round: usize,
     pause: Duration,
 ) -> Result<usize, WatchError> {
+    // The call before this one was a request too, and the judge allows about one every two seconds.
+    sleep(pause);
     if judge.phase(contest_id)? != "FINISHED" {
         return Ok(0);
     }
     let known = store.judge_source_hashes(organization, "codeforces", contest_id)?;
-    let waiting = store
+    let mut waiting: Vec<_> = store
         .judge_submissions(organization, "codeforces", contest_id)?
         .into_iter()
         .filter(|submission| !known.contains_key(&submission.submission_id))
-        .take(limit);
+        .collect();
+    if !waiting.is_empty() {
+        let by = round.saturating_mul(limit) % waiting.len();
+        waiting.rotate_left(by);
+    }
     let mut kept = 0;
-    for submission in waiting {
+    for submission in waiting.into_iter().take(limit) {
         sleep(pause);
         if let Some(hash) = judge.source_hash(contest_id, submission.submission_id)? {
             store.add_judge_source_hash(
@@ -109,13 +117,16 @@ pub fn run(
     max_wait: Duration,
 ) {
     let mut wait = interval;
+    let mut round = 0usize;
     loop {
+        round = round.wrapping_add(1);
         let pause = Duration::from_secs(2);
         let result =
             poll_once(client, store, organization, contest_id, 100, pause).and_then(|new| {
                 // `shortcut:` 50 pages per round so the next poll is not far behind; raise it if a
                 // big contest takes too many rounds to hash.
-                let hashed = hash_sources(client, store, organization, contest_id, 50, pause)?;
+                let hashed =
+                    hash_sources(client, store, organization, contest_id, 50, round, pause)?;
                 Ok((new, hashed))
             });
         match result {
@@ -146,6 +157,8 @@ mod tests {
         broken: Option<u64>,
         /// The submission whose page shows no source, if any.
         hidden: Option<u64>,
+        /// More submissions whose pages show no source.
+        hidden_all: Vec<u64>,
         calls: Cell<usize>,
     }
 
@@ -159,7 +172,8 @@ mod tests {
             if self.broken == Some(id) {
                 return Err(CodeforcesError::Request("down".to_owned()));
             }
-            Ok((self.hidden != Some(id)).then(|| format!("hash-{id}")))
+            let shown = self.hidden != Some(id) && !self.hidden_all.contains(&id);
+            Ok(shown.then(|| format!("hash-{id}")))
         }
     }
 
@@ -168,6 +182,7 @@ mod tests {
             phase,
             broken,
             hidden,
+            hidden_all: Vec::new(),
             calls: Cell::new(0),
         }
     }
@@ -192,7 +207,7 @@ mod tests {
     }
 
     fn run_pass(judge: &FakeJudge, store: &MemoryStore) -> Result<usize, WatchError> {
-        hash_sources(judge, store, "org", 7, 50, Duration::ZERO)
+        hash_sources(judge, store, "org", 7, 50, 0, Duration::ZERO)
     }
 
     #[test]
@@ -218,6 +233,24 @@ mod tests {
         let shown = judge("FINISHED", None, None);
         assert_eq!(run_pass(&shown, &store).expect("pass"), 1);
         assert_eq!(shown.calls.get(), 1);
+    }
+
+    #[test]
+    fn pages_without_a_source_do_not_starve_the_ones_after_them() {
+        let store = store_with(&[1, 2, 3]);
+        // Two pages show no source and only one page is read per round.
+        let hidden = FakeJudge {
+            hidden_all: vec![1, 2],
+            ..judge("FINISHED", None, None)
+        };
+        let kept = |round| hash_sources(&hidden, &store, "org", 7, 1, round, Duration::ZERO);
+        assert_eq!(kept(0).expect("round"), 0);
+        assert_eq!(kept(1).expect("round"), 0);
+        assert_eq!(kept(2).expect("round"), 1, "the third was reached");
+        let hashes = store
+            .judge_source_hashes("org", "codeforces", 7)
+            .expect("hashes");
+        assert!(hashes.contains_key(&3));
     }
 
     #[test]
