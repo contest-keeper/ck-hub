@@ -144,7 +144,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/recordings/{id}", get(upload_status))
         .route(
             "/api/v1/recordings/{id}/chunks/{index}",
-            axum::routing::put(put_chunk).layer(DefaultBodyLimit::max(CHUNK_BYTES + 1)),
+            axum::routing::put(put_chunk),
         )
         .route("/api/v1/recordings/{id}/complete", post(complete_upload))
         .route(

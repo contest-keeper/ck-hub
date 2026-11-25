@@ -653,6 +653,24 @@ impl Hub {
         Ok(UploadStatus::of(&recording))
     }
 
+    /// Checks who sends chunk `index` before its body is read.
+    ///
+    /// # Errors
+    /// [`RecordingError::Unauthorized`] for an unknown stick or a bad signature.
+    pub fn check_chunk_sender(
+        &self,
+        stick_header: Option<&str>,
+        signature: Option<&str>,
+        id: &str,
+        index: u32,
+        chunk_sha256: &str,
+    ) -> Result<(), RecordingError> {
+        self.blobs()?;
+        let text = signed_text("chunk", &[id, &index.to_string(), chunk_sha256]);
+        self.stick_for_upload(stick_header, signature, text.as_bytes())
+            .map(|_| ())
+    }
+
     /// Takes chunk `index` of a recording. A chunk the Hub already has is answered as accepted
     /// without being written again.
     ///

@@ -600,3 +600,21 @@ async fn deleting_an_archived_stick_removes_its_recording_files_from_storage() {
     );
     assert!(s.blobs.names().is_empty(), "{:?}", s.blobs.names());
 }
+
+#[tokio::test]
+async fn an_unsigned_chunk_is_refused_before_its_body_is_read() {
+    let s = setup(true);
+    let data = bytes_of(CHUNK_BYTES + 10);
+    let (_, started) = start(&s.app, "stick-a", "token-of-stick-a", "big.mkv", &data).await;
+    let id = started["id"].as_str().expect("id").to_owned();
+    let big = bytes_of(CHUNK_BYTES + 2);
+    let digest = sha(&big);
+    let request = Request::put(format!("/api/v1/recordings/{id}/chunks/0"))
+        .header(STICK_HEADER, "stick-a")
+        .header(SIGNATURE_HEADER, "00")
+        .header("x-ck-chunk-sha256", digest)
+        .body(Body::from(big))
+        .expect("request");
+    let (code, _, _) = call(&s.app, request).await;
+    assert_eq!(code, StatusCode::UNAUTHORIZED);
+}
