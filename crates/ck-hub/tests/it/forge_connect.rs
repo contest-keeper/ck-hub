@@ -381,3 +381,22 @@ async fn starting_pairings_is_limited_for_everyone_together() {
     let (status, _) = post_json(&s.app, "/api/v1/forge/pairings", None, json!({})).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 }
+
+#[tokio::test]
+async fn one_account_cannot_fill_the_shared_cap_of_open_codes() {
+    let s = setup();
+    let vera = cookie_for(&s.app, "vera@example.org").await;
+    let ana = cookie_for(&s.app, "ana@example.org").await;
+    let mut first = String::new();
+    for round in 0..1100 {
+        let (status, answer) = connect(&s.app, Some(&vera), 49321, STATE).await;
+        assert_eq!(status, StatusCode::OK, "round {round}");
+        if round == 0 {
+            first = code_of(answer["redirect"].as_str().expect("redirect"));
+        }
+    }
+    // Another account still gets a code, and the first one of the flood no longer works.
+    let (status, _) = connect(&s.app, Some(&ana), 49321, STATE).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(trade(&s.app, &first).await.0, StatusCode::BAD_REQUEST);
+}

@@ -120,7 +120,9 @@ impl Hub {
         let now = (self.clock)();
         let code = ck_crypto::generate_stick_token().expose().to_owned();
         let mut open = self.accounts.forge_codes.lock().expect("codes lock");
-        open.retain(|_, (_, ends)| now < *ends);
+        // One open code per account: a code is a cheap way to fill the shared cap, and a signed-in
+        // account that asks again only needs the newest one.
+        open.retain(|_, (owner, ends)| now < *ends && *owner != account.id);
         if open.len() >= MAX_OPEN_CODES {
             return Err(ForgeError::Unavailable);
         }
