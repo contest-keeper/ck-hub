@@ -484,6 +484,10 @@ async fn the_page_is_served_and_needs_nothing_from_outside() {
             && page.contains("\"invite\""),
         "the page accepts invitations, lists people and lets staff make organizations"
     );
+    assert!(
+        html.contains("settings-slot") && page.contains("ck-mode") && page.contains("data-look"),
+        "every page has the Settings button, and the look and theme are kept"
+    );
     // Script and style come from this server: nothing from another address.
     assert!(
         !page.contains("http://") && !page.contains("https://"),

@@ -898,17 +898,6 @@ document.getElementById("org").addEventListener("change", (event) => {
   refresh();
 });
 
-function setTheme(theme) {
-  document.documentElement.dataset.theme = theme;
-  document.getElementById("theme-classic").setAttribute("aria-pressed", String(theme === "classic"));
-  document.getElementById("theme-modern").setAttribute("aria-pressed", String(theme === "modern"));
-  try { localStorage.setItem("ck-theme", theme); } catch (error) { /* the choice lasts until the page closes */ }
-}
-
-document.getElementById("theme-classic").addEventListener("click", () => setTheme("classic"));
-document.getElementById("theme-modern").addEventListener("click", () => setTheme("modern"));
-setTheme(document.documentElement.dataset.theme);
-
 document.getElementById("search").addEventListener("input", (event) => {
   query = event.target.value.trim().toLowerCase();
   render();

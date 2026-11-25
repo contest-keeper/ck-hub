@@ -1,1 +1,108 @@
-try { if (localStorage.getItem("ck-theme") === "classic") document.documentElement.dataset.theme = "classic"; } catch (error) { /* the default look stays */ }
+// Look (modern = "New", classic) and mode (light, dark) are set before first paint, so the page never flashes the wrong one.
+// The Settings button and its panel are built here, so every page gets the same one.
+(function () {
+  var root = document.documentElement;
+  function read(key) { try { return localStorage.getItem(key); } catch (error) { return null; } }
+  function save(key, value) { try { localStorage.setItem(key, value); } catch (error) { /* the choice lasts until the page closes */ } }
+  function dark() { return window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches; }
+  function look() { return read("ck-theme") === "classic" ? "classic" : "modern"; }
+  function mode() { var stored = read("ck-mode"); return stored === "dark" || stored === "light" ? stored : (dark() ? "dark" : "light"); }
+  function apply() { root.dataset.look = look(); root.dataset.mode = mode(); }
+  apply();
+
+  function make(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text) node.textContent = text;
+    return node;
+  }
+
+  function option(label, note, preview, on, pick) {
+    var button = make("button", "set-opt");
+    button.type = "button";
+    button.setAttribute("aria-pressed", String(on));
+    if (preview) { var p = make("span", "set-prev " + preview); p.appendChild(make("i")); p.appendChild(make("i")); button.appendChild(p); }
+    button.appendChild(make("b", "", label));
+    button.appendChild(make("span", "", note));
+    button.addEventListener("click", pick);
+    return button;
+  }
+
+  function build(slot) {
+    var wrap = make("span", "set-wrap");
+    var button = make("button", "btn set-btn", "Settings");
+    button.type = "button";
+    button.setAttribute("aria-haspopup", "dialog");
+    button.setAttribute("aria-expanded", "false");
+    var panel = null;
+
+    function close(refocus) {
+      if (!panel) return;
+      panel.remove();
+      panel = null;
+      button.setAttribute("aria-expanded", "false");
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("click", onOutside, true);
+      if (refocus) button.focus();
+    }
+    function onKey(event) { if (event.key === "Escape") close(true); }
+    function onOutside(event) { if (!wrap.contains(event.target)) close(false); }
+
+    function draw() {
+      var again = panel;
+      panel = make("div", "set-panel");
+      panel.setAttribute("role", "dialog");
+      panel.setAttribute("aria-label", "Appearance settings");
+      var head = make("div", "set-head");
+      head.appendChild(make("h2", "", "Appearance"));
+      head.appendChild(make("span", "grow"));
+      var done = make("button", "btn", "Done");
+      done.type = "button";
+      done.setAttribute("aria-label", "Close settings");
+      done.addEventListener("click", function () { close(true); });
+      head.appendChild(done);
+      panel.appendChild(head);
+      var groups = [
+        ["Look", [["New", "Clean and modern", "m", look() === "modern", function () { save("ck-theme", "modern"); change(); }],
+                  ["Classic", "Like the browser extension", "c", look() === "classic", function () { save("ck-theme", "classic"); change(); }]]],
+        ["Theme", [["Light", "Bright background", "", mode() === "light", function () { save("ck-mode", "light"); change(); }],
+                   ["Dark", "Easy on the eyes", "", mode() === "dark", function () { save("ck-mode", "dark"); change(); }]]],
+      ];
+      groups.forEach(function (group) {
+        var box = make("div");
+        box.setAttribute("role", "group");
+        box.setAttribute("aria-label", group[0]);
+        box.appendChild(make("h3", "", group[0]));
+        var opts = make("div", "set-opts");
+        group[1].forEach(function (o) { opts.appendChild(option(o[0], o[1], o[2], o[3], o[4])); });
+        box.appendChild(opts);
+        panel.appendChild(box);
+      });
+      panel.appendChild(make("p", "hint", "Saved on this computer."));
+      if (again) again.replaceWith(panel); else wrap.appendChild(panel);
+    }
+    function change() {
+      var focused = document.activeElement && document.activeElement.textContent;
+      apply();
+      draw();
+      var back = Array.prototype.find.call(panel.querySelectorAll("button"), function (b) { return b.textContent.indexOf(focused) === 0 && b.getAttribute("aria-pressed") === "true"; });
+      if (back) back.focus();
+    }
+
+    button.addEventListener("click", function () {
+      if (panel) { close(true); return; }
+      draw();
+      button.setAttribute("aria-expanded", "true");
+      document.addEventListener("keydown", onKey);
+      document.addEventListener("click", onOutside, true);
+      panel.querySelector("button[aria-pressed='true']").focus();
+    });
+    wrap.appendChild(button);
+    slot.replaceWith(wrap);
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    var slot = document.getElementById("settings-slot");
+    if (slot) build(slot);
+  });
+})();
