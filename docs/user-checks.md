@@ -59,7 +59,7 @@ database and container CPU time, and the container may need more than 0.25 vCPU,
    cargo run --release --example loadsim -- registry --sticks 500 --out registry.json
    ```
 
-3. Run each level for 30 minutes and keep the printed table:
+3. Cost control: follow the cost rules in `docs/next-steps.md` section 2 (baseline reading before the first level, run cost = reading minus baseline, stop when the run cost plus 1 USD would pass the approved 5 USD, checked before each level, once during it and after it; never more than 2.5 hours in total; no scaling during the run; reconcile after cleanup and again after 72 hours). Then run each level for 30 minutes and keep the printed table:
 
    ```bash
    cargo run --release --example loadsim -- run --hub https://hub.dev.contestkeeper.com --registry registry.json --minutes 30
