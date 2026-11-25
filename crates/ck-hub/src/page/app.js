@@ -488,7 +488,11 @@ function commandPanel(stick) {
     ask.appendChild(buttons);
     box.appendChild(ask);
   }
-  if (draft.note) box.appendChild(el("p", draft.bad ? "bad" : "hint", draft.note));
+  if (draft.note) {
+    const note = el("p", draft.bad ? "bad" : "hint", draft.note);
+    note.setAttribute("role", draft.bad ? "alert" : "status");
+    box.appendChild(note);
+  }
   return box;
 }
 
@@ -702,9 +706,11 @@ function keepFocus(draw, goto) {
   const want = goto || key;
   if (!want) return;
   const again = Array.from(document.querySelectorAll("[data-key]")).find((n) => n.dataset.key === want);
-  if (!again || again.disabled) return;
-  again.focus();
-  if (!goto && at !== null && again.setSelectionRange) again.setSelectionRange(at, at);
+  // If the opener went disabled (the stick dropped offline), use an enabled control in the same panel.
+  const target = again && !again.disabled ? again : goto ? document.querySelector("#detail button:not([disabled])") : null;
+  if (!target) return;
+  target.focus();
+  if (!goto && at !== null && target.setSelectionRange) target.setSelectionRange(at, at);
 }
 
 function render(goto) {
