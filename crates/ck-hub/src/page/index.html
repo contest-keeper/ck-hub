@@ -64,10 +64,11 @@
   </form>
   <section id="forge" class="card center" hidden aria-live="polite">
     <div class="stack"><h1>Connect Keeper Forge</h1><p class="muted">Keeper Forge on your PC asks to register the sticks it makes under your organization.</p></div>
+    <div class="card well pair" id="forge-code-box" hidden><span class="muted">Check that this code matches Keeper Forge</span><b class="mono pair-code" id="forge-code"></b><span class="muted">If it is different, do not connect. The code works for 10 minutes.</span></div>
     <dl class="facts"><div><dt>Signed in as</dt><dd id="forge-who"></dd></div><div><dt>Organization</dt><dd id="forge-org"></dd></div></dl>
     <ul class="list"><li>Registers the sticks it makes</li><li>Stays connected for 12 hours</li></ul>
     <div id="forge-result" role="alert" hidden></div>
-    <div class="row"><button class="btn pri" type="button" id="forge-yes">Connect Keeper Forge</button><a class="btn" href="/" id="forge-no">Cancel</a></div>
+    <div class="row"><button class="btn pri" type="button" id="forge-yes">Connect Keeper Forge</button><button class="btn" type="button" id="forge-no">Cancel</button></div>
   </section>
   <section id="view-downloads" class="stack" hidden>
     <div class="head"><div><h1>Keeper OS</h1><p>The system your sticks start from. Download it once, then use it in Keeper Forge.</p></div></div>

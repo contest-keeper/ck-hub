@@ -119,6 +119,8 @@ pub struct Accounts {
     failures: Mutex<HashMap<String, Failures>>,
     /// Codes the forge may trade for a session, see `forge.rs`.
     pub(crate) forge_codes: Mutex<crate::forge::OpenCodes>,
+    /// Pairing codes waiting for an answer in the browser, see `forge.rs`.
+    pub(crate) forge_pairings: Mutex<crate::forge::OpenPairings>,
 }
 
 impl Accounts {
@@ -128,6 +130,7 @@ impl Accounts {
             dummy_hash: hash(cost, "a password nobody uses").expect("the dummy hash"),
             failures: Mutex::new(HashMap::new()),
             forge_codes: Mutex::new(HashMap::new()),
+            forge_pairings: Mutex::new(HashMap::new()),
         }
     }
 
@@ -159,6 +162,22 @@ impl Accounts {
 
     pub(crate) fn clear(&self, key: &str) {
         self.failures.lock().expect("failures lock").remove(key);
+    }
+
+    /// Whether `key` is still under `max` counted events in `window` seconds. Does not count.
+    pub(crate) fn under_limit(
+        &self,
+        key: &str,
+        now: OffsetDateTime,
+        max: u32,
+        window: i64,
+    ) -> bool {
+        !self.blocked(key, now, max, window)
+    }
+
+    /// Counts one event for `key`.
+    pub(crate) fn count(&self, key: &str, now: OffsetDateTime, window: i64) {
+        self.fail(key, now, window);
     }
 
     /// Whether one more mail may go to `email`. Counts the mail when it may.
