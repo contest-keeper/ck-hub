@@ -338,6 +338,10 @@ async function sendCommand(stick, draft) {
     draft.note = (result.data && result.data.error) || "The command was not sent (HTTP " + result.status + ").";
     draft.bad = true;
   }
+  // The panel is rebuilt on every draw, so the result is spoken from a region that stays in the page.
+  const status = document.getElementById("cmd-status");
+  status.textContent = "";
+  status.textContent = draft.note;
   render();
 }
 
@@ -489,9 +493,7 @@ function commandPanel(stick) {
     box.appendChild(ask);
   }
   if (draft.note) {
-    const note = el("p", draft.bad ? "bad" : "hint", draft.note);
-    note.setAttribute("role", draft.bad ? "alert" : "status");
-    box.appendChild(note);
+    box.appendChild(el("p", draft.bad ? "bad" : "hint", draft.note));
   }
   return box;
 }
@@ -707,7 +709,7 @@ function keepFocus(draw, goto) {
   if (!want) return;
   const again = Array.from(document.querySelectorAll("[data-key]")).find((n) => n.dataset.key === want);
   // If the opener went disabled (the stick dropped offline), use an enabled control in the same panel.
-  const target = again && !again.disabled ? again : goto ? document.querySelector("#detail button:not([disabled])") : null;
+  const target = again && !again.disabled ? again : goto || again ? document.querySelector("#detail button:not([disabled])") : null;
   if (!target) return;
   target.focus();
   if (!goto && at !== null && target.setSelectionRange) target.setSelectionRange(at, at);
