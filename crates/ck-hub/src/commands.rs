@@ -283,8 +283,21 @@ impl Hub {
     ) -> Result<Vec<SignedCommand>, StoreError> {
         let now = (self.clock)();
         let mut open = self.store.pending_commands(organization, stick, now)?;
-        // An older agent would discard the whole reply if it contained an unknown action.
+        // An older agent would discard the whole reply if it contained an unknown action. A command it
+        // cannot run is closed as failed, so the sender sees it and it stops using up a place.
         if !screen_unlock {
+            for command in open
+                .iter()
+                .filter(|c| matches!(c.signed.command.action, Action::UnlockScreen))
+            {
+                let ack = CommandAck {
+                    command_id: command.id().to_owned(),
+                    result: AckResult::Failed,
+                    refusal: None,
+                };
+                self.store
+                    .record_command_ack(organization, stick, &ack, now)?;
+            }
             open.retain(|command| !matches!(command.signed.command.action, Action::UnlockScreen));
         }
         let fresh: Vec<String> = open
