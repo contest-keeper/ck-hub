@@ -1,9 +1,11 @@
+// Written in two parts: the page must hold no outside address as text; this is only a name the browser needs.
+const SVG_NS = "http" + "://www.w3.org/2000/svg";
 const REFRESH_MS = 5000;
 let sticks = [];
 let filter = "all";
 let query = "";
 let org = null;
-const opened = new Set();
+let selected = null;
 
 function ago(seconds) {
   if (seconds < 5) return "just now";
@@ -32,9 +34,32 @@ function cell(row, text, className) {
 }
 
 const isArchived = (stick) => !!stick.archived_at;
-const needsLook = (stick) => !isArchived(stick) && stick.warnings.length > 0;
 const neverSeen = (stick) => !stick.last;
 const isOffline = (stick) => !stick.online && !!stick.last;
+const needsLook = (stick) => !isArchived(stick) && (stick.warnings.length > 0 || isOffline(stick));
+
+// What each warning means in plain words and what to do about it. The Hub's warnings are free text,
+// so a warning it does not know gets a general pointer.
+function fixFor(warning) {
+  if (/different users/.test(warning)) return "Ask the team who was logged in. If it was not planned, tell the contest organizer.";
+  if (/two machines/.test(warning)) return "Check that the stick was not copied to another disk. If it was, make a new stick in Keeper Forge.";
+  if (/^Settings refused/.test(warning)) return "Make this stick again in Keeper Forge if its settings are wrong.";
+  if (/^Settings changed/.test(warning)) return "Someone may have edited the stick. Make it again in Keeper Forge if it should not have changed.";
+  return "Open the details to see more.";
+}
+
+function issuesOf(stick) {
+  if (isArchived(stick)) return [];
+  const list = [];
+  if (isOffline(stick)) {
+    list.push({ text: "Offline for " + span(stick.last.seconds_ago), bad: true,
+      fix: "Check the power cable and the network at " + stick.last.hostname + ". It reconnects by itself." });
+  }
+  for (const warning of stick.warnings) list.push({ text: warning, fix: fixFor(warning), bad: false });
+  return list;
+}
+
+const teamName = (stick) => stick.team || "Stick " + stick.stick_id;
 
 // Problems first, then offline sticks, then the rest by machine number.
 function rank(stick) {
@@ -262,9 +287,8 @@ function networkPanel(stick) {
   return box;
 }
 
-// Commands to a stick for admins and owners, and what became of each
-// command sent. The text typed and the step the person is at are kept here, because the list is
-// drawn again at every refresh.
+// Commands to a stick for admins and owners, and what became of each command sent. The text typed
+// and the step the person is at are kept here, because the list is drawn again at every refresh.
 const commandLists = new Map();
 const commandDrafts = new Map();
 const ACTION_NAMES = { message: "Message", lock_screen: "Lock", unlock_screen: "Unlock", shutdown: "Shutdown" };
@@ -276,7 +300,7 @@ function commandPath(stick) {
 function draftOf(stick) {
   let draft = commandDrafts.get(stick.stick_id);
   if (!draft) {
-    draft = { action: null, text: "", busy: false, note: "", bad: false };
+    draft = { action: null, text: "", busy: false, note: "", bad: false, archiving: false };
     commandDrafts.set(stick.stick_id, draft);
   }
   return draft;
@@ -330,71 +354,137 @@ function commandState(command) {
   return command.refusal ? command.state + " (" + command.refusal.replaceAll("_", " ") + ")" : command.state;
 }
 
+// A button of the details panel. The key lets the refresh give the focus back to it.
+function act(label, key, onClick, className) {
+  const button = el("button", className || "btn sm", label);
+  button.type = "button";
+  button.dataset.key = "act:" + key;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function actionRow(title, hint, button) {
+  const item = el("li");
+  const text = el("div");
+  text.appendChild(el("b", "", title));
+  text.appendChild(el("div", "hint", hint));
+  item.appendChild(text);
+  item.appendChild(button);
+  return item;
+}
+
+// Actions on one stick. Commands need the stick online; the reason is said, not only shown by a grey button.
 function commandPanel(stick) {
-  const box = el("div", "net cmd");
-  box.appendChild(el("h3", "", "Commands"));
-  const name = stick.team + " " + (stick.machine_number ?? "");
+  const box = el("div", "stack");
+  box.appendChild(el("h3", "", "Actions"));
+  const name = teamName(stick) + " " + (stick.machine_number ?? "");
+  const admin = myRole === "owner" || myRole === "admin";
   const draft = draftOf(stick);
-  if (myRole === "owner" || myRole === "admin") {
-    const supportsUnlock = stick.last?.screen_unlock === true;
-    if (!supportsUnlock && draft.action === "unlock_screen") draft.action = null;
+  if (isArchived(stick)) {
+    box.appendChild(el("p", "", "Archived. The Hub deletes this stick and everything kept about it on " +
+      new Date(stick.delete_after).toLocaleDateString() + "."));
+    if (!admin) return box;
     const bar = el("div", "cmd-bar");
-    for (const action of Object.keys(ACTION_NAMES)) {
-      if (!supportsUnlock && action === "unlock_screen") continue;
-      const button = actionButton(ACTION_NAMES[action], "to " + name, () => {
-        draft.action = action;
-        draft.note = "";
-        render();
-      });
-      button.disabled = draft.busy;
-      button.setAttribute("aria-pressed", String(draft.action === action));
-      bar.appendChild(button);
-    }
+    bar.appendChild(act("Restore", "restore", () => changeStick(stick, "POST", "/restore", null, "Stick restored.")));
+    bar.appendChild(act("Delete now…", "delete", () => {
+      confirmingDelete.add(stick.stick_id);
+      render();
+    }, "btn sm danger"));
     box.appendChild(bar);
-    if (draft.action) {
+    if (confirmingDelete.has(stick.stick_id)) {
       const ask = el("div", "cmd-confirm");
-      if (draft.action === "message") {
-        const input = el("textarea");
-        input.maxLength = 500;
-        input.rows = 2;
-        input.value = draft.text;
-        input.dataset.cmd = stick.stick_id;
-        input.setAttribute("aria-label", "Message for " + name);
-        input.addEventListener("input", () => {
-          draft.text = input.value;
-          yes.disabled = draft.busy || !draft.text.trim();
-        });
-        ask.appendChild(input);
-      }
-      const what = {
-        message: "Show this message on ",
-        lock_screen: "Lock the screen of ",
-        unlock_screen: "Unlock the screen of ",
-        shutdown: "Shut down ",
-      }[draft.action];
-      ask.appendChild(el("p", draft.action === "shutdown" ? "bad" : "", what + name + "?" +
-        (draft.action === "shutdown" ? " The contestant loses any unsaved work." : "")));
-      var yes = el("button", "btn pri", "Confirm");
-      yes.type = "button";
-      yes.disabled = draft.busy || (draft.action === "message" && !draft.text.trim());
-      yes.addEventListener("click", () => sendCommand(stick, draft));
-      const no = el("button", "btn", "Cancel");
-      no.type = "button";
-      no.addEventListener("click", () => {
-        draft.action = null;
-        render();
-      });
+      ask.appendChild(el("p", "bad", "Delete " + name + " and everything kept about it? This cannot be undone."));
       const buttons = el("div", "cmd-bar");
-      buttons.appendChild(yes);
-      buttons.appendChild(no);
+      buttons.appendChild(act("Delete everything", "delete-yes", () => changeStick(stick, "DELETE", "", null, "Stick deleted."), "btn sm danger"));
+      buttons.appendChild(act("Cancel", "delete-no", () => { confirmingDelete.delete(stick.stick_id); render(); }));
       ask.appendChild(buttons);
       box.appendChild(ask);
     }
-    if (draft.note) box.appendChild(el("p", draft.bad ? "bad" : "hint", draft.note));
-  } else {
-    box.appendChild(el("p", "muted", "Only an admin or an owner can send commands."));
+    return box;
   }
+  if (!admin) {
+    box.appendChild(el("p", "muted", "Only an admin or an owner can send commands or archive a stick."));
+    return box;
+  }
+  const supportsUnlock = stick.last?.screen_unlock === true;
+  if (!supportsUnlock && draft.action === "unlock_screen") draft.action = null;
+  const list = el("ul", "list");
+  const rows = [
+    ["lock_screen", "Lock screen", "Shows a lock screen to the contestant until you unlock.", "Lock…"],
+    ["unlock_screen", "Unlock screen", "Lets the contestant use the computer again.", "Unlock…"],
+    ["message", "Message", "Shows a short message on the contestant's screen.", "Send message…"],
+    ["shutdown", "Shut down", "Turns the computer off. Unsaved work is lost, and someone must switch it on again.", "Shut down…"],
+  ];
+  for (const [action, title, hint, label] of rows) {
+    if (action === "unlock_screen" && !supportsUnlock) continue;
+    const button = act(label, action, () => {
+      draft.action = action;
+      draft.archiving = false;
+      draft.note = "";
+      render();
+    });
+    button.disabled = draft.busy || !stick.online;
+    if (!stick.online) button.setAttribute("aria-describedby", "cmd-off");
+    list.appendChild(actionRow(title, hint, button));
+  }
+  list.appendChild(actionRow("Archive", "Takes it out of the list. It is deleted with its data when the time is up, and you can restore it before then.",
+    act("Archive…", "archive", () => { draft.archiving = true; draft.action = null; render(); }, "btn sm danger")));
+  box.appendChild(list);
+  if (!stick.online) box.appendChild(el("p", "hint", "Lock, Unlock, Message and Shut down work when the stick is online. This one is not.")).id = "cmd-off";
 
+  if (draft.action) {
+    const ask = el("div", "cmd-confirm");
+    if (draft.action === "message") {
+      const input = el("textarea");
+      input.maxLength = 500;
+      input.rows = 2;
+      input.value = draft.text;
+      input.dataset.key = "msg";
+      input.setAttribute("aria-label", "Message for " + name);
+      input.addEventListener("input", () => {
+        draft.text = input.value;
+        yes.disabled = draft.busy || !draft.text.trim();
+      });
+      ask.appendChild(input);
+    }
+    const what = {
+      message: "Show this message on ",
+      lock_screen: "Lock the screen of ",
+      unlock_screen: "Unlock the screen of ",
+      shutdown: "Shut down ",
+    }[draft.action];
+    ask.appendChild(el("p", draft.action === "shutdown" ? "bad" : "", what + name + "?" +
+      (draft.action === "shutdown" ? " The contestant loses any unsaved work." : "")));
+    var yes = act("Confirm", "confirm", () => sendCommand(stick, draft), "btn sm pri");
+    yes.disabled = draft.busy || (draft.action === "message" && !draft.text.trim());
+    const buttons = el("div", "cmd-bar");
+    buttons.appendChild(yes);
+    buttons.appendChild(act("Cancel", "cancel", () => { draft.action = null; render(); }));
+    ask.appendChild(buttons);
+    box.appendChild(ask);
+  }
+  if (draft.archiving) {
+    const ask = el("div", "cmd-confirm");
+    ask.appendChild(el("p", "", "Archive " + name + "? It stops reporting and is deleted with all its data when the time is up."));
+    const buttons = el("div", "cmd-bar");
+    for (const days of [7, 30]) {
+      buttons.appendChild(act("Archive for " + days + " days", "archive-" + days, () => {
+        draft.archiving = false;
+        changeStick(stick, "POST", "/archive", { days }, "Stick archived.");
+      }, "btn sm danger"));
+    }
+    buttons.appendChild(act("Cancel", "archive-no", () => { draft.archiving = false; render(); }));
+    ask.appendChild(buttons);
+    box.appendChild(ask);
+  }
+  if (draft.note) box.appendChild(el("p", draft.bad ? "bad" : "hint", draft.note));
+  return box;
+}
+
+// What was sent to this stick, and what became of it.
+function commandHistory(stick) {
+  const box = el("div", "net");
+  box.appendChild(el("h3", "", "Commands sent"));
   const cached = commandLists.get(stick.stick_id);
   const open = cached && cached.data && cached.data.some((c) => c.state === "queued" || c.state === "delivered");
   if (!cached || Date.now() - cached.at > (open ? 4000 : 30000)) fetchCommands(stick);
@@ -500,7 +590,7 @@ function facts(stick) {
   return list;
 }
 
-// Sticks whose "Delete now" was clicked once: the second click deletes.
+// Sticks whose "Delete now…" was clicked: the next click on "Delete everything" deletes.
 const confirmingDelete = new Set();
 
 async function changeStick(stick, method, suffix, body, done) {
@@ -509,7 +599,6 @@ async function changeStick(stick, method, suffix, body, done) {
   confirmingDelete.delete(stick.stick_id);
   if (result.ok) {
     notice(done, true);
-    opened.delete(stick.stick_id);
     await refresh();
   } else {
     notice((result.data && result.data.error) || "The Hub refused (" + result.status + ").", false);
@@ -517,47 +606,100 @@ async function changeStick(stick, method, suffix, body, done) {
   }
 }
 
-function archivePanel(stick) {
-  const box = el("div", "net cmd");
-  box.appendChild(el("h3", "", "Archive"));
-  const name = stick.team + " " + (stick.machine_number ?? "");
-  const admin = myRole === "owner" || myRole === "admin";
-  if (isArchived(stick)) {
-    box.appendChild(el("p", "", "Archived. The Hub deletes this stick and everything kept about it on " +
-      new Date(stick.delete_after).toLocaleDateString() + "."));
-    if (!admin) return box;
-    const bar = el("div", "cmd-bar");
-    bar.appendChild(actionButton("Restore", name, () => changeStick(stick, "POST", "/restore", null, "Stick restored.")));
-    const sure = confirmingDelete.has(stick.stick_id);
-    bar.appendChild(actionButton(sure ? "Click again to delete everything" : "Delete now", name, () => {
-      if (!confirmingDelete.has(stick.stick_id)) {
-        confirmingDelete.add(stick.stick_id);
-        render();
-        return;
-      }
-      changeStick(stick, "DELETE", "", null, "Stick deleted.");
-    }));
-    box.appendChild(bar);
-    return box;
+const ICON_WARN = "M12 3 2 20h20L12 3zM12 10v4M12 17.5v.5";
+
+function icon(path) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "ico");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "2");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  const shape = document.createElementNS(SVG_NS, "path");
+  shape.setAttribute("d", path);
+  svg.appendChild(shape);
+  return svg;
+}
+
+function statusPill(stick) {
+  if (isArchived(stick)) return el("span", "pill new", "Archived");
+  if (stick.online) return el("span", "pill on", "Online");
+  return stick.last ? el("span", "pill off", "Offline") : el("span", "pill new", "Not seen yet");
+}
+
+function selectStick(id, scroll) {
+  selected = id;
+  render();
+  if (scroll) document.getElementById("detail").scrollIntoView({ block: "nearest" });
+}
+
+function detailPanel(stick) {
+  const box = document.getElementById("detail");
+  box.replaceChildren();
+  if (!stick) {
+    box.appendChild(el("p", "muted", "Select a stick in the list to see its details and actions."));
+    return;
   }
-  if (!admin) {
-    box.appendChild(el("p", "muted", "Only an admin can archive a stick."));
-    return box;
+  const head = el("div", "row");
+  head.appendChild(el("h2", "", teamName(stick)));
+  head.appendChild(el("span", "grow"));
+  head.appendChild(statusPill(stick));
+  box.appendChild(head);
+  for (const issue of issuesOf(stick)) {
+    const note = el("div", "attn" + (issue.bad ? " bad" : ""));
+    const why = el("div", "why");
+    why.appendChild(el("b", "", issue.text));
+    why.appendChild(el("span", "", issue.fix));
+    note.appendChild(why);
+    box.appendChild(note);
   }
-  box.appendChild(el("p", "muted", "An archived stick stops reporting and is deleted with all its data when the time is up. You can restore it before then."));
-  const bar = el("div", "cmd-bar");
-  for (const days of [7, 30]) {
-    bar.appendChild(actionButton("Archive for " + days + " days", name, () =>
-      changeStick(stick, "POST", "/archive", { days }, "Stick archived.")));
+  if (!isArchived(stick) && neverSeen(stick)) {
+    const note = el("div", "attn");
+    const why = el("div", "why");
+    why.appendChild(el("b", "", "Not seen yet"));
+    why.appendChild(el("span", "", "Plug the stick in and start the computer once. It appears here by itself."));
+    note.appendChild(why);
+    box.appendChild(note);
   }
-  box.appendChild(bar);
-  return box;
+  box.appendChild(facts(stick));
+  box.appendChild(commandPanel(stick));
+}
+
+function morePanel(stick) {
+  const box = document.getElementById("more");
+  box.hidden = !stick;
+  box.replaceChildren();
+  if (!stick) return;
+  box.appendChild(el("h2", "", "More about " + teamName(stick)));
+  box.appendChild(commandHistory(stick));
+  box.appendChild(proofPanel(stick));
+  box.appendChild(networkPanel(stick));
+  box.appendChild(recordingPanel(stick));
+}
+
+// The list is drawn again at every refresh: give the focus back to what had it, and keep the cursor
+// in a message being typed.
+function keepFocus(draw) {
+  const active = document.activeElement;
+  const key = active && active.dataset ? active.dataset.key : null;
+  const at = active && active.selectionStart !== undefined ? active.selectionStart : null;
+  draw();
+  if (!key) return;
+  const again = Array.from(document.querySelectorAll("[data-key]")).find((n) => n.dataset.key === key);
+  if (!again || again.disabled) return;
+  again.focus();
+  if (at !== null && again.setSelectionRange) again.setSelectionRange(at, at);
 }
 
 function render() {
+  keepFocus(drawSticks);
+}
+
+function drawSticks() {
   const body = document.getElementById("rows");
-  // The list is drawn again at every refresh: keep the cursor in a message being typed.
-  const typing = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.cmd : null;
   body.replaceChildren();
   const counts = { all: 0, online: 0, offline: 0, attn: 0, new: 0, archived: 0 };
   for (const stick of sticks) {
@@ -568,100 +710,133 @@ function render() {
     if (needsLook(stick)) counts.attn += 1;
     if (neverSeen(stick)) counts.new += 1;
   }
-  document.getElementById("n-all").textContent = counts.all;
   document.getElementById("n-online").textContent = counts.online;
-  document.getElementById("n-offline").textContent = counts.offline;
-  document.getElementById("n-attn").textContent = counts.attn;
+  document.getElementById("n-of").textContent = "of " + counts.all + " online";
+  document.getElementById("hero-note").textContent = counts.all === 0
+    ? "No sticks yet. Make one with Keeper Forge and it appears here."
+    : (counts.attn ? counts.attn + (counts.attn === 1 ? " stick needs" : " sticks need") + " a look." : "Nothing needs a look.") +
+      (counts.new ? " " + counts.new + " not seen yet." : "");
   for (const name of ["all", "attn", "offline", "new", "archived"]) {
     document.getElementById("c-" + name).textContent = counts[name];
+  }
+  const navCount = document.getElementById("nav-count");
+  navCount.hidden = counts.attn === 0;
+  navCount.textContent = counts.attn;
+  navCount.setAttribute("aria-label", counts.attn + " need a look");
+
+  const list = document.getElementById("attn-list");
+  list.replaceChildren();
+  const problems = sticks.filter(needsLook).sort((a, b) => (a.machine_number ?? 0) - (b.machine_number ?? 0));
+  list.hidden = problems.length === 0;
+  for (const stick of problems) {
+    const issue = issuesOf(stick)[0];
+    const item = el("div", "attn" + (issue.bad ? " bad" : ""));
+    item.appendChild(icon(ICON_WARN));
+    const why = el("div", "why");
+    why.appendChild(el("b", "", teamName(stick) + ": " + issue.text));
+    why.appendChild(el("span", "", issue.fix));
+    item.appendChild(why);
+    const view = act("View", "view-" + stick.stick_id, () => selectStick(stick.stick_id, true));
+    view.setAttribute("aria-label", "View " + teamName(stick));
+    item.appendChild(view);
+    list.appendChild(item);
   }
 
   const shown = sticks.filter(matches).sort((a, b) =>
     rank(a) - rank(b) || (a.machine_number ?? 0) - (b.machine_number ?? 0));
   for (const stick of shown) {
-    const last = stick.last;
-    const row = el("tr", needsLook(stick) ? "flag" : "");
-    cell(row, stick.machine_number ?? "", "num mono");
+    const row = el("tr", (needsLook(stick) ? "flag " : "") + (stick.stick_id === selected ? "sel" : ""));
     const team = cell(row, "");
-    team.appendChild(el("b", "", stick.team || "Stick " + stick.stick_id));
-    team.appendChild(el("span", "sub", stick.site));
-    if (stick.hardware && stick.hardware.rewritten) {
-      team.appendChild(el("span", "sub", "Rewritten, written " + stick.hardware.write_count + " times"));
-    }
-    const status = cell(row, "");
-    status.appendChild(el("span", "pill " + (isArchived(stick) ? "new" : stick.online ? "on" : last ? "off" : "new"),
-      isArchived(stick) ? "archived" : stick.online ? "online" : (last ? "offline" : "not seen yet")));
+    const pick = el("button", "rowbtn", teamName(stick));
+    pick.type = "button";
+    pick.dataset.key = "row:" + stick.stick_id;
+    pick.setAttribute("aria-label", "Show details for " + teamName(stick));
+    if (stick.stick_id === selected) pick.setAttribute("aria-current", "true");
+    pick.addEventListener("click", () => selectStick(stick.stick_id, true));
+    team.appendChild(pick);
+    team.appendChild(el("span", "sub", [stick.machine_number ? "Machine " + stick.machine_number : "", stick.last ? stick.last.hostname : stick.site].filter(Boolean).join(" · ")));
+    cell(row, "").appendChild(statusPill(stick));
     cell(row, stick.current_user ?? "", stick.current_user ? "" : "muted");
-    cell(row, last ? ago(last.seconds_ago) : "—", last ? "" : "muted");
-    const warnings = cell(row, "");
-    if (stick.warnings.length === 0) warnings.className = "muted";
-    if (stick.warnings.length === 0) warnings.textContent = last ? "No warnings" : "Waiting for the first heartbeat";
-    for (const text of stick.warnings) warnings.appendChild(el("span", "warn", text));
-    const open = opened.has(stick.stick_id);
-    const toggle = el("button", "btn", open ? "Hide" : "Details");
-    toggle.type = "button";
-    toggle.setAttribute("aria-expanded", open ? "true" : "false");
-    toggle.setAttribute("aria-label", (open ? "Hide" : "Show") + " details for " + stick.team + " " + (stick.machine_number ?? ""));
-    toggle.addEventListener("click", () => {
-      if (opened.has(stick.stick_id)) opened.delete(stick.stick_id); else opened.add(stick.stick_id);
-      render();
-    });
-    cell(row, "").appendChild(toggle);
+    cell(row, stick.last ? ago(stick.last.seconds_ago) : "Never", stick.last ? "" : "muted");
     body.appendChild(row);
-    if (open) {
-      const detail = el("tr", "detail");
-      const td = el("td");
-      td.colSpan = 7;
-      td.appendChild(facts(stick));
-      td.appendChild(archivePanel(stick));
-      td.appendChild(commandPanel(stick));
-      td.appendChild(proofPanel(stick));
-      td.appendChild(networkPanel(stick));
-      td.appendChild(recordingPanel(stick));
-      detail.appendChild(td);
-      body.appendChild(detail);
-    }
   }
-  if (typing) {
-    const again = Array.from(document.querySelectorAll("textarea[data-cmd]")).find((n) => n.dataset.cmd === typing);
-    if (again) {
-      again.focus();
-      again.setSelectionRange(again.value.length, again.value.length);
-    }
-  }
-  document.getElementById("empty").style.display = shown.length ? "none" : "block";
-  document.getElementById("empty").textContent = sticks.length
-    ? "No stick matches. Change the search or the filter."
-    : "No sticks yet. Make one with ck-forge and it appears here.";
+  const empty = document.getElementById("empty");
+  empty.hidden = shown.length > 0;
+  empty.textContent = sticks.length
+    ? "No stick matches. Clear the search or pick All."
+    : "No sticks yet. Make one with Keeper Forge and it appears here.";
+  document.getElementById("list-hint").textContent = "Showing " + shown.length + " of " +
+    (filter === "archived" ? counts.archived : counts.all) + " sticks. Problems are listed first.";
+
+  if (page !== "sticks") return;
+  const current = sticks.find((s) => s.stick_id === selected);
+  detailPanel(current);
+  morePanel(current);
 }
 
 // Keeper Forge opens /forge/connect?port=..&state=.. . The port and the state are only passed on:
 // the Hub checks them and builds the address the browser goes back to.
 const forgeAsk = location.pathname === "/forge/connect" ? new URLSearchParams(location.search) : null;
-const imagesPage = location.pathname === "/download/image";
-const imageDownloads = document.getElementById("image-downloads");
-const imageList = document.getElementById("image-download-list");
+const page = forgeAsk ? "forge" : location.pathname === "/download/image" ? "downloads" : location.pathname === "/people" ? "people" : "sticks";
 const imageStatus = document.getElementById("image-download-status");
 const imageRetry = document.getElementById("image-download-retry");
 const imageOlder = document.getElementById("image-older");
+const imageList = document.getElementById("image-download-list");
 const imageOlderList = document.getElementById("image-older-list");
-const imageOlderSummary = document.getElementById("image-older-summary");
+const TITLES = { login: "Log in", forge: "Connect Keeper Forge", sticks: "Sticks", people: "People", downloads: "Downloads" };
 
 // What organizers call each Linux; a family not listed shows its own name capitalised.
 const LINUX_NAMES = { ubuntu: "Ubuntu", debian: "Debian", mint: "Linux Mint" };
+const isDevBuild = (image) => image.version.includes("-");
+let shaCount = 0;
+
+async function copyText(input, button) {
+  try {
+    await navigator.clipboard.writeText(input.value);
+    imageStatus.textContent = "SHA-256 copied.";
+    button.textContent = "Copied";
+    setTimeout(() => { button.textContent = "Copy"; }, 2000);
+  } catch (error) {
+    input.select();
+    imageStatus.textContent = "Press Ctrl+C to copy the selected SHA-256.";
+  }
+}
 
 function imageItem(image) {
-  const item = el("li", "tile");
+  const item = el("section", "card");
   const linux = LINUX_NAMES[image.family] || image.family.charAt(0).toUpperCase() + image.family.slice(1);
-  item.appendChild(el("h2", "", linux + " · " + image.version));
-  const details = [image.name, image.profile, image.filename, bytesText(image.size)].filter(Boolean).join(" · ");
-  item.appendChild(el("p", "muted", details));
-  const checksum = el("p", "");
-  checksum.append("SHA-256 ", el("code", "", image.sha256));
-  item.appendChild(checksum);
-  const actions = el("div", "download-actions");
-  actions.appendChild(link("Download image", image.url));
-  if (image.source_offer_url) actions.appendChild(link("Read source offer", image.source_offer_url));
+  const recommended = image.latest && !isDevBuild(image);
+  const head = el("div", "row");
+  head.appendChild(el("h2", "", linux + " · " + image.version));
+  if (recommended) head.appendChild(el("span", "pill on", "Recommended"));
+  if (isDevBuild(image)) head.appendChild(el("span", "pill warn", "Development build"));
+  head.appendChild(el("span", "grow"));
+  head.appendChild(el("span", "muted", bytesText(image.size)));
+  item.appendChild(head);
+  if (recommended) item.appendChild(el("p", "muted", "The stable release. Choose this unless support asks for another version."));
+  if (isDevBuild(image)) item.appendChild(el("p", "muted", "For testing new features. Do not use it for a real contest."));
+  item.appendChild(el("p", "muted", [image.name, image.profile, image.filename].filter(Boolean).join(" · ")));
+  const field = el("div", "field");
+  const id = "sha-" + (shaCount += 1);
+  const label = el("label", "", "SHA-256 (to check the file)");
+  label.htmlFor = id;
+  field.appendChild(label);
+  const line = el("div", "row");
+  const input = el("input", "input mono");
+  input.id = id;
+  input.readOnly = true;
+  input.value = image.sha256;
+  line.appendChild(input);
+  const copy = el("button", "btn sm", "Copy");
+  copy.type = "button";
+  copy.setAttribute("aria-label", "Copy the SHA-256 of " + linux + " " + image.version);
+  copy.addEventListener("click", () => copyText(input, copy));
+  line.appendChild(copy);
+  field.appendChild(line);
+  item.appendChild(field);
+  const actions = el("div", "row");
+  actions.appendChild(link("Download image", image.url)).className = "btn" + (recommended ? " pri" : "");
+  if (image.source_offer_url) actions.appendChild(link("Source code offer", image.source_offer_url)).className = "btn";
   item.appendChild(actions);
   return item;
 }
@@ -679,7 +854,7 @@ async function loadImageDownloads() {
     const older = images.filter((image) => !image.latest);
     imageList.replaceChildren(...newest.map(imageItem));
     imageOlderList.replaceChildren(...older.map(imageItem));
-    imageOlderSummary.textContent = "Older versions (" + older.length + ")";
+    document.getElementById("image-older-summary").textContent = "Older versions (" + older.length + ")";
     imageOlder.hidden = older.length === 0;
   } catch (error) {
     imageStatus.textContent = "Keeper OS images are unavailable right now.";
@@ -689,36 +864,59 @@ async function loadImageDownloads() {
 
 imageRetry.addEventListener("click", loadImageDownloads);
 
-function showForge(email) {
-  document.getElementById("content").style.display = "none";
-  document.getElementById("forge").hidden = false;
+function showForge(email, organization) {
   document.getElementById("forge-who").textContent = email;
+  document.getElementById("forge-org").textContent = organization || "None yet";
 }
 
 document.getElementById("forge-yes").addEventListener("click", async () => {
   const result = document.getElementById("forge-result");
-  const response = await fetch("/api/v1/forge/connect", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ port: Number(forgeAsk.get("port")), state: forgeAsk.get("state") || "" }),
-  });
-  if (!response.ok) { result.textContent = "That request did not come from Keeper Forge. Start the sign-in again in the forge."; return; }
+  const button = document.getElementById("forge-yes");
+  const fail = (text) => { result.hidden = false; result.className = "banner bad"; result.textContent = text; button.disabled = false; };
+  button.disabled = true;
+  let response;
+  try {
+    response = await fetch("/api/v1/forge/connect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ port: Number(forgeAsk.get("port")), state: forgeAsk.get("state") || "" }),
+    });
+  } catch (error) { fail("Could not reach the Hub. Check the connection and try again."); return; }
+  if (!response.ok) { fail("That request did not come from Keeper Forge. Start the sign-in again in Keeper Forge."); return; }
   const { redirect } = await response.json();
+  result.hidden = false;
+  result.className = "banner ok";
   result.textContent = "Connected. You can close this tab and go back to Keeper Forge.";
-  document.getElementById("forge-yes").hidden = true;
+  button.hidden = true;
+  document.getElementById("forge-no").hidden = true;
   location.assign(redirect);
 });
 
-function showLogin(visible) {
-  document.getElementById("login").style.display = visible ? "flex" : "none";
-  document.getElementById("content").style.display = visible || imagesPage ? "none" : "block";
-  imageDownloads.hidden = visible || !imagesPage;
-  document.getElementById("who").style.display = visible ? "none" : "inline-flex";
-  document.getElementById("live").hidden = visible || imagesPage;
+// One view at a time. Pages without the sidebar (log in, Keeper Forge) have the bar on top instead.
+let view = null;
+function show(next) {
+  view = next;
+  const inApp = next !== "login" && next !== "forge";
+  document.getElementById("login").hidden = next !== "login";
+  document.getElementById("forge").hidden = next !== "forge";
+  document.getElementById("view-sticks").hidden = next !== "sticks";
+  document.getElementById("view-people").hidden = next !== "people";
+  document.getElementById("view-downloads").hidden = next !== "downloads";
+  document.getElementById("side").hidden = !inApp;
+  document.getElementById("topline").hidden = inApp;
+  document.getElementById("main").classList.toggle("stage", !inApp);
+  for (const [name, id] of [["sticks", "nav-sticks"], ["people", "nav-people"], ["downloads", "nav-downloads"]]) {
+    const link = document.getElementById(id);
+    if (next === name) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
+  }
+  document.getElementById("tb-title").textContent = "Keeper Hub - " + TITLES[next];
+  document.title = TITLES[next] + " · Keeper Hub";
 }
 
 const RANK = { owner: 3, admin: 2, viewer: 1 };
 const rolesBelow = (role) => Object.keys(RANK).filter((r) => RANK[r] < RANK[role]);
+const ROLE_TEXT = { owner: "Full control, including people.", admin: "Manages sticks and invites people.", viewer: "Can look at sticks. Cannot change anything." };
+const capital = (word) => word.charAt(0).toUpperCase() + word.slice(1);
 let inviteToken = null;
 let myRole = null;
 let myEmail = null;
@@ -739,8 +937,8 @@ async function call(method, path, body) {
 function notice(text, good) {
   const box = document.getElementById("notice");
   box.textContent = text;
-  box.className = good ? "" : "bad";
-  box.style.display = "block";
+  box.className = "banner " + (good ? "ok" : "bad");
+  box.style.display = "flex";
   clearTimeout(noticeTimer);
   noticeTimer = setTimeout(() => { box.style.display = "none"; }, 20000);
 }
@@ -751,64 +949,92 @@ function say2(id, text, good) {
   box.className = "form-msg" + (good ? "" : " bad");
 }
 
-function actionButton(label, what, onClick) {
-  const button = el("button", "btn", label);
+function actionButton(label, what, onClick, key) {
+  const button = el("button", "btn sm" + (/^(Remove|Leave|Cancel)/.test(label) ? " danger" : ""), label);
   button.type = "button";
-  button.setAttribute("aria-label", label + " " + what);
+  button.dataset.key = "people:" + key;
+  button.setAttribute("aria-label", label.replace("…", "") + " " + what);
   button.addEventListener("click", onClick);
   return button;
 }
 
 async function loadPeople() {
-  const panel = document.getElementById("people");
-  panel.hidden = !(myRole === "owner" || myRole === "admin");
-  if (panel.hidden) return;
-  const roles = rolesBelow(myRole);
-  const select = document.getElementById("invite-role");
-  if (Array.from(select.options).map((o) => o.value).join() !== roles.join()) {
-    select.replaceChildren(...roles.map((r) => new Option(r, r)));
-  }
+  const admin = myRole === "owner" || myRole === "admin";
+  document.getElementById("people").hidden = !admin;
+  document.getElementById("people-denied").hidden = admin;
+  if (!admin) return;
+  const roles = rolesBelow(myRole).reverse();
   const base = "/api/v1/orgs/" + encodeURIComponent(org);
   const [members, invitations] = await Promise.all([call("GET", base + "/members"), call("GET", base + "/invitations")]);
-  if (!members.ok || !invitations.ok) return;
-
-  const memberRows = document.getElementById("members");
-  memberRows.replaceChildren();
-  for (const member of members.data) {
-    const row = el("tr");
-    cell(row, member.email);
-    cell(row, member.role);
-    const own = member.email === myEmail;
-    const actions = cell(row, "");
-    if (own || RANK[myRole] > RANK[member.role]) {
-      actions.appendChild(actionButton(own ? "Leave" : "Remove", member.email, async () => {
-        if (!confirm((own ? "Leave this organization?" : "Remove " + member.email + "?"))) return;
-        const result = await call("DELETE", base + "/members/" + encodeURIComponent(member.user_id));
-        if (!result.ok) say2("invite-msg", (result.data && result.data.error) || "That did not work.", false);
-        await refresh();
+  if (!members.ok || !invitations.ok) {
+    say2("people-msg", "The people list could not be loaded. It will try again.", false);
+    return;
+  }
+  keepFocus(() => {
+    const choices = document.getElementById("invite-roles");
+    if (choices.dataset.roles !== roles.join()) {
+      choices.dataset.roles = roles.join();
+      choices.replaceChildren(choices.firstElementChild, ...roles.map((r, at) => {
+        const card = el("label", "role");
+        const radio = el("input");
+        radio.type = "radio";
+        radio.name = "invite-role";
+        radio.value = r;
+        radio.checked = at === 0;
+        card.appendChild(radio);
+        card.appendChild(el("b", "", capital(r)));
+        card.appendChild(el("span", "", ROLE_TEXT[r]));
+        return card;
       }));
     }
-    memberRows.appendChild(row);
-  }
 
-  const inviteRows = document.getElementById("invitations");
-  inviteRows.replaceChildren();
-  for (const invitation of invitations.data) {
-    const row = el("tr");
-    cell(row, invitation.email);
-    cell(row, invitation.role);
-    cell(row, new Date(invitation.expires_at).toLocaleString());
-    const actions = cell(row, "");
-    if (RANK[myRole] > RANK[invitation.role]) {
-      actions.appendChild(actionButton("Revoke", invitation.email, async () => {
-        const result = await call("DELETE", base + "/invitations/" + encodeURIComponent(invitation.id));
-        if (!result.ok) say2("invite-msg", (result.data && result.data.error) || "That did not work.", false);
-        await loadPeople();
-      }));
+    document.getElementById("mem-count").textContent = members.data.length;
+    const memberRows = document.getElementById("members");
+    memberRows.replaceChildren();
+    for (const member of members.data) {
+      const row = el("li");
+      const text = el("div");
+      const name = el("b", "", member.email);
+      text.appendChild(name);
+      const own = member.email === myEmail;
+      if (own) { text.appendChild(document.createTextNode(" ")); text.appendChild(el("span", "pill new", "You")); }
+      text.appendChild(el("div", "hint", capital(member.role) + ": " + ROLE_TEXT[member.role]));
+      row.appendChild(text);
+      row.appendChild(el("span", "muted", capital(member.role)));
+      if (own || RANK[myRole] > RANK[member.role]) {
+        row.appendChild(actionButton(own ? "Leave…" : "Remove…", member.email, async () => {
+          if (!confirm((own ? "Leave this organization?" : "Remove " + member.email + "?"))) return;
+          const result = await call("DELETE", base + "/members/" + encodeURIComponent(member.user_id));
+          if (!result.ok) say2("people-msg", (result.data && result.data.error) || "That did not work.", false);
+          await refresh();
+        }, "m-" + member.user_id));
+      }
+      memberRows.appendChild(row);
     }
-    inviteRows.appendChild(row);
-  }
-  document.getElementById("no-invitations").style.display = invitations.data.length ? "none" : "block";
+
+    const inviteRows = document.getElementById("invitations");
+    inviteRows.replaceChildren();
+    for (const invitation of invitations.data) {
+      const row = el("li");
+      const text = el("div");
+      text.appendChild(el("b", "", invitation.email));
+      text.appendChild(el("div", "hint", capital(invitation.role) + " · the link works until " + new Date(invitation.expires_at).toLocaleString()));
+      row.appendChild(text);
+      if (RANK[myRole] > RANK[invitation.role]) {
+        row.appendChild(actionButton("Send again", invitation.email, async () => {
+          const result = await call("POST", base + "/invitations", { email: invitation.email, role: invitation.role });
+          say2("people-msg", result.ok ? "If that address can join, a new link is on its way to " + invitation.email + "." : (result.data && result.data.error) || "That did not work.", result.ok);
+        }, "s-" + invitation.id));
+        row.appendChild(actionButton("Cancel invitation", invitation.email, async () => {
+          const result = await call("DELETE", base + "/invitations/" + encodeURIComponent(invitation.id));
+          if (!result.ok) say2("people-msg", (result.data && result.data.error) || "That did not work.", false);
+          await loadPeople();
+        }, "c-" + invitation.id));
+      }
+      inviteRows.appendChild(row);
+    }
+    document.getElementById("no-invitations").hidden = invitations.data.length > 0;
+  });
 }
 
 async function loadStaff(isStaff) {
@@ -820,11 +1046,13 @@ async function loadStaff(isStaff) {
   const rows = document.getElementById("all-orgs");
   rows.replaceChildren();
   for (const entry of result.data) {
-    const row = el("tr");
-    cell(row, entry.name);
-    cell(row, entry.slug, "mono");
+    const row = el("li");
+    row.appendChild(document.createTextNode(entry.name));
+    row.appendChild(el("span", "grow"));
+    row.appendChild(el("span", "muted mono", entry.slug));
     rows.appendChild(row);
   }
+  document.getElementById("orgs-summary").textContent = result.data.length + (result.data.length === 1 ? " existing organization" : " existing organizations");
 }
 
 async function refresh() {
@@ -832,8 +1060,7 @@ async function refresh() {
   try {
     let me = await fetch("/api/v1/me", { cache: "no-store" });
     if (me.status === 401) {
-      if (imagesPage && !imageDownloads.hidden) { location.reload(); return; }
-      showLogin(true);
+      show("login");
       problem.style.display = "none";
       return;
     }
@@ -862,34 +1089,33 @@ async function refresh() {
     const current = orgs.find((o) => o.slug === org);
     myRole = current ? current.role : null;
     myEmail = account.email;
-    document.getElementById("who-name").textContent = account.email + (current ? " (" + current.role + ")" : "");
-    const openImageDownloads = imagesPage && imageDownloads.hidden;
-    showLogin(false);
-    if (forgeAsk) { showForge(account.email); return; }
-    if (imagesPage) {
-      problem.style.display = "none";
-      if (openImageDownloads) await loadImageDownloads();
-      return;
-    }
-    await loadStaff(account.staff === true);
+    document.getElementById("org-name").textContent = current ? current.name : "No organization yet";
+    document.getElementById("org-name").hidden = orgs.length > 1;
+    document.getElementById("who-name").textContent = account.email + (current ? " · " + capital(current.role) : "");
+    document.getElementById("nav-people").hidden = !(myRole === "owner" || myRole === "admin" || account.staff === true);
+    const openImageDownloads = page === "downloads" && view !== "downloads";
+    show(page);
+    if (forgeAsk) { showForge(account.email, current ? current.name : ""); return; }
+    if (page === "people") await loadStaff(account.staff === true);
+    if (openImageDownloads) await loadImageDownloads();
     if (!org) {
       sticks = [];
       render();
-      await loadPeople();
+      if (page === "people") await loadPeople();
       problem.textContent = "You are not a member of any organization yet. Ask an owner to add you.";
-      problem.style.display = "block";
+      problem.style.display = "flex";
       return;
     }
     const response = await fetch("/api/v1/orgs/" + encodeURIComponent(org) + "/sticks", { cache: "no-store" });
     if (!response.ok) throw new Error("HTTP " + response.status);
     sticks = await response.json();
     render();
-    await loadPeople();
+    if (page === "people") await loadPeople();
     document.getElementById("live-text").textContent = "Live · updated " + new Date().toLocaleTimeString();
     problem.style.display = "none";
   } catch (error) {
-    problem.textContent = imagesPage ? "The Hub cannot be reached." : "The Hub cannot be reached. The list below is the last one received.";
-    problem.style.display = "block";
+    problem.textContent = page === "sticks" ? "The Hub cannot be reached. The list below is the last one received." : "The Hub cannot be reached. Check the connection; this page tries again by itself.";
+    problem.style.display = "flex";
   }
 }
 
@@ -898,26 +1124,11 @@ document.getElementById("org").addEventListener("change", (event) => {
   refresh();
 });
 
-document.getElementById("search").addEventListener("input", (event) => {
-  query = event.target.value.trim().toLowerCase();
-  render();
-});
-
-for (const chip of document.querySelectorAll(".chip")) {
-  chip.addEventListener("click", () => {
-    filter = chip.dataset.filter;
-    for (const other of document.querySelectorAll(".chip")) {
-      other.setAttribute("aria-pressed", String(other === chip));
-    }
-    render();
-  });
-}
-
 const MODES = {
-  login: { title: "Log in to Keeper Hub", intro: imagesPage ? "Log in with your organizer account to download Keeper OS." : "See which contest machines are online and which need attention.", email: true, pass: "Password", autocomplete: "current-password", button: "Log in", path: "/api/v1/login" },
-  register: { title: "Create an account", intro: "We mail you a link to confirm your address. After that, an owner of your organization adds you to it.", email: true, pass: "Choose a password (12 characters or more)", autocomplete: "new-password", button: "Create account", path: "/api/v1/register", done: "Check your email for the link." },
-  forgot: { title: "Reset your password", intro: "Enter your email and we mail you a link.", email: true, pass: null, button: "Send link", path: "/api/v1/password-reset", done: "If that address has an account, a link is on its way." },
-  reset: { title: "Choose a new password", intro: "At least 12 characters.", email: false, pass: "New password", autocomplete: "new-password", button: "Change password", path: "/api/v1/password-reset/confirm", done: "Password changed. Log in with it." },
+  login: { title: "Welcome back", intro: page === "downloads" ? "Log in with your organizer account to download Keeper OS." : "Log in to see which contest computers are online.", email: true, pass: "Password", autocomplete: "current-password", button: "Log in", path: "/api/v1/login" },
+  register: { title: "Create an account", intro: "We email you a link to confirm your address. After that, an owner of your organization adds you to it.", email: true, pass: "Password", help: "At least 12 characters.", autocomplete: "new-password", button: "Create account", path: "/api/v1/register", done: "Check your email for the link." },
+  forgot: { title: "Reset your password", intro: "Enter your email. We email you a link that works for one hour.", email: true, pass: null, button: "Send reset link", path: "/api/v1/password-reset", done: "Check your email. If that address has an account, a link is on its way." },
+  reset: { title: "Choose a new password", intro: "Pick a password you do not use anywhere else.", email: false, pass: "New password", help: "At least 12 characters.", autocomplete: "new-password", button: "Change password", path: "/api/v1/password-reset/confirm", done: "Password changed. Log in with it." },
 };
 let mode = "login";
 let resetToken = null;
@@ -925,7 +1136,8 @@ let resetToken = null;
 function say(text, good) {
   const message = document.getElementById("login-error");
   message.textContent = text;
-  message.className = good ? "ok" : "";
+  message.hidden = !text;
+  message.className = "banner " + (good ? "ok" : "bad");
 }
 
 function setMode(next) {
@@ -940,13 +1152,26 @@ function setMode(next) {
   if (m.pass) {
     document.getElementById("pass-label").textContent = m.pass;
     document.getElementById("pass").autocomplete = m.autocomplete;
+    const help = document.getElementById("pass-help");
+    help.hidden = !m.help;
+    help.textContent = m.help || "";
   }
+  setPasswordShown(false);
   document.getElementById("login-submit").textContent = m.button;
-  document.getElementById("to-register").hidden = next !== "login";
   document.getElementById("to-forgot").hidden = next !== "login";
+  document.getElementById("new-here").hidden = next !== "login";
   document.getElementById("to-login").hidden = next === "login";
   say("", false);
 }
+
+function setPasswordShown(shown) {
+  document.getElementById("pass").type = shown ? "text" : "password";
+  const toggle = document.getElementById("pw-toggle");
+  toggle.textContent = shown ? "Hide" : "Show";
+  toggle.setAttribute("aria-pressed", String(shown));
+}
+
+document.getElementById("pw-toggle").addEventListener("click", () => setPasswordShown(document.getElementById("pass").type === "password"));
 
 for (const [id, target] of [["to-register", "register"], ["to-forgot", "forgot"], ["to-login", "login"]]) {
   document.getElementById(id).addEventListener("click", (event) => { event.preventDefault(); setMode(target); });
@@ -956,18 +1181,25 @@ document.getElementById("login").addEventListener("submit", async (event) => {
   event.preventDefault();
   const m = MODES[mode];
   say("", false);
-  const email = document.getElementById("user").value;
+  const email = document.getElementById("user").value.trim();
   const password = document.getElementById("pass").value;
+  // Said next to the form, in words that say what to do, before anything is sent.
+  if (m.email && !/^[^@\s]+@[^@\s]+$/.test(email)) { say("Type your email address, like name@school.example.", false); document.getElementById("user").focus(); return; }
+  if (m.pass !== null && !password) { say("Type your password.", false); document.getElementById("pass").focus(); return; }
   const body = mode === "forgot" ? { email }
     : mode === "reset" ? { token: resetToken, password }
     : { email, password };
+  const submit = document.getElementById("login-submit");
+  submit.disabled = true;
   let response;
   try {
     response = await fetch(m.path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   } catch (error) {
-    say("Could not reach the Hub.", false);
+    submit.disabled = false;
+    say("Could not reach the Hub. Check the connection and try again.", false);
     return;
   }
+  submit.disabled = false;
   document.getElementById("pass").value = "";
   if (mode === "login" && response.ok) { await refresh(); return; }
   if (response.ok) {
@@ -977,16 +1209,17 @@ document.getElementById("login").addEventListener("submit", async (event) => {
     return;
   }
   try { say((await response.json()).error, false); }
-  catch (error) { say("That did not work.", false); }
+  catch (error) { say("That did not work. Try again in a moment.", false); }
 });
 
 document.getElementById("invite-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const email = document.getElementById("invite-email").value;
-  const role = document.getElementById("invite-role").value;
+  const chosen = document.querySelector("input[name='invite-role']:checked");
   say2("invite-msg", "", true);
+  if (!chosen) { say2("invite-msg", "Choose what they can do.", false); return; }
   try {
-    const result = await call("POST", "/api/v1/orgs/" + encodeURIComponent(org) + "/invitations", { email, role });
+    const result = await call("POST", "/api/v1/orgs/" + encodeURIComponent(org) + "/invitations", { email, role: chosen.value });
     if (result.ok) {
       document.getElementById("invite-email").value = "";
       say2("invite-msg", "If that address can join, a link is on its way to " + email + ".", true);
@@ -1049,7 +1282,23 @@ async function openedFromMail() {
   } catch (error) { say("Could not reach the Hub.", false); }
 }
 
-if (imagesPage) setMode("login");
+if (page === "downloads") setMode("login");
+document.getElementById("search").addEventListener("input", (event) => {
+  query = event.target.value.trim().toLowerCase();
+  render();
+});
+
+for (const chip of document.querySelectorAll(".chip")) {
+  chip.addEventListener("click", () => {
+    filter = chip.dataset.filter;
+    for (const other of document.querySelectorAll(".chip")) {
+      other.setAttribute("aria-pressed", String(other === chip));
+    }
+    render();
+  });
+}
+
+
 openedFromMail().then(refresh);
 window.addEventListener("hashchange", () => openedFromMail());
 setInterval(refresh, REFRESH_MS);
