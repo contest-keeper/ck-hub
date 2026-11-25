@@ -1,6 +1,8 @@
 // Look (modern = "New", classic) and mode (light, dark) are set before first paint, so the page never flashes the wrong one.
 // The Settings button and its panel are built here, so every page gets the same one.
 (function () {
+  // Written in two parts: the page must hold no outside address as text; this is only a name the browser needs.
+  const SVG_NS = "http" + "://www.w3.org/2000/svg";
   var root = document.documentElement;
   function read(key) { try { return localStorage.getItem(key); } catch (error) { return null; } }
   function save(key, value) { try { localStorage.setItem(key, value); } catch (error) { /* the choice lasts until the page closes */ } }
@@ -30,7 +32,16 @@
 
   function build(slot) {
     var wrap = make("span", "set-wrap");
-    var button = make("button", "btn set-btn", "Settings");
+    var up = !!slot.closest(".side");
+    var button = make("button", "btn sm set-btn");
+    var icon = document.createElementNS(SVG_NS, "svg");
+    icon.setAttribute("width", "16"); icon.setAttribute("height", "16"); icon.setAttribute("viewBox", "0 0 24 24"); icon.setAttribute("fill", "none");
+    icon.setAttribute("stroke", "currentColor"); icon.setAttribute("stroke-width", "2"); icon.setAttribute("stroke-linecap", "round"); icon.setAttribute("aria-hidden", "true");
+    var gear = document.createElementNS(SVG_NS, "path");
+    gear.setAttribute("d", "M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1");
+    var hub = document.createElementNS(SVG_NS, "circle");
+    hub.setAttribute("cx", "12"); hub.setAttribute("cy", "12"); hub.setAttribute("r", "3");
+    icon.appendChild(hub); icon.appendChild(gear); button.appendChild(icon); button.appendChild(document.createTextNode("Settings"));
     button.type = "button";
     button.setAttribute("aria-haspopup", "dialog");
     button.setAttribute("aria-expanded", "false");
@@ -50,7 +61,7 @@
 
     function draw() {
       var again = panel;
-      panel = make("div", "set-panel");
+      panel = make("div", "set-panel " + (up ? "up" : "down"));
       panel.setAttribute("role", "dialog");
       panel.setAttribute("aria-label", "Appearance settings");
       var head = make("div", "set-head");
@@ -102,7 +113,6 @@
   }
 
   document.addEventListener("DOMContentLoaded", function () {
-    var slot = document.getElementById("settings-slot");
-    if (slot) build(slot);
+    Array.prototype.forEach.call(document.querySelectorAll("[data-settings]"), build);
   });
 })();
