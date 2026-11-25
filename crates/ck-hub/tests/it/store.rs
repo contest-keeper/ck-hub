@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ck_hub::{
-    Hub, MemoryStore, NewUser, PasswordCost, PostgresStore, Registry, Rejection, Role, Store,
-    TokenPurpose,
+    Hub, MemoryStore, NewUser, PasswordCost, PostgresStore, Registry, Rejection, Removal, Role,
+    Store, TokenPurpose,
 };
 use ck_protocol::{
     Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, RecorderStatus, RecordingMode,
@@ -1824,8 +1824,59 @@ fn archive_contract(store: &dyn Store) {
     assert!(store.last_heartbeat(&org, &b_id).expect("read").is_some());
 }
 
+/// Two owners who leave at the same moment must not leave the organization without an owner.
+fn last_owner_contract(store: Arc<dyn Store>) {
+    let hub = Arc::new(
+        Hub::new(
+            Registry::empty(),
+            store,
+            None,
+            Box::new(OffsetDateTime::now_utc),
+        )
+        .with_password_cost(PasswordCost {
+            memory_kib: 8,
+            passes: 1,
+        }),
+    );
+    for round in 0..25 {
+        let tag = format!("{}{round}", unique());
+        let (a, b) = (format!("a{tag}@example.org"), format!("b{tag}@example.org"));
+        let slug = format!("org{tag}");
+        let (a_id, b_id) = (
+            hub.create_user(&a, "correct horse battery").expect("a").id,
+            hub.create_user(&b, "correct horse battery").expect("b").id,
+        );
+        hub.create_organization(&slug, "Org", &a).expect("org");
+        hub.add_member(&slug, &b, Role::Owner).expect("b owner");
+        let sessions: Vec<String> = [&a, &b]
+            .iter()
+            .map(|email| hub.login(email, "correct horse battery").expect("login").0)
+            .collect();
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let answers: Vec<Result<(), ck_hub::MemberError>> = std::thread::scope(|scope| {
+            let leave = |session: String, who: String| {
+                let (hub, slug, gate) = (Arc::clone(&hub), slug.clone(), Arc::clone(&gate));
+                scope.spawn(move || {
+                    gate.wait();
+                    hub.remove_member(&session, &slug, &who)
+                })
+            };
+            let first = leave(sessions[0].clone(), a_id.clone());
+            let second = leave(sessions[1].clone(), b_id.clone());
+            vec![first.join().expect("a"), second.join().expect("b")]
+        });
+        let left = answers.iter().filter(|answer| answer.is_ok()).count();
+        assert_eq!(left, 1, "round {round}: exactly one owner may leave");
+        assert!(
+            answers.contains(&Err(ck_hub::MemberError::LastOwner)),
+            "round {round}: the other is told it is the last owner"
+        );
+    }
+}
+
 #[test]
 fn the_memory_store_keeps_its_contract() {
+    last_owner_contract(Arc::new(MemoryStore::default()));
     enrolment_contract(&MemoryStore::default());
     scoped_enrolment_contract(&MemoryStore::default());
     recoverable_enrolment_contract(&MemoryStore::default());
@@ -1845,6 +1896,7 @@ fn the_memory_store_keeps_its_contract() {
 fn the_postgres_store_keeps_its_contract() {
     let Some(url) = database_url() else { return };
     let store = PostgresStore::connect(&url).expect("connect");
+    last_owner_contract(Arc::new(PostgresStore::connect(&url).expect("connect")));
     enrolment_contract(&store);
     scoped_enrolment_contract(&store);
     recoverable_enrolment_contract(&store);
@@ -2481,9 +2533,18 @@ fn invitations_contract(store: &dyn Store) {
             (cy.email.clone(), Role::Viewer),
         ]
     );
-    assert_eq!(store.count_owners(&org).expect("read"), 1);
-    assert!(store.remove_member(&org, &cy.id).expect("write"));
-    assert!(!store.remove_member(&org, &cy.id).expect("write"));
+    assert_eq!(
+        store.remove_member(&org, &ana.id).expect("write"),
+        Removal::LastOwner
+    );
+    assert_eq!(
+        store.remove_member(&org, &cy.id).expect("write"),
+        Removal::Removed
+    );
+    assert_eq!(
+        store.remove_member(&org, &cy.id).expect("write"),
+        Removal::NotMember
+    );
     assert_eq!(store.members_of(&org).expect("read").len(), 2);
 
     // Staff flag, and the list of organizations.

@@ -5,7 +5,7 @@ use time::Duration;
 use crate::accounts::{AccessError, token_hash, unavailable, valid_email, valid_slug};
 use crate::hub::Hub;
 use crate::mail::Mail;
-use crate::store::{Invitation, Member, Membership, Organization, Role, StoreError};
+use crate::store::{Invitation, Member, Membership, Organization, Removal, Role, StoreError};
 
 pub const INVITATION_LIFETIME_DAYS: i64 = 7;
 
@@ -238,18 +238,14 @@ impl Hub {
         if !own && !access.role.may_manage(target.role) {
             return Err(MemberError::Forbidden);
         }
-        if target.role == Role::Owner
-            && self
-                .store
-                .count_owners(&access.organization.id)
-                .map_err(store_failed)?
-                <= 1
-        {
-            return Err(MemberError::LastOwner);
-        }
-        self.store
+        match self
+            .store
             .remove_member(&access.organization.id, user_id)
-            .map_err(store_failed)?;
+            .map_err(store_failed)?
+        {
+            Removal::LastOwner => return Err(MemberError::LastOwner),
+            Removal::Removed | Removal::NotMember => {}
+        }
         Ok(())
     }
 

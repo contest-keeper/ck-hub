@@ -81,8 +81,8 @@ pub use signup::{
 };
 pub use store::{
     BootSpan, Hardware, Invitation, Member, Membership, MemoryStore, NewProfile, NewUser,
-    Organization, Profile, ProfileSummary, Role, SeenHeartbeat, Stick, StickHardware, Store,
-    StoreError, StoredEvent, TokenPurpose, User, Wallpaper,
+    Organization, Profile, ProfileSummary, Removal, Role, SeenHeartbeat, Stick, StickHardware,
+    Store, StoreError, StoredEvent, TokenPurpose, User, Wallpaper,
 };
 pub use submissions::{JudgeRow, StickSubmission, SubmissionsView};
 pub use watcher::{WatchError, poll_once, run as watch};

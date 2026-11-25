@@ -4,8 +4,8 @@ use super::{
     AtomicU64, BootSpan, CLAIM_RECOVERY, CommandAck, CommandState, EnrolledStick, Event,
     FirstAndLast, Hardware, HashMap, Heartbeat, Invitation, JudgeSubmission, Member, Membership,
     Mutex, NewEnrolmentCode, NewProfile, NewUser, OffsetDateTime, Ordering, Organization, Profile,
-    ProfileSummary, Recording, Redemption, Role, SeenHeartbeat, Stick, StickHardware, StickId,
-    Store, StoreError, StoredCommand, StoredEvent, SubmitEvent, Token, TokenPurpose, User,
+    ProfileSummary, Recording, Redemption, Removal, Role, SeenHeartbeat, Stick, StickHardware,
+    StickId, Store, StoreError, StoredCommand, StoredEvent, SubmitEvent, Token, TokenPurpose, User,
     Wallpaper, settled, submit_event,
 };
 
@@ -687,19 +687,25 @@ impl Store for MemoryStore {
         Ok(found)
     }
 
-    fn remove_member(&self, organization_id: &str, user_id: &str) -> Result<bool, StoreError> {
+    fn remove_member(&self, organization_id: &str, user_id: &str) -> Result<Removal, StoreError> {
         let mut members = self.members.lock().expect("members lock");
-        let before = members.len();
-        members.retain(|(org, user, _)| !(org == organization_id && user == user_id));
-        Ok(members.len() < before)
-    }
-
-    fn count_owners(&self, organization_id: &str) -> Result<usize, StoreError> {
-        let members = self.members.lock().expect("members lock");
-        Ok(members
+        let owners = members
             .iter()
             .filter(|(org, _, role)| org == organization_id && *role == Role::Owner)
-            .count())
+            .count();
+        let is_owner = members.iter().any(|(org, user, role)| {
+            org == organization_id && user == user_id && *role == Role::Owner
+        });
+        if is_owner && owners <= 1 {
+            return Ok(Removal::LastOwner);
+        }
+        let before = members.len();
+        members.retain(|(org, user, _)| !(org == organization_id && user == user_id));
+        Ok(if members.len() < before {
+            Removal::Removed
+        } else {
+            Removal::NotMember
+        })
     }
 
     fn set_staff(&self, user_id: &str, staff: bool) -> Result<(), StoreError> {
