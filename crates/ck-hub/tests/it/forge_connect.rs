@@ -400,3 +400,16 @@ async fn one_account_cannot_fill_the_shared_cap_of_open_codes() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(trade(&s.app, &first).await.0, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn two_accounts_do_not_evict_each_others_code() {
+    let s = setup();
+    let ana = cookie_for(&s.app, "ana@example.org").await;
+    let vera = cookie_for(&s.app, "vera@example.org").await;
+    let (_, a) = connect(&s.app, Some(&ana), 49321, STATE).await;
+    let (_, v) = connect(&s.app, Some(&vera), 49322, STATE).await;
+    let ana_code = code_of(a["redirect"].as_str().expect("redirect"));
+    let vera_code = code_of(v["redirect"].as_str().expect("redirect"));
+    assert_eq!(trade(&s.app, &ana_code).await.0, StatusCode::OK);
+    assert_eq!(trade(&s.app, &vera_code).await.0, StatusCode::OK);
+}

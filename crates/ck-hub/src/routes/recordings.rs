@@ -10,6 +10,9 @@ use super::{
 /// checked and written, and the container has 0.5 GiB.
 pub(super) static CHUNKS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 
+/// How long one chunk's body may take to arrive once its slot is held.
+pub(super) const BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Header that carries the SHA-256 of a chunk.
 pub(super) const CHUNK_SHA_HEADER: &str = "x-ck-chunk-sha256";
 
@@ -74,8 +77,13 @@ pub(super) async fn put_chunk(
     let Ok(_slot) = CHUNKS.acquire().await else {
         return unavailable();
     };
-    let Ok(body) = axum::body::to_bytes(body, CHUNK_BYTES + 1).await else {
-        return upload_answer(Ok(Err(RecordingError::TooBig)));
+    // A stalled body must not keep a slot for ever: 8 slow signed uploads would block all recordings.
+    let read =
+        tokio::time::timeout(BODY_TIMEOUT, axum::body::to_bytes(body, CHUNK_BYTES + 1)).await;
+    let body = match read {
+        Ok(Ok(body)) => body,
+        Ok(Err(_)) => return upload_answer(Ok(Err(RecordingError::TooBig))),
+        Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
     };
     let result = tokio::task::spawn_blocking(move || {
         hub.put_chunk(
