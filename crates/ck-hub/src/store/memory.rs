@@ -926,7 +926,13 @@ impl Store for MemoryStore {
             .lock()
             .expect("boot times lock")
             .retain(|(org, stick, _), _| !(org == organization && stick == id));
-        self.events.lock().expect("events lock").remove(&key);
+        let mut events = self.events.lock().expect("events lock");
+        events.remove(&key);
+        self.event_keys
+            .lock()
+            .expect("event keys lock")
+            .retain(|(org, stick, _, _)| !(org == organization && stick == id));
+        drop(events);
         self.expected_configs
             .lock()
             .expect("expected configs lock")
