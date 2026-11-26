@@ -272,7 +272,7 @@ impl Store for MemoryStore {
         event: Event,
         received_at: OffsetDateTime,
         integrity: Option<String>,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         self.events
             .lock()
             .expect("events lock")
@@ -283,7 +283,7 @@ impl Store for MemoryStore {
                 event,
                 integrity,
             });
-        Ok(())
+        Ok(true)
     }
 
     fn event_count(&self, organization: &str, stick: &StickId) -> Result<u64, StoreError> {

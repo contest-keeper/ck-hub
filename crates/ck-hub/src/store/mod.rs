@@ -271,13 +271,14 @@ pub trait Store: Send + Sync {
     ) -> Result<Option<u64>, StoreError>;
 
     /// Adds an event after the ones already kept for its stick.
+    /// Returns false when the store already had this event (same stick, boot and sequence).
     fn append_event(
         &self,
         organization: &str,
         event: Event,
         received_at: OffsetDateTime,
         integrity: Option<String>,
-    ) -> Result<(), StoreError>;
+    ) -> Result<bool, StoreError>;
 
     /// The newest event of `stick` in `boot`, if any.
     fn last_event_of_boot(

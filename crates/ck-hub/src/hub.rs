@@ -45,10 +45,9 @@ const MAX_MESSAGES_PER_MINUTE: u32 = 120;
 pub const MAX_EVENTS_PER_BOOT: u64 = 50_000;
 
 /// Events kept for one stick over all its boots, so a stick that boots again and again, or a stolen
-/// secret, cannot fill the database. Checked at the first event of a boot and then every
-/// [`EVENT_COUNT_EVERY`] events of it.
+/// secret, cannot fill the database. The Hub counts them per stick in memory (read once from the
+/// store), so the check is exact for every event and costs no query.
 pub const MAX_EVENTS_PER_STICK: u64 = 200_000;
-const EVENT_COUNT_EVERY: u64 = 256;
 
 /// How many locks the sticks share to keep their own messages in order.
 const WRITE_LOCKS: usize = 64;
@@ -193,6 +192,8 @@ pub struct Hub {
     pub(crate) enrol_mints: Mutex<HashMap<String, (OffsetDateTime, u32)>>,
     /// Failed enrolments of everyone together: when the current minute started and how many.
     pub(crate) enrol_failures: Mutex<(OffsetDateTime, u32)>,
+    /// Per stick: how many events are stored, read from the store at the first event after a start.
+    event_totals: Mutex<HashMap<StickId, u64>>,
     log: Option<Mutex<File>>,
     default_org: OnceLock<String>,
     pub(crate) download: Option<Download>,
@@ -243,6 +244,7 @@ impl Hub {
             command_rates: Mutex::new(HashMap::new()),
             enrol_mints: Mutex::new(HashMap::new()),
             enrol_failures: Mutex::new((OffsetDateTime::UNIX_EPOCH, 0)),
+            event_totals: Mutex::new(HashMap::new()),
             log: log.map(Mutex::new),
             default_org: OnceLock::new(),
             download: None,
@@ -584,27 +586,25 @@ impl Hub {
         }
         storable(body, event.seq)?;
 
-        if event.seq > MAX_EVENTS_PER_BOOT {
-            return Err(Rejection::TooManyRequests);
-        }
-
         let _one_at_a_time = self.write_lock(&id);
         let last_of_boot = self
             .store
             .last_event_of_boot(&organization, &id, &event.boot_id)?;
         let last_of_boot = last_of_boot.as_ref();
-        if (last_of_boot.is_none() || event.seq.is_multiple_of(EVENT_COUNT_EVERY))
-            && self.store.event_count(&organization, &id)? >= MAX_EVENTS_PER_STICK
+        // A repeat is answered as a conflict whatever the budgets say: the stick counts that as sent,
+        // while a 429 would keep it queued.
+        if last_of_boot.is_some_and(|last| event.seq <= last.event.seq) {
+            return Err(Rejection::Conflict(format!(
+                "event {} was already received",
+                event.seq
+            )));
+        }
+        if event.seq > MAX_EVENTS_PER_BOOT
+            || self.stored_events(&organization, &id)? >= MAX_EVENTS_PER_STICK
         {
             return Err(Rejection::TooManyRequests);
         }
         let integrity = match last_of_boot {
-            Some(last) if event.seq <= last.event.seq => {
-                return Err(Rejection::Conflict(format!(
-                    "event {} was already received",
-                    event.seq
-                )));
-            }
             Some(last) if event.seq > last.event.seq + 1 => {
                 Some("an event is missing before this one")
             }
@@ -621,16 +621,35 @@ impl Hub {
         };
         let seq = event.seq;
         let ack_event = (event.kind == EventKind::CommandAck).then(|| event.clone());
-        self.store.append_event(
+        let stored = self.store.append_event(
             &organization,
             event,
             (self.clock)(),
             integrity.map(str::to_owned),
         )?;
-        if let Some(event) = ack_event {
-            self.apply_ack(&organization, &id, &event);
+        // A copy the database dropped (another process won the race) changes nothing.
+        if stored {
+            if let Some(total) = self.event_totals.lock().expect("totals lock").get_mut(&id) {
+                *total += 1;
+            }
+            if let Some(event) = ack_event {
+                self.apply_ack(&organization, &id, &event);
+            }
         }
         Ok(seq)
+    }
+
+    /// How many events the stick has stored. The caller holds the stick's write lock.
+    fn stored_events(&self, organization: &str, id: &StickId) -> Result<u64, StoreError> {
+        if let Some(total) = self.event_totals.lock().expect("totals lock").get(id) {
+            return Ok(*total);
+        }
+        let total = self.store.event_count(organization, id)?;
+        self.event_totals
+            .lock()
+            .expect("totals lock")
+            .insert(id.clone(), total);
+        Ok(total)
     }
 
     /// The whole network history of one stick of the organization, or `None` for an id that is not

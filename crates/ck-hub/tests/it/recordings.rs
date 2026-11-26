@@ -660,17 +660,21 @@ async fn a_chunk_body_that_never_arrives_times_out_and_frees_its_slot() {
     let id = started["id"].as_str().expect("id").to_owned();
     let digest = sha(&data[..CHUNK_BYTES]);
     let signed = format!("ck-recording-chunk\n{id}\n0\n{digest}");
-    let request = Request::put(format!("/api/v1/recordings/{id}/chunks/0"))
-        .header(STICK_HEADER, "stick-a")
-        .header(
-            SIGNATURE_HEADER,
-            sign("token-of-stick-a", signed.as_bytes()),
-        )
-        .header("x-ck-chunk-sha256", digest)
-        .body(Body::new(Stalled))
-        .expect("request");
-    let (code, _, _) = call(&s.app, request).await;
-    assert_eq!(code, StatusCode::REQUEST_TIMEOUT);
+    // More stalled uploads than there are slots: a slot that was not given back would block the
+    // later ones for good.
+    for _ in 0..12 {
+        let request = Request::put(format!("/api/v1/recordings/{id}/chunks/0"))
+            .header(STICK_HEADER, "stick-a")
+            .header(
+                SIGNATURE_HEADER,
+                sign("token-of-stick-a", signed.as_bytes()),
+            )
+            .header("x-ck-chunk-sha256", digest.clone())
+            .body(Body::new(Stalled))
+            .expect("request");
+        let (code, _, _) = call(&s.app, request).await;
+        assert_eq!(code, StatusCode::REQUEST_TIMEOUT);
+    }
     // The slot is free again: a real chunk goes through.
     let (code, _) = chunk(
         &s.app,

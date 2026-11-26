@@ -158,10 +158,10 @@ impl Store for PostgresStore {
         event: Event,
         received_at: OffsetDateTime,
         integrity: Option<String>,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         let json = serde_json::to_value(&event).map_err(failed)?;
         let seq = i64::try_from(event.seq).map_err(failed)?;
-        self.in_org(organization, |transaction| {
+        let inserted = self.in_org(organization, |transaction| {
             transaction.execute(
                 "INSERT INTO events
                      (organization_id, stick_id, boot_id, seq, received_at, integrity, event)
@@ -178,7 +178,7 @@ impl Store for PostgresStore {
                 ],
             )
         })?;
-        Ok(())
+        Ok(inserted == 1)
     }
 
     fn event_count(&self, organization: &str, stick: &StickId) -> Result<u64, StoreError> {

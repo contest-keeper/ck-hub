@@ -1547,11 +1547,12 @@ async fn a_stick_over_its_total_event_budget_is_told_to_wait_at_the_start_of_a_b
         .ensure_organization("default", "Default")
         .expect("org");
     let stick = StickId::parse("stick-a").expect("id");
+    // Five boots of 40 000 events each fill the budget.
     for seq in 1..=MAX_EVENTS_PER_STICK {
         let event = Event {
             stick_id: stick.clone(),
-            boot_id: "old".to_owned(),
-            seq,
+            boot_id: format!("old-{}", (seq - 1) / 40_000),
+            seq: (seq - 1) % 40_000 + 1,
             prev_hash: String::new(),
             sent_at: "2026-11-12T10:00:00Z".parse().expect("time"),
             kind: EventKind::Login,
@@ -1564,4 +1565,10 @@ async fn a_stick_over_its_total_event_budget_is_told_to_wait_at_the_start_of_a_b
     let app = router(Arc::new(hub));
     let (status, _) = send_event(&app, "new", 1, FIRST_PREV_HASH, "ana").await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    // The next event of a running boot is refused too, whatever its sequence number is.
+    let (status, _) = send_event(&app, "old-0", 40_001, "", "ana").await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    // An event the Hub already has is a conflict, which the stick counts as sent.
+    let (status, _) = send_event(&app, "old-0", 5, "", "ana").await;
+    assert_eq!(status, StatusCode::CONFLICT);
 }
