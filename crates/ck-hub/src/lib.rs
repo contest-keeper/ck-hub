@@ -60,7 +60,7 @@ pub use images::{Image, ImageSource, ImagesError, MANIFEST_BLOB, StaticImages, S
 pub use invite::{AcceptError, INVITATION_LIFETIME_DAYS, InviteError, MemberError, StaffError};
 pub use judge::{EventKey, JudgeSubmission, SubmitEvent, submit_event};
 pub use mail::{ConsoleMailer, Mail, MailError, Mailer, MemoryMailer, token_after};
-pub use matcher::{Code, Verdict, code_check, match_submissions};
+pub use matcher::{Verdict, match_submissions};
 pub use postgres_store::{DEFAULT_POOL_SIZE, PostgresStore};
 pub use profiles::{
     MAX_SETTINGS_BYTES, MAX_WALLPAPER_BYTES, ProfileError, ProfileInput, WallpaperInput,
@@ -84,4 +84,4 @@ pub use store::{
     StoreError, StoredEvent, TokenPurpose, User, Wallpaper,
 };
 pub use submissions::{JudgeRow, StickSubmission, SubmissionsView};
-pub use watcher::{WatchError, hash_sources, poll_once, run as watch};
+pub use watcher::{WatchError, poll_once, run as watch};

@@ -298,26 +298,6 @@ pub trait Store: Send + Sync {
         contest_id: u64,
     ) -> Result<Vec<JudgeSubmission>, StoreError>;
 
-    /// Keeps the hash of the source of a judge submission. Returns whether it was new; a hash that
-    /// is already kept is never replaced.
-    fn add_judge_source_hash(
-        &self,
-        organization: &str,
-        judge: &str,
-        contest_id: u64,
-        submission_id: u64,
-        source_sha256: &str,
-        fetched_at: OffsetDateTime,
-    ) -> Result<bool, StoreError>;
-
-    /// The kept source hashes of one contest, by submission id.
-    fn judge_source_hashes(
-        &self,
-        organization: &str,
-        judge: &str,
-        contest_id: u64,
-    ) -> Result<HashMap<u64, String>, StoreError>;
-
     /// What every stick of the organization reported as submitted to Codeforces, in the order
     /// the Hub received it. Events that are not well-formed Codeforces submits are left out.
     fn submission_events(&self, organization: &str) -> Result<Vec<SubmitEvent>, StoreError>;

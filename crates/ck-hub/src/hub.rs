@@ -1,5 +1,6 @@
 //! What the Hub knows about the sticks, and the rules for accepting a heartbeat.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
@@ -13,7 +14,7 @@ use serde_json::json;
 use time::{Duration, OffsetDateTime};
 
 use crate::accounts::{Accounts, PasswordCost};
-use crate::codeforces::Judge;
+use crate::codeforces::{CodeforcesError, Judge};
 use crate::contest::{self, ContestView};
 use crate::credentials::CredentialScope;
 use crate::download::Download;
@@ -108,6 +109,10 @@ pub struct StickView {
     /// Submissions the stick reported since the Hub started, and the latest of them.
     pub submissions: usize,
     pub last_submission: Option<SubmissionView>,
+    /// How many of this stick's submissions do not agree with the judge: ones the judge does not
+    /// show, ones on the judge the stick did not report, a time or a code that differs. Worked out
+    /// from what the Hub keeps, never by asking the judge, so the list stays quick.
+    pub submission_problems: usize,
     /// Things an organizer should look at: a chain problem, two users on one stick.
     pub warnings: Vec<String>,
 }
@@ -632,13 +637,13 @@ impl Hub {
             return Ok(None);
         };
         let stored = self.store.events(organization, &id)?;
+        let now = (self.clock)();
         let ask = |contest: u64, handle: &str| {
             let judge = self
                 .judge
                 .as_ref()
                 .expect("asked only when there is a judge");
             let key = (contest, handle.to_lowercase());
-            let now = (self.clock)();
             if let Ok(cache) = self.judged.lock()
                 && let Some((at, found)) = cache.get(&key)
                 && now - *at < Duration::seconds(30)
@@ -672,12 +677,7 @@ impl Hub {
         } else {
             None
         };
-        let hashes = |contest: u64| {
-            self.store
-                .judge_source_hashes(organization, "codeforces", contest)
-                .unwrap_or_default()
-        };
-        Ok(Some(submissions::view(&stored, ask, &hashes)))
+        Ok(Some(submissions::view(&stored, ask, now)))
     }
 
     /// Every Codeforces submission of one contest the Hub has kept, with the stick that reported
@@ -696,10 +696,7 @@ impl Hub {
             .into_iter()
             .filter(|event| event.contest_id == contest_id && event.accepted)
             .collect();
-        let hashes = self
-            .store
-            .judge_source_hashes(organization, "codeforces", contest_id)?;
-        Ok(contest::view(contest_id, &judged, &events, &hashes))
+        Ok(contest::view(contest_id, &judged, &events))
     }
 
     /// Every stick of the organization, with its last heartbeat when it has sent one.
@@ -738,7 +735,7 @@ impl Hub {
         });
         let hardware = self.store.hardware(organization)?;
         let expected = self.store.expected_configs(organization)?;
-        let mut views = Vec::new();
+        let (kept, mut views) = (KeptJudge::new(&*self.store, organization), Vec::new());
         for entry in &entries {
             let seen = self.store.last_heartbeat(organization, &entry.stick_id)?;
             let stored = self.store.events(organization, &entry.stick_id)?;
@@ -750,6 +747,7 @@ impl Hub {
                 .iter()
                 .find(|(id, _)| *id == entry.stick_id)
                 .map(|(_, sha256)| sha256.as_str());
+            let submission_problems = kept.problems(&stored, now);
             let last = seen.map(|s| LastHeartbeat {
                 received_at: s.received_at,
                 seconds_ago: (now - s.received_at).whole_seconds().max(0),
@@ -794,8 +792,10 @@ impl Hub {
                 blocked_requests,
                 submissions: stored.iter().filter(|s| taken(s)).count(),
                 last_submission: last_submission(&stored),
+                submission_problems,
                 warnings: {
                     let mut found = warnings(&stored, boot.as_deref());
+                    found.extend(problem_warning(submission_problems));
                     found.extend(self.two_places(organization, &entry.stick_id, now)?);
                     found.extend(config_warning(wrote, reported.as_deref()));
                     found.extend(trust_warning(trust));
@@ -901,6 +901,53 @@ fn last_submission(stored: &[StoredEvent]) -> Option<SubmissionView> {
 /// Why an organizer should look at this stick.
 /// A warning when the stick says it refused a settings file. It went on with its earlier settings,
 /// or with the image's own defaults, so what it does now is not what the file says.
+/// What the watcher kept of the judge, read once per contest while a list is built, so the list of
+/// sticks never asks the judge and does not read the store again for each stick.
+struct KeptJudge<'a> {
+    store: &'a dyn Store,
+    organization: &'a str,
+    rows: RefCell<HashMap<u64, Vec<JudgeSubmission>>>,
+}
+
+impl<'a> KeptJudge<'a> {
+    fn new(store: &'a dyn Store, organization: &'a str) -> Self {
+        Self {
+            store,
+            organization,
+            rows: RefCell::default(),
+        }
+    }
+
+    fn rows(&self, contest: u64) -> Result<Vec<JudgeSubmission>, CodeforcesError> {
+        let mut known = self.rows.borrow_mut();
+        if let Some(rows) = known.get(&contest) {
+            return Ok(rows.clone());
+        }
+        let rows = self
+            .store
+            .judge_submissions(self.organization, "codeforces", contest)
+            .map_err(|error| CodeforcesError::Request(error.to_string()))?;
+        // No watcher for this contest: nothing is known, so nothing is flagged.
+        if rows.is_empty() {
+            return Err(CodeforcesError::Request(
+                submissions::NOTHING_KEPT.to_owned(),
+            ));
+        }
+        known.insert(contest, rows.clone());
+        Ok(rows)
+    }
+
+    /// How many submissions of a stick disagree with what the watcher kept of the judge.
+    fn problems(&self, stored: &[StoredEvent], now: OffsetDateTime) -> usize {
+        let seen = submissions::view(stored, Some(&|contest, _| self.rows(contest)), now);
+        seen.suspect + seen.not_on_judge
+    }
+}
+
+fn problem_warning(problems: usize) -> Option<String> {
+    (problems > 0).then(|| format!("{problems} submission(s) do not agree with the judge."))
+}
+
 fn trust_warning(trust: Option<ck_protocol::ConfigTrust>) -> Option<String> {
     (trust == Some(ck_protocol::ConfigTrust::Rejected)).then(|| {
         "Settings refused: this stick refused a settings file the Hub did not sign (edited, unsigned or made for another stick) and kept its earlier settings.".to_owned()

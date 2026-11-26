@@ -1,8 +1,8 @@
 //! Every judge submission of one contest, each with the stick that explains it.
 //!
 //! The same comparison as the page of one stick, but across all sticks of the organization: a judge
-//! submission is a suspect when no stick reported it, or when a stick did but the code on the judge
-//! is not the code the stick saw.
+//! submission is a suspect when no stick reported it, or when a stick did but its time is not the
+//! judge's.
 
 use std::collections::HashMap;
 
@@ -10,7 +10,7 @@ use serde::Serialize;
 use time::OffsetDateTime;
 
 use crate::judge::{EventKey, JudgeSubmission, SubmitEvent};
-use crate::matcher::{Code, Verdict, code_check, match_submissions};
+use crate::matcher::{Verdict, match_submissions};
 use crate::submissions::WINDOW;
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -43,19 +43,15 @@ pub struct ContestRow {
     pub matched_by: Option<MatchedBy>,
     /// Seconds between the stick's clock and the judge's, when a stick reported it.
     pub time_gap_s: Option<i64>,
-    pub code: Option<Code>,
+    /// A stick reported it, but its time is further from the judge's than the window.
+    pub time_off: bool,
     pub suspect: bool,
 }
 
 /// `judge` and `events` are those of one contest, `events` without the submits the stick saw
-/// refused. `hashes` are the kept source hashes of the judge's submissions, by id.
+/// refused.
 #[must_use]
-pub fn view(
-    contest_id: u64,
-    judge: &[JudgeSubmission],
-    events: &[SubmitEvent],
-    hashes: &HashMap<u64, String>,
-) -> ContestView {
+pub fn view(contest_id: u64, judge: &[JudgeSubmission], events: &[SubmitEvent]) -> ContestView {
     let verdicts = match_submissions(judge, events, WINDOW);
     let by_key: HashMap<&EventKey, &SubmitEvent> =
         events.iter().map(|event| (&event.key, event)).collect();
@@ -65,12 +61,10 @@ pub fn view(
             Verdict::Matched(key) => by_key.get(key).copied(),
             Verdict::Unmatched => None,
         };
-        let code = explained.map(|event| {
-            code_check(
-                event,
-                hashes.get(&submission.submission_id).map(String::as_str),
-            )
-        });
+        let time_gap_s =
+            explained.map(|event| (event.at - submission.submitted_at).whole_seconds());
+        // An id that matches does not excuse a time that does not: both are checked.
+        let time_off = time_gap_s.is_some_and(|gap| gap.abs() > WINDOW.whole_seconds());
         rows.push(ContestRow {
             submission_id: submission.submission_id,
             problem: submission.problem_index.clone(),
@@ -84,9 +78,9 @@ pub fn view(
                     MatchedBy::Time
                 }
             }),
-            time_gap_s: explained.map(|event| (event.at - submission.submitted_at).whole_seconds()),
-            suspect: explained.is_none() || code == Some(Code::Different),
-            code,
+            time_gap_s,
+            time_off,
+            suspect: explained.is_none() || time_off,
         });
     }
     rows.sort_by_key(|row| std::cmp::Reverse((row.submitted_at, row.submission_id)));
@@ -116,13 +110,7 @@ mod tests {
         }
     }
 
-    fn event(
-        stick: &str,
-        handle: &str,
-        seconds: i64,
-        id: Option<u64>,
-        hash: Option<&str>,
-    ) -> SubmitEvent {
+    fn event(stick: &str, handle: &str, seconds: i64, id: Option<u64>) -> SubmitEvent {
         SubmitEvent {
             key: (stick.to_owned(), "boot".to_owned(), 1),
             handle: handle.to_owned(),
@@ -130,35 +118,24 @@ mod tests {
             problem_index: "A".to_owned(),
             at: at(seconds),
             submission_id: id,
-            source_sha256_norm: hash.map(str::to_owned),
             accepted: true,
         }
     }
 
-    fn judge_hashes(pairs: &[(u64, &str)]) -> HashMap<u64, String> {
-        pairs
-            .iter()
-            .map(|(id, hash)| (*id, (*hash).to_owned()))
-            .collect()
-    }
-
     #[test]
-    fn id_time_code_and_a_stranger_are_told_apart() {
+    fn id_time_and_a_stranger_are_told_apart() {
         let submissions = [
-            judge(1, "ana", 0),   // by id, same code
-            judge(2, "bob", 100), // by time, other code: suspect
+            judge(1, "ana", 0),   // by id, same time
+            judge(2, "bob", 100), // by time, 3 s apart
             judge(3, "cy", 200),  // no stick reported it: suspect
-            judge(4, "dan", 300), // by id, stick saw a cut: cannot compare
-            judge(5, "eve", 400), // by id, the judge's code is not read yet
+            judge(4, "dan", 300), // by id, but the stick's time is 5 minutes off: suspect
         ];
         let events = [
-            event("s1", "ana", 0, Some(1), Some("h1")),
-            event("s2", "bob", 103, None, Some("hx")),
-            event("s3", "dan", 300, Some(4), None),
-            event("s4", "eve", 400, Some(5), Some("h5")),
+            event("s1", "ana", 0, Some(1)),
+            event("s2", "bob", 103, None),
+            event("s3", "dan", 600, Some(4)),
         ];
-        let hashes = judge_hashes(&[(1, "h1"), (2, "h2"), (4, "h4")]);
-        let view = view(1, &submissions, &events, &hashes);
+        let view = view(1, &submissions, &events);
 
         let row = |id: u64| {
             view.submissions
@@ -167,19 +144,16 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(row(1).matched_by, Some(MatchedBy::Id));
-        assert_eq!(row(1).code, Some(Code::Same));
         assert!(!row(1).suspect);
         assert_eq!(row(2).matched_by, Some(MatchedBy::Time));
         assert_eq!(row(2).time_gap_s, Some(3));
-        assert_eq!(row(2).code, Some(Code::Different));
-        assert!(row(2).suspect);
+        assert!(!row(2).suspect);
         assert_eq!(row(3).stick_id, None);
         assert!(row(3).suspect);
-        assert_eq!(row(4).code, Some(Code::NotComparable));
-        assert!(!row(4).suspect);
-        assert_eq!(row(5).code, Some(Code::NotReadYet));
-        assert_eq!(view.matched, 4);
+        assert_eq!(row(4).matched_by, Some(MatchedBy::Id));
+        assert!(row(4).time_off && row(4).suspect);
+        assert_eq!(view.matched, 3);
         assert_eq!(view.suspect, 2);
-        assert_eq!(view.submissions[0].submission_id, 5, "newest first");
+        assert_eq!(view.submissions[0].submission_id, 4, "newest first");
     }
 }

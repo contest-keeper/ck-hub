@@ -844,22 +844,10 @@ async fn the_contest_view_compares_id_time_and_code_and_a_down_judge_does_not_bl
             at("2026-11-12T10:30:00Z"),
         )
         .expect("kept");
-    setup
-        .store
-        .add_judge_source_hash(
-            &organization,
-            "codeforces",
-            2285,
-            800,
-            "abc",
-            at("2026-11-12T11:00:00Z"),
-        )
-        .expect("hash");
-
     let login = serde_json::json!({"platform": "codeforces", "username": "ana"});
     let submit = serde_json::json!({"platform": "codeforces", "username": "ana",
         "contest_id": "2285", "problem": "A", "language": "91", "accepted": true,
-        "submission_id": 800, "source_sha256_norm": "ABC"});
+        "submission_id": 800});
     send_kind(&setup.app, 1, EventKind::Login, login).await;
     send_kind(&setup.app, 2, EventKind::Submission, submit).await;
 
@@ -877,7 +865,6 @@ async fn the_contest_view_compares_id_time_and_code_and_a_down_judge_does_not_bl
     assert_eq!(seen["submissions"][0]["suspect"], true);
     assert_eq!(seen["submissions"][1]["stick_id"], "stick-a");
     assert_eq!(seen["submissions"][1]["matched_by"], "id");
-    assert_eq!(seen["submissions"][1]["code"], "same");
 
     // The judge is down, but the Hub still shows what it kept for the stick.
     let request = Request::get("/api/v1/orgs/default/sticks/stick-a/submissions")
@@ -887,13 +874,67 @@ async fn the_contest_view_compares_id_time_and_code_and_a_down_judge_does_not_bl
     let (_, text) = call(&setup.app, request).await;
     let stick: serde_json::Value = serde_json::from_str(&text).expect("json");
     assert_eq!(stick["judge"][0]["submission_id"], 800);
-    assert_eq!(stick["judge"][0]["code"], "same");
     assert_eq!(stick["suspect"], 0);
 
     let request = Request::get("/api/v1/orgs/default/contests/2285/submissions")
         .body(Body::empty())
         .expect("request");
     assert_eq!(call(&setup.app, request).await.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn the_stick_list_marks_a_stick_whose_account_submitted_from_elsewhere() {
+    let setup = setup();
+    let organization = setup
+        .store
+        .organization_by_slug("default")
+        .expect("read")
+        .expect("organization")
+        .id;
+    let at = |text: &str| {
+        text.parse::<ck_protocol::Timestamp>()
+            .expect("time")
+            .as_offset_date_time()
+    };
+    let row = |id, when: &str| ck_hub::JudgeSubmission {
+        submission_id: id,
+        contest_id: 2285,
+        handles: vec!["ana".to_owned()],
+        problem_index: "A".to_owned(),
+        submitted_at: at(when),
+    };
+    // 800 is the stick's submit; 900 is the same account, 15 minutes later, not from the stick.
+    let kept = [
+        row(800, "2026-11-12T10:05:00Z"),
+        row(900, "2026-11-12T10:20:00Z"),
+    ];
+    setup
+        .store
+        .add_judge_submissions(
+            &organization,
+            "codeforces",
+            &kept,
+            at("2026-11-12T10:30:00Z"),
+        )
+        .expect("kept");
+    let login = serde_json::json!({"platform": "codeforces", "username": "ana"});
+    let submit = serde_json::json!({"platform": "codeforces", "username": "ana",
+        "contest_id": "2285", "problem": "A", "accepted": true, "submission_id": 800});
+    send_kind(&setup.app, 1, EventKind::Login, login).await;
+    send_kind(&setup.app, 2, EventKind::Submission, submit).await;
+
+    let sticks = list(&setup.app).await;
+    let stick = &sticks.as_array().expect("list")[0];
+    assert_eq!(stick["submission_problems"], 1);
+    assert!(
+        stick["warnings"]
+            .as_array()
+            .expect("warnings")
+            .iter()
+            .any(|w| w
+                .as_str()
+                .is_some_and(|w| w.contains("do not agree with the judge")))
+    );
 }
 
 #[tokio::test]
