@@ -237,7 +237,7 @@ fn stick_submissions(
                         .covered
                         .get(&(event.contest_id, event.handle.to_lowercase()))
                         .is_some_and(|covered| {
-                            covered.from.is_none_or(|from| event.at >= from)
+                            covered.from.is_none_or(|from| event.at - WINDOW >= from)
                                 && covered.to - event.at >= WINDOW
                         })
             });
@@ -359,14 +359,16 @@ pub fn view(stored: &[StoredEvent], ask: Option<&Ask>, now: OffsetDateTime) -> S
             explained.insert(key.clone(), submission.submission_id);
         }
         let from_stick = matches!(verdict, Verdict::Matched(_));
-        let time_gap_s = match verdict {
+        let gap = match verdict {
             Verdict::Matched(key) => by_key
                 .get(key)
-                .map(|event| (event.at - submission.submitted_at).whole_seconds()),
+                .map(|event| event.at - submission.submitted_at),
             Verdict::Unmatched => None,
         };
-        // An id that matches does not excuse a time that does not: both are checked.
-        let time_off = time_gap_s.is_some_and(|gap| gap.abs() > WINDOW.whole_seconds());
+        let time_gap_s = gap.map(Duration::whole_seconds);
+        // An id that matches does not excuse a time that does not: both are checked, on the whole
+        // duration, as the matcher does, not on the seconds shown.
+        let time_off = gap.is_some_and(|gap| gap.abs() > WINDOW);
         rows.push(JudgeRow {
             submission_id: submission.submission_id,
             contest_id: submission.contest_id,

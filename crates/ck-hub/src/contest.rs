@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use serde::Serialize;
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 
 use crate::judge::{EventKey, JudgeSubmission, SubmitEvent};
 use crate::matcher::{Verdict, match_submissions};
@@ -61,10 +61,11 @@ pub fn view(contest_id: u64, judge: &[JudgeSubmission], events: &[SubmitEvent]) 
             Verdict::Matched(key) => by_key.get(key).copied(),
             Verdict::Unmatched => None,
         };
-        let time_gap_s =
-            explained.map(|event| (event.at - submission.submitted_at).whole_seconds());
-        // An id that matches does not excuse a time that does not: both are checked.
-        let time_off = time_gap_s.is_some_and(|gap| gap.abs() > WINDOW.whole_seconds());
+        let gap = explained.map(|event| event.at - submission.submitted_at);
+        let time_gap_s = gap.map(Duration::whole_seconds);
+        // An id that matches does not excuse a time that does not: both are checked, on the whole
+        // duration, as the matcher does, not on the seconds shown.
+        let time_off = gap.is_some_and(|gap| gap.abs() > WINDOW);
         rows.push(ContestRow {
             submission_id: submission.submission_id,
             problem: submission.problem_index.clone(),
@@ -155,5 +156,14 @@ mod tests {
         assert_eq!(view.matched, 3);
         assert_eq!(view.suspect, 2);
         assert_eq!(view.submissions[0].submission_id, 4, "newest first");
+    }
+
+    #[test]
+    fn a_gap_of_half_a_second_over_the_window_is_off_though_it_shows_as_the_window() {
+        let mut seen = event("s1", "ana", 130, Some(1));
+        seen.at += Duration::milliseconds(500);
+        let view = view(1, &[judge(1, "ana", 100)], &[seen]);
+        assert_eq!(view.submissions[0].time_gap_s, Some(30));
+        assert!(view.submissions[0].time_off);
     }
 }
