@@ -621,12 +621,19 @@ impl Hub {
         };
         let seq = event.seq;
         let ack_event = (event.kind == EventKind::CommandAck).then(|| event.clone());
-        let stored = self.store.append_event(
+        let stored = match self.store.append_event(
             &organization,
             event,
             (self.clock)(),
             integrity.map(str::to_owned),
-        )?;
+        ) {
+            Ok(stored) => stored,
+            Err(error) => {
+                // The write may have gone through before the error: count again from the store.
+                self.event_totals.lock().expect("totals lock").remove(&id);
+                return Err(error.into());
+            }
+        };
         // A copy the database dropped (another process won the race) changes nothing.
         if stored {
             if let Some(total) = self.event_totals.lock().expect("totals lock").get_mut(&id) {
