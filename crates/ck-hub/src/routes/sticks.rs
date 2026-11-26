@@ -182,7 +182,7 @@ pub(super) async fn contest_submissions_of(
             })
             .await
             {
-                Ok(Ok(view)) => Json(view).into_response(),
+                Ok(Ok(view)) => ([("cache-control", "no-store")], Json(view)).into_response(),
                 Ok(Err(error)) => {
                     tracing::error!("{error}");
                     unavailable()

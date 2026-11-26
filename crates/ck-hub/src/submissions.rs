@@ -175,14 +175,14 @@ pub type Hashes<'a> = dyn Fn(u64) -> HashMap<u64, String> + 'a;
 fn code_of(
     verdict: &Verdict,
     submission: &JudgeSubmission,
-    events: &[SubmitEvent],
+    by_key: &HashMap<&EventKey, &SubmitEvent>,
     hashes: &Hashes,
     hash_of: &mut HashMap<u64, HashMap<u64, String>>,
 ) -> Option<Code> {
     let Verdict::Matched(key) = verdict else {
         return None;
     };
-    let event = events.iter().find(|event| &event.key == key)?;
+    let event = by_key.get(key).copied()?;
     let known = hash_of
         .entry(submission.contest_id)
         .or_insert_with(|| hashes(submission.contest_id));
@@ -251,6 +251,8 @@ pub fn view(stored: &[StoredEvent], ask: Option<&Ask>, hashes: &Hashes) -> Submi
         .collect();
     let verdicts = match_submissions(&judged, &events, WINDOW);
     let mut hash_of: HashMap<u64, HashMap<u64, String>> = HashMap::new();
+    let by_key: HashMap<&EventKey, &SubmitEvent> =
+        events.iter().map(|event| (&event.key, event)).collect();
     let mut explained: HashMap<EventKey, u64> = HashMap::new();
     let mut rows: Vec<JudgeRow> = Vec::new();
     for (submission, verdict) in judged.iter().zip(&verdicts) {
@@ -258,7 +260,7 @@ pub fn view(stored: &[StoredEvent], ask: Option<&Ask>, hashes: &Hashes) -> Submi
             explained.insert(key.clone(), submission.submission_id);
         }
         let from_stick = matches!(verdict, Verdict::Matched(_));
-        let code = code_of(verdict, submission, &events, hashes, &mut hash_of);
+        let code = code_of(verdict, submission, &by_key, hashes, &mut hash_of);
         rows.push(JudgeRow {
             submission_id: submission.submission_id,
             contest_id: submission.contest_id,

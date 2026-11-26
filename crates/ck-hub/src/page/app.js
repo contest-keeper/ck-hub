@@ -2,10 +2,19 @@
 const contestViews = new Map();
 const openContests = new Set();
 const suspectOnly = new Set();
+const contestRequests = new Map();
+
+// A contest of one organization: the maps above must not mix organizations.
+function contestKey(contest) {
+  return org + ":" + contest;
+}
 
 async function fetchContest(contest) {
-  const before = contestViews.get(contest);
-  contestViews.set(contest, { at: Date.now(), data: before ? before.data : null, failed: false });
+  const key = contestKey(contest);
+  const token = (contestRequests.get(key) || 0) + 1;
+  contestRequests.set(key, token);
+  const before = contestViews.get(key);
+  contestViews.set(key, { at: Date.now(), data: before ? before.data : null, failed: false });
   let data = before ? before.data : null;
   let failed = false;
   try {
@@ -15,7 +24,9 @@ async function fetchContest(contest) {
   } catch (error) {
     failed = true;
   }
-  contestViews.set(contest, { at: Date.now(), data, failed });
+  // An older request that finishes after a newer one must not overwrite it.
+  if (contestRequests.get(key) !== token) return;
+  contestViews.set(key, { at: Date.now(), data, failed });
   render();
 }
 
@@ -31,16 +42,18 @@ function codeText(code) {
 
 function contestPanel(contest) {
   const box = el("div", "net");
-  const open = openContests.has(contest);
+  const key = contestKey(contest);
+  const open = openContests.has(key);
   const toggle = el("button", "", (open ? "Hide" : "Show") + " all submissions of contest " + contest);
   toggle.type = "button";
+  toggle.dataset.key = "contest-toggle:" + key;
   toggle.addEventListener("click", () => {
-    if (openContests.has(contest)) openContests.delete(contest); else openContests.add(contest);
+    if (openContests.has(key)) openContests.delete(key); else openContests.add(key);
     render();
   });
   box.appendChild(toggle);
   if (!open) return box;
-  const cached = contestViews.get(contest);
+  const cached = contestViews.get(key);
   if (!cached || Date.now() - cached.at > 30000) fetchContest(contest);
   if (!cached || !cached.data) {
     box.appendChild(el("p", "muted", cached && cached.failed ? "The contest could not be loaded." : "Loading…"));
@@ -51,14 +64,15 @@ function contestPanel(contest) {
   const label = el("label", "", " only the suspect ones");
   const check = el("input");
   check.type = "checkbox";
-  check.checked = suspectOnly.has(contest);
+  check.checked = suspectOnly.has(key);
+  check.dataset.key = "contest-only:" + key;
   check.addEventListener("change", () => {
-    if (check.checked) suspectOnly.add(contest); else suspectOnly.delete(contest);
+    if (check.checked) suspectOnly.add(key); else suspectOnly.delete(key);
     render();
   });
   label.prepend(check);
   box.appendChild(label);
-  const shown = data.submissions.filter((s) => !suspectOnly.has(contest) || s.suspect);
+  const shown = data.submissions.filter((s) => !suspectOnly.has(key) || s.suspect);
   box.appendChild(proofTable(["Time", "User", "Problem", "Submission", "Stick", "Matched by", "Code"],
     shown.map((s) => [[
       new Date(s.submitted_at).toLocaleTimeString(),

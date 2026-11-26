@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use serde::Serialize;
 use time::OffsetDateTime;
 
-use crate::judge::{JudgeSubmission, SubmitEvent};
+use crate::judge::{EventKey, JudgeSubmission, SubmitEvent};
 use crate::matcher::{Code, Verdict, code_check, match_submissions};
 use crate::submissions::WINDOW;
 
@@ -57,10 +57,12 @@ pub fn view(
     hashes: &HashMap<u64, String>,
 ) -> ContestView {
     let verdicts = match_submissions(judge, events, WINDOW);
+    let by_key: HashMap<&EventKey, &SubmitEvent> =
+        events.iter().map(|event| (&event.key, event)).collect();
     let mut rows = Vec::with_capacity(judge.len());
     for (submission, verdict) in judge.iter().zip(&verdicts) {
         let explained = match verdict {
-            Verdict::Matched(key) => events.iter().find(|event| &event.key == key),
+            Verdict::Matched(key) => by_key.get(key).copied(),
             Verdict::Unmatched => None,
         };
         let code = explained.map(|event| {

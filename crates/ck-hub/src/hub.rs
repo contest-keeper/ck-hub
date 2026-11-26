@@ -650,13 +650,16 @@ impl Hub {
                 // The watcher keeps what Codeforces said, so a judge that is down for a while does
                 // not blank the page. With nothing kept the judge's own error is told.
                 Err(error) => {
-                    match self
+                    // Only this person's rows count: with none of them the outage is still told.
+                    let mut kept = self
                         .store
                         .judge_submissions(organization, "codeforces", contest)
-                    {
-                        Ok(kept) if !kept.is_empty() => return Ok(kept),
-                        _ => return Err(error),
+                        .unwrap_or_default();
+                    kept.retain(|s| s.handles.iter().any(|h| h.eq_ignore_ascii_case(handle)));
+                    if kept.is_empty() {
+                        return Err(error);
                     }
+                    return Ok(kept);
                 }
             };
             if let Ok(mut cache) = self.judged.lock() {
