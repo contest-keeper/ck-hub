@@ -590,6 +590,14 @@ impl Hub {
         if request.size > MAX_FILE_BYTES {
             return Err(RecordingError::TooBig);
         }
+        // PostgreSQL cannot keep it; refused here, the stick is told once instead of getting a 503
+        // and retrying for ever.
+        if request
+            .duration_s
+            .is_some_and(|s| i64::try_from(s).is_err())
+        {
+            return Err(RecordingError::BadRequest("the duration is not valid"));
+        }
         let existing = self.store.recordings_of(&organization, &stick, 10_000)?;
         if let Some(same) = existing.iter().find(|r| r.file == request.file) {
             if same.size != request.size || same.sha256 != request.sha256 {
@@ -651,6 +659,24 @@ impl Hub {
         self.chunk_rate_limit(&stick)?;
         let recording = self.own_recording(&organization, &stick, id)?;
         Ok(UploadStatus::of(&recording))
+    }
+
+    /// Checks who sends chunk `index` before its body is read.
+    ///
+    /// # Errors
+    /// [`RecordingError::Unauthorized`] for an unknown stick or a bad signature.
+    pub fn check_chunk_sender(
+        &self,
+        stick_header: Option<&str>,
+        signature: Option<&str>,
+        id: &str,
+        index: u32,
+        chunk_sha256: &str,
+    ) -> Result<(), RecordingError> {
+        self.blobs()?;
+        let text = signed_text("chunk", &[id, &index.to_string(), chunk_sha256]);
+        self.stick_for_upload(stick_header, signature, text.as_bytes())
+            .map(|_| ())
     }
 
     /// Takes chunk `index` of a recording. A chunk the Hub already has is answered as accepted

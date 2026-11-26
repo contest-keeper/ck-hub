@@ -309,6 +309,7 @@ dependencies = [
  "ck-protocol",
  "clap",
  "hmac",
+ "http-body",
  "http-body-util",
  "postgres",
  "proptest",

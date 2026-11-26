@@ -385,3 +385,12 @@ async fn ids_and_names_are_checked() {
     .await;
     assert_eq!(not_a_profile.status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn a_stranger_is_refused_before_a_big_profile_is_read() {
+    let s = setup().await;
+    let huge = "a".repeat(20 * 1024 * 1024);
+    let body = json!({ "name": "x", "settings": { "t": huge }, "wallpaper": null });
+    let answer = send(&s.app, "PUT", "/api/v1/profiles/p-9", None, Some(body)).await;
+    assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
+}

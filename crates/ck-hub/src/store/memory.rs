@@ -4,8 +4,8 @@ use super::{
     AtomicU64, BootSpan, CLAIM_RECOVERY, CommandAck, CommandState, EnrolledStick, Event,
     FirstAndLast, Hardware, HashMap, Heartbeat, Invitation, JudgeSubmission, Member, Membership,
     Mutex, NewEnrolmentCode, NewProfile, NewUser, OffsetDateTime, Ordering, Organization, Profile,
-    ProfileSummary, Recording, Redemption, Role, SeenHeartbeat, Stick, StickHardware, StickId,
-    Store, StoreError, StoredCommand, StoredEvent, SubmitEvent, Token, TokenPurpose, User,
+    ProfileSummary, Recording, Redemption, Removal, Role, SeenHeartbeat, Stick, StickHardware,
+    StickId, Store, StoreError, StoredCommand, StoredEvent, SubmitEvent, Token, TokenPurpose, User,
     Wallpaper, settled, submit_event,
 };
 
@@ -23,6 +23,8 @@ pub struct MemoryStore {
     boot_seqs: Mutex<HashMap<(String, StickId, String), u64>>,
     boot_times: Mutex<HashMap<(String, StickId, String), FirstAndLast>>,
     events: Mutex<HashMap<(String, StickId), Vec<StoredEvent>>>,
+    /// (organization, stick, boot, seq) of every stored event, to drop a repeat as the database does.
+    event_keys: Mutex<std::collections::HashSet<(String, StickId, String, u64)>>,
     judge_submissions: Mutex<Vec<(String, String, JudgeSubmission)>>,
     users: Mutex<Vec<User>>,
     sessions: Mutex<HashMap<String, (String, OffsetDateTime)>>,
@@ -272,10 +274,18 @@ impl Store for MemoryStore {
         event: Event,
         received_at: OffsetDateTime,
         integrity: Option<String>,
-    ) -> Result<(), StoreError> {
-        self.events
-            .lock()
-            .expect("events lock")
+    ) -> Result<bool, StoreError> {
+        let mut events = self.events.lock().expect("events lock");
+        let key = (
+            organization.to_owned(),
+            event.stick_id.clone(),
+            event.boot_id.clone(),
+            event.seq,
+        );
+        if !self.event_keys.lock().expect("event keys lock").insert(key) {
+            return Ok(false);
+        }
+        events
             .entry((organization.to_owned(), event.stick_id.clone()))
             .or_default()
             .push(StoredEvent {
@@ -283,7 +293,14 @@ impl Store for MemoryStore {
                 event,
                 integrity,
             });
-        Ok(())
+        Ok(true)
+    }
+
+    fn event_count(&self, organization: &str, stick: &StickId) -> Result<u64, StoreError> {
+        let events = self.events.lock().expect("events lock");
+        Ok(events
+            .get(&(organization.to_owned(), stick.clone()))
+            .map_or(0, |kept| kept.len() as u64))
     }
 
     fn events(&self, organization: &str, stick: &StickId) -> Result<Vec<StoredEvent>, StoreError> {
@@ -687,19 +704,25 @@ impl Store for MemoryStore {
         Ok(found)
     }
 
-    fn remove_member(&self, organization_id: &str, user_id: &str) -> Result<bool, StoreError> {
+    fn remove_member(&self, organization_id: &str, user_id: &str) -> Result<Removal, StoreError> {
         let mut members = self.members.lock().expect("members lock");
-        let before = members.len();
-        members.retain(|(org, user, _)| !(org == organization_id && user == user_id));
-        Ok(members.len() < before)
-    }
-
-    fn count_owners(&self, organization_id: &str) -> Result<usize, StoreError> {
-        let members = self.members.lock().expect("members lock");
-        Ok(members
+        let owners = members
             .iter()
             .filter(|(org, _, role)| org == organization_id && *role == Role::Owner)
-            .count())
+            .count();
+        let is_owner = members.iter().any(|(org, user, role)| {
+            org == organization_id && user == user_id && *role == Role::Owner
+        });
+        if is_owner && owners <= 1 {
+            return Ok(Removal::LastOwner);
+        }
+        let before = members.len();
+        members.retain(|(org, user, _)| !(org == organization_id && user == user_id));
+        Ok(if members.len() < before {
+            Removal::Removed
+        } else {
+            Removal::NotMember
+        })
     }
 
     fn set_staff(&self, user_id: &str, staff: bool) -> Result<(), StoreError> {
@@ -903,7 +926,13 @@ impl Store for MemoryStore {
             .lock()
             .expect("boot times lock")
             .retain(|(org, stick, _), _| !(org == organization && stick == id));
-        self.events.lock().expect("events lock").remove(&key);
+        let mut events = self.events.lock().expect("events lock");
+        events.remove(&key);
+        self.event_keys
+            .lock()
+            .expect("event keys lock")
+            .retain(|(org, stick, _, _)| !(org == organization && stick == id));
+        drop(events);
         self.expected_configs
             .lock()
             .expect("expected configs lock")

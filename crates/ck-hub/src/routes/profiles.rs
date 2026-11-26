@@ -1,9 +1,9 @@
 //! Keeper Forge contest profiles.
 
 use super::{
-    Arc, Bytes, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, HeaderMap, Hub, IntoResponse,
-    Json, MAX_SETTINGS_BYTES, MAX_WALLPAPER_BYTES, Path, ProfileError, ProfileInput, Response,
-    Role, State, StatusCode, content_type, denied, json, require, rfc3339, unavailable,
+    Arc, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, HeaderMap, Hub, IntoResponse, Json,
+    MAX_SETTINGS_BYTES, MAX_WALLPAPER_BYTES, Path, ProfileError, ProfileInput, Response, Role,
+    State, StatusCode, content_type, denied, json, require, rfc3339, unavailable,
 };
 
 /// A profile with a wallpaper at the limit: the picture in base64 (a third larger) and the settings.
@@ -73,12 +73,17 @@ pub(super) async fn read_profile(
 pub(super) async fn save_profile(
     State(hub): State<Arc<Hub>>,
     Path(id): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
+    request: axum::extract::Request,
 ) -> Response {
-    let access = match require(&hub, &headers, Role::Admin).await {
+    // The session is checked before the body is read, so a stranger cannot make the Hub buffer
+    // megabytes.
+    let (parts, body) = request.into_parts();
+    let access = match require(&hub, &parts.headers, Role::Admin).await {
         Ok(access) => access,
         Err(reason) => return denied(reason),
+    };
+    let Ok(body) = axum::body::to_bytes(body, MAX_PROFILE_BODY_BYTES).await else {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     };
     let input: ProfileInput = match serde_json::from_slice(&body) {
         Ok(input) => input,

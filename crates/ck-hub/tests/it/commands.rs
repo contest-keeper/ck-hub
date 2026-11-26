@@ -263,34 +263,15 @@ async fn unlock_requires_the_right_admin_and_only_reaches_a_capable_stick() {
         .iter()
         .find(|command| command["id"] == id)
         .expect("Unlock");
-    assert_eq!(held["state"], "queued");
+    assert_eq!(held["state"], "failed");
     assert_eq!(
         send(&s.app, &admin, "stick-a", &unlock).await.0,
         StatusCode::BAD_REQUEST
     );
 
+    // The closed command is never delivered, even once the stick reports support.
     let current_reply = heartbeat_with_unlock(&s.app, "stick-a", TOKEN_A, 3, true).await;
-    let delivered = current_reply
-        .iter()
-        .find(|command| command.command.id == id)
-        .expect("Unlock");
-    assert_eq!(
-        serde_json::to_value(&delivered.command.action).expect("action"),
-        unlock["action"]
-    );
-    ck_crypto::verify_command(&Token::new(TOKEN_A), delivered).expect("valid signature");
-    assert_eq!(
-        ack(&s.app, "stick-a", TOKEN_A, id, "ok").await,
-        StatusCode::OK
-    );
-    let history = history(&s.app, &viewer, "stick-a").await;
-    let done = history
-        .as_array()
-        .expect("history")
-        .iter()
-        .find(|command| command["id"] == id)
-        .expect("Unlock");
-    assert_eq!(done["state"], "done");
+    assert!(current_reply.iter().all(|command| command.command.id != id));
 }
 
 #[tokio::test]

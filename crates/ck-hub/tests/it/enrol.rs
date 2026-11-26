@@ -112,8 +112,13 @@ async fn mint(app: &Router, cookie: &str, body: &Value) -> (StatusCode, Value) {
 }
 
 async fn enrol(app: &Router, code: &str) -> (StatusCode, Value) {
+    enrol_from(app, code, "203.0.113.1").await
+}
+
+async fn enrol_from(app: &Router, code: &str, source: &str) -> (StatusCode, Value) {
     let request = Request::post("/api/v1/enrol")
         .header("content-type", "application/json")
+        .header("x-forwarded-for", format!("6.6.6.6, {source}"))
         .body(Body::from(json!({ "code": code }).to_string()))
         .expect("request");
     call(app, request).await
@@ -353,13 +358,15 @@ async fn a_flood_of_wrong_codes_is_slowed_down_for_everyone() {
     let s = setup();
     for i in 0..30 {
         assert_eq!(
-            enrol(&s.app, "wrong").await.0,
+            enrol_from(&s.app, "wrong", &format!("198.51.100.{i}"))
+                .await
+                .0,
             StatusCode::UNAUTHORIZED,
             "{i}"
         );
     }
     assert_eq!(
-        enrol(&s.app, "wrong").await.0,
+        enrol_from(&s.app, "wrong", "198.51.100.99").await.0,
         StatusCode::TOO_MANY_REQUESTS
     );
     // A minute later it is open again.
@@ -516,4 +523,26 @@ async fn writing_the_same_disk_again_shows_the_stick_as_rewritten() {
             StatusCode::BAD_REQUEST
         );
     }
+}
+
+#[tokio::test]
+async fn one_source_guessing_codes_does_not_lock_enrolment_for_another() {
+    let s = setup();
+    let owner = cookie(&s.app, "owner@example.org").await;
+    let (_, minted) = mint(&s.app, &owner, &json!({ "lifetime_minutes": 5 })).await;
+    let code = minted["code"].as_str().expect("code").to_owned();
+    for _ in 0..10 {
+        assert_eq!(
+            enrol_from(&s.app, "wrong", "192.0.2.1").await.0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        enrol_from(&s.app, &code, "192.0.2.1").await.0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        enrol_from(&s.app, &code, "192.0.2.2").await.0,
+        StatusCode::OK
+    );
 }

@@ -600,3 +600,90 @@ async fn deleting_an_archived_stick_removes_its_recording_files_from_storage() {
     );
     assert!(s.blobs.names().is_empty(), "{:?}", s.blobs.names());
 }
+
+#[tokio::test]
+async fn an_unsigned_chunk_is_refused_before_its_body_is_read() {
+    let s = setup(true);
+    let data = bytes_of(CHUNK_BYTES + 10);
+    let (_, started) = start(&s.app, "stick-a", "token-of-stick-a", "big.mkv", &data).await;
+    let id = started["id"].as_str().expect("id").to_owned();
+    let big = bytes_of(CHUNK_BYTES + 2);
+    let digest = sha(&big);
+    let request = Request::put(format!("/api/v1/recordings/{id}/chunks/0"))
+        .header(STICK_HEADER, "stick-a")
+        .header(SIGNATURE_HEADER, "00")
+        .header("x-ck-chunk-sha256", digest)
+        .body(Body::from(big))
+        .expect("request");
+    let (code, _, _) = call(&s.app, request).await;
+    assert_eq!(code, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_duration_the_database_cannot_keep_is_a_bad_request() {
+    let s = setup(true);
+    let data = bytes_of(10);
+    let body = json!({
+        "file": "a.mkv", "kind": "video", "size": data.len(), "sha256": sha(&data),
+        "duration_s": u64::MAX
+    })
+    .to_string();
+    let request = Request::post("/api/v1/recordings")
+        .header(STICK_HEADER, "stick-a")
+        .header(SIGNATURE_HEADER, sign("token-of-stick-a", body.as_bytes()))
+        .body(Body::from(body))
+        .expect("request");
+    let (code, _, _) = call(&s.app, request).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+}
+
+/// A body whose bytes never arrive.
+struct Stalled;
+
+impl http_body::Body for Stalled {
+    type Data = axum::body::Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        std::task::Poll::Pending
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_chunk_body_that_never_arrives_times_out_and_frees_its_slot() {
+    let s = setup(true);
+    let data = bytes_of(CHUNK_BYTES + 10);
+    let (_, started) = start(&s.app, "stick-a", "token-of-stick-a", "slow.mkv", &data).await;
+    let id = started["id"].as_str().expect("id").to_owned();
+    let digest = sha(&data[..CHUNK_BYTES]);
+    let signed = format!("ck-recording-chunk\n{id}\n0\n{digest}");
+    // More stalled uploads than there are slots: a slot that was not given back would block the
+    // later ones for good.
+    for _ in 0..12 {
+        let request = Request::put(format!("/api/v1/recordings/{id}/chunks/0"))
+            .header(STICK_HEADER, "stick-a")
+            .header(
+                SIGNATURE_HEADER,
+                sign("token-of-stick-a", signed.as_bytes()),
+            )
+            .header("x-ck-chunk-sha256", digest.clone())
+            .body(Body::new(Stalled))
+            .expect("request");
+        let (code, _, _) = call(&s.app, request).await;
+        assert_eq!(code, StatusCode::REQUEST_TIMEOUT);
+    }
+    // The slot is free again: a real chunk goes through.
+    let (code, _) = chunk(
+        &s.app,
+        "stick-a",
+        "token-of-stick-a",
+        &id,
+        0,
+        &data[..CHUNK_BYTES],
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+}

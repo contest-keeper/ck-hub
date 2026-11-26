@@ -580,10 +580,13 @@ async fn run(args: ServeArgs) -> Result<(), String> {
         .await
         .map_err(|e| format!("cannot listen on {}: {e}", args.listen))?;
     tracing::info!("listening on {}", args.listen);
-    axum::serve(listener, router(hub))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|e| e.to_string())
+    axum::serve(
+        listener,
+        router(hub).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// The key stick settings are signed with, read from the environment. Only the id of its public

@@ -437,3 +437,34 @@ async fn an_account_in_several_organizations_reaches_each_by_its_address() {
         "no single role when there are several organizations"
     );
 }
+
+#[tokio::test]
+async fn one_source_guessing_does_not_lock_login_for_another_source() {
+    let setup = setup();
+    let from = |source: &'static str, name: String, password: &'static str| {
+        let app = setup.app.clone();
+        async move {
+            let request = Request::post("/api/v1/login")
+                .header("content-type", "application/json")
+                .header("x-forwarded-for", format!("6.6.6.6, {source}"))
+                .body(Body::from(
+                    serde_json::json!({ "email": name, "password": password }).to_string(),
+                ))
+                .expect("request");
+            app.oneshot(request).await.expect("response").status()
+        }
+    };
+    for round in 0..10 {
+        let status = from("192.0.2.1", format!("nobody{round}@example.org"), "wrong").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    // The guesser is refused even with a right password; somebody else logs in fine.
+    assert_eq!(
+        from("192.0.2.1", "vera@example.org".to_owned(), PASSWORD).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        from("192.0.2.2", "vera@example.org".to_owned(), PASSWORD).await,
+        StatusCode::OK
+    );
+}

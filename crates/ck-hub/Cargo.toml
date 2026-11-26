@@ -25,7 +25,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
 thiserror = "2.0.21"
-tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "net", "signal", "sync"] }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 tokio-postgres-rustls = "0.14.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
@@ -33,7 +33,9 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 webpki-roots = "1.0.12"
 
 [dev-dependencies]
+http-body = "1"
 http-body-util = "0.1.5"
+tokio = { version = "1.54.1", features = ["test-util"] }
 proptest = "1.12.0"
 tempfile = "3.27.0"
 tower = { version = "0.5.3", features = ["util"] }

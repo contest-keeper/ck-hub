@@ -1,5 +1,8 @@
 //! Enrolment codes, hardware writes and the signing of stick settings.
 
+use crate::source::{ENROL_WINDOW_SECONDS, MAX_ENROL_FAILURES, Source};
+use axum::Extension;
+
 use super::{
     Access, Arc, Bytes, CACHE_CONTROL, Deserialize, EnrolError, EnrolmentSpec, HeaderMap, Hub,
     IntoResponse, Json, Path, Response, Role, SignError, State, StatusCode, denied, json,
@@ -34,6 +37,21 @@ pub(super) async fn mint_code_in(
     match require_in(&hub, &headers, slug, Role::Admin).await {
         Ok(access) => mint(hub, access, body).await,
         Err(reason) => denied(reason),
+    }
+}
+
+/// A source that keeps sending wrong codes is refused on its own, next to the cap all sources share.
+fn source_flooded(hub: &Hub, source: &Source) -> bool {
+    hub.source_blocked("enrol", source, MAX_ENROL_FAILURES, ENROL_WINDOW_SECONDS)
+}
+
+fn count_refusal<T>(
+    hub: &Hub,
+    source: &Source,
+    result: &Result<Result<T, EnrolError>, tokio::task::JoinError>,
+) {
+    if matches!(result, Ok(Err(EnrolError::Invalid))) {
+        hub.source_failed("enrol", source, ENROL_WINDOW_SECONDS);
     }
 }
 
@@ -248,7 +266,14 @@ pub(super) struct EnrolBody {
 
 /// A stick trades its one-time code for its id and secret. There is no login: the code is the proof.
 /// The answer carries the secret, so it is never cached.
-pub(super) async fn enrol(State(hub): State<Arc<Hub>>, body: Bytes) -> Response {
+pub(super) async fn enrol(
+    State(hub): State<Arc<Hub>>,
+    Extension(source): Extension<Source>,
+    body: Bytes,
+) -> Response {
+    if source_flooded(&hub, &source) {
+        return enrol_refusal(EnrolError::RateLimited);
+    }
     let Ok(body) = serde_json::from_slice::<EnrolBody>(&body) else {
         return (
             StatusCode::BAD_REQUEST,
@@ -256,7 +281,10 @@ pub(super) async fn enrol(State(hub): State<Arc<Hub>>, body: Bytes) -> Response 
         )
             .into_response();
     };
-    match tokio::task::spawn_blocking(move || hub.enrol(&body.code)).await {
+    let counted = Arc::clone(&hub);
+    let result = tokio::task::spawn_blocking(move || hub.enrol(&body.code)).await;
+    count_refusal(&counted, &source, &result);
+    match result {
         Ok(Ok(enrolment)) => (
             StatusCode::OK,
             [(CACHE_CONTROL, "no-store")],
@@ -275,17 +303,26 @@ pub(super) struct ClaimEnrolmentBody {
     token: String,
 }
 
-pub(super) async fn claim_enrolment(State(hub): State<Arc<Hub>>, body: Bytes) -> Response {
+pub(super) async fn claim_enrolment(
+    State(hub): State<Arc<Hub>>,
+    Extension(source): Extension<Source>,
+    body: Bytes,
+) -> Response {
+    if source_flooded(&hub, &source) {
+        return enrol_refusal(EnrolError::RateLimited);
+    }
     let Ok(body) = serde_json::from_slice::<ClaimEnrolmentBody>(&body) else {
         return enrol_refusal(EnrolError::BadRequest(
             "the request must contain code, stick_id and token".to_owned(),
         ));
     };
-    match tokio::task::spawn_blocking(move || {
+    let counted = Arc::clone(&hub);
+    let result = tokio::task::spawn_blocking(move || {
         hub.claim_enrolment(&body.code, &body.stick_id, body.token)
     })
-    .await
-    {
+    .await;
+    count_refusal(&counted, &source, &result);
+    match result {
         Ok(Ok(id)) => (
             [(CACHE_CONTROL, "no-store")],
             Json(json!({ "stick_id": id })),

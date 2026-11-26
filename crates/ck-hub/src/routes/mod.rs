@@ -58,10 +58,7 @@ use organizations::{
     accept_invitation, invitations_of, invite, members_of, remove_member, revoke_invitation,
     staff_create_organization, staff_organizations,
 };
-use profiles::{
-    MAX_PROFILE_BODY_BYTES, list_profiles, profile_wallpaper, read_profile, remove_profile,
-    save_profile,
-};
+use profiles::{list_profiles, profile_wallpaper, read_profile, remove_profile, save_profile};
 use recordings::{
     complete_upload, put_chunk, recordings_of, start_upload, upload_status, view_recording,
 };
@@ -144,7 +141,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/recordings/{id}", get(upload_status))
         .route(
             "/api/v1/recordings/{id}/chunks/{index}",
-            axum::routing::put(put_chunk).layer(DefaultBodyLimit::max(CHUNK_BYTES + 1)),
+            axum::routing::put(put_chunk),
         )
         .route("/api/v1/recordings/{id}/complete", post(complete_upload))
         .route(
@@ -198,10 +195,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route("/api/v1/profiles", get(list_profiles))
         .route(
             "/api/v1/profiles/{id}",
-            get(read_profile)
-                .put(save_profile)
-                .delete(remove_profile)
-                .layer(DefaultBodyLimit::max(MAX_PROFILE_BODY_BYTES)),
+            get(read_profile).put(save_profile).delete(remove_profile),
         )
         .route("/api/v1/profiles/{id}/wallpaper", get(profile_wallpaper))
         .route("/api/v1/register", post(sign_up))
@@ -214,6 +208,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .fallback(unknown_address)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(axum::middleware::from_fn(crate::csrf::guard))
+        .layer(axum::middleware::from_fn(crate::source::layer))
         .layer(axum::middleware::map_response(security_headers))
         .with_state(hub)
 }

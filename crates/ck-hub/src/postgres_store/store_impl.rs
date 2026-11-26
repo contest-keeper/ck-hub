@@ -3,11 +3,11 @@
 use super::{
     BootSpan, COMMAND_COLUMNS, CommandAck, Event, Hardware, Heartbeat, Invitation, JudgeSubmission,
     Member, Membership, NewEnrolmentCode, NewProfile, NewUser, OffsetDateTime, Organization,
-    PostgresStore, Profile, ProfileSummary, RECORDING_COLUMNS, Recording, Redemption, Role,
-    SeenHeartbeat, Stick, StickHardware, StickId, Store, StoreError, StoredCommand, StoredEvent,
-    SubmitEvent, ToSql, Token, TokenPurpose, User, Wallpaper, action_type, command_from, failed,
-    invitation_from, mark_retired, organization_from, recording_from_row, refusal_text, role_from,
-    settled, stick_from, submit_event, user_from,
+    PostgresStore, Profile, ProfileSummary, RECORDING_COLUMNS, Recording, Redemption, Removal,
+    Role, SeenHeartbeat, Stick, StickHardware, StickId, Store, StoreError, StoredCommand,
+    StoredEvent, SubmitEvent, ToSql, Token, TokenPurpose, User, Wallpaper, action_type,
+    command_from, failed, invitation_from, mark_retired, organization_from, recording_from_row,
+    refusal_text, role_from, settled, stick_from, submit_event, user_from,
 };
 
 impl Store for PostgresStore {
@@ -158,14 +158,15 @@ impl Store for PostgresStore {
         event: Event,
         received_at: OffsetDateTime,
         integrity: Option<String>,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         let json = serde_json::to_value(&event).map_err(failed)?;
         let seq = i64::try_from(event.seq).map_err(failed)?;
-        self.in_org(organization, |transaction| {
+        let inserted = self.in_org(organization, |transaction| {
             transaction.execute(
                 "INSERT INTO events
                      (organization_id, stick_id, boot_id, seq, received_at, integrity, event)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT (organization_id, stick_id, boot_id, seq) DO NOTHING",
                 &[
                     &organization,
                     &event.stick_id.as_str(),
@@ -177,7 +178,17 @@ impl Store for PostgresStore {
                 ],
             )
         })?;
-        Ok(())
+        Ok(inserted == 1)
+    }
+
+    fn event_count(&self, organization: &str, stick: &StickId) -> Result<u64, StoreError> {
+        let row = self.in_org(organization, |transaction| {
+            transaction.query_one(
+                "SELECT count(*) FROM events WHERE organization_id = $1 AND stick_id = $2",
+                &[&organization, &stick.as_str()],
+            )
+        })?;
+        u64::try_from(row.get::<_, i64>(0)).map_err(failed)
     }
 
     fn events(&self, organization: &str, stick: &StickId) -> Result<Vec<StoredEvent>, StoreError> {
@@ -649,25 +660,35 @@ impl Store for PostgresStore {
             .collect()
     }
 
-    fn remove_member(&self, organization_id: &str, user_id: &str) -> Result<bool, StoreError> {
-        let removed = self.run(|client| {
-            client.execute(
-                "DELETE FROM memberships WHERE organization_id = $1 AND user_id = $2",
-                &[&organization_id, &user_id],
-            )
-        })?;
-        Ok(removed > 0)
-    }
-
-    fn count_owners(&self, organization_id: &str) -> Result<usize, StoreError> {
-        let row = self.run(|client| {
-            client.query_one(
-                "SELECT count(*) FROM memberships WHERE organization_id = $1 AND role = 'owner'",
-                &[&organization_id],
-            )
-        })?;
-        let count: i64 = row.get(0);
-        usize::try_from(count).map_err(failed)
+    fn remove_member(&self, organization_id: &str, user_id: &str) -> Result<Removal, StoreError> {
+        self.run(|conn| {
+            conn.batch_execute("BEGIN")?;
+            let result = (|| {
+                // Every owner row is locked, in one order, so a second owner leaving at the same
+                // time waits here and then sees the first one gone.
+                let owners = conn.query(
+                    "SELECT user_id FROM memberships
+                     WHERE organization_id = $1 AND role = 'owner'
+                     ORDER BY user_id FOR UPDATE",
+                    &[&organization_id],
+                )?;
+                let is_owner = owners.iter().any(|row| row.get::<_, String>(0) == user_id);
+                if is_owner && owners.len() <= 1 {
+                    return Ok(Removal::LastOwner);
+                }
+                let removed = conn.execute(
+                    "DELETE FROM memberships WHERE organization_id = $1 AND user_id = $2",
+                    &[&organization_id, &user_id],
+                )?;
+                Ok(if removed > 0 {
+                    Removal::Removed
+                } else {
+                    Removal::NotMember
+                })
+            })();
+            conn.batch_execute(if result.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
+            result
+        })
     }
 
     fn set_staff(&self, user_id: &str, staff: bool) -> Result<(), StoreError> {

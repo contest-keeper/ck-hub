@@ -17,8 +17,8 @@ use crate::judge::{JudgeSubmission, SubmitEvent, submit_event};
 use crate::recordings::{Kind, Recording};
 use crate::store::{
     BootSpan, Hardware, Invitation, Member, Membership, NewProfile, NewUser, Organization, Profile,
-    ProfileSummary, Role, SeenHeartbeat, Stick, StickHardware, Store, StoreError, StoredEvent,
-    TokenPurpose, User, Wallpaper,
+    ProfileSummary, Removal, Role, SeenHeartbeat, Stick, StickHardware, Store, StoreError,
+    StoredEvent, TokenPurpose, User, Wallpaper,
 };
 
 /// The role the Hub works as once the schema is up to date. See migration 0008.

@@ -1,14 +1,17 @@
 //! Recordings: the upload protocol sticks use and the links organizers watch them from.
 
 use super::{
-    Access, Arc, Bytes, CACHE_CONTROL, HeaderMap, Hub, IntoResponse, Json, LOCATION, Path,
-    RecordingError, Response, Role, State, StatusCode, UploadStatus, auth_headers, denied, json,
-    require_in, unavailable,
+    Access, Arc, Bytes, CACHE_CONTROL, CHUNK_BYTES, HeaderMap, Hub, IntoResponse, Json, LOCATION,
+    Path, RecordingError, Response, Role, State, StatusCode, UploadStatus, auth_headers, denied,
+    json, require_in, unavailable,
 };
 
 /// Chunks of recordings in flight at once, in the whole Hub. Each one is held in memory while it is
 /// checked and written, and the container has 0.5 GiB.
 pub(super) static CHUNKS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
+
+/// How long one chunk's body may take to arrive once its slot is held.
+pub(super) const BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Header that carries the SHA-256 of a chunk.
 pub(super) const CHUNK_SHA_HEADER: &str = "x-ck-chunk-sha256";
@@ -39,16 +42,17 @@ pub(super) async fn upload_status(
     upload_answer(result)
 }
 
-/// One chunk of a recording. The size is limited before the body is read, and only a few chunks are
-/// handled at a time.
+/// One chunk of a recording. The stick is checked before the body is read, and only a few chunks
+/// are held in memory at a time: a body nobody signed for is never buffered.
 pub(super) async fn put_chunk(
     State(hub): State<Arc<Hub>>,
     Path((id, index)): Path<(String, u32)>,
-    headers: HeaderMap,
-    body: Bytes,
+    request: axum::extract::Request,
 ) -> Response {
-    let (stick, signature) = auth_headers(&headers);
-    let sha = headers
+    let (parts, body) = request.into_parts();
+    let (stick, signature) = auth_headers(&parts.headers);
+    let sha = parts
+        .headers
         .get(CHUNK_SHA_HEADER)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
@@ -57,8 +61,29 @@ pub(super) async fn put_chunk(
             "the x-ck-chunk-sha256 header is missing",
         ))));
     };
+    let known = {
+        let (hub, stick, signature) = (Arc::clone(&hub), stick.clone(), signature.clone());
+        let (id, sha) = (id.clone(), sha.clone());
+        tokio::task::spawn_blocking(move || {
+            hub.check_chunk_sender(stick.as_deref(), signature.as_deref(), &id, index, &sha)
+        })
+        .await
+    };
+    match known {
+        Ok(Ok(())) => {}
+        Ok(Err(refusal)) => return upload_answer(Ok(Err(refusal))),
+        Err(failed) => return upload_answer(Err(failed)),
+    }
     let Ok(_slot) = CHUNKS.acquire().await else {
         return unavailable();
+    };
+    // A stalled body must not keep a slot for ever: 8 slow signed uploads would block all recordings.
+    let read =
+        tokio::time::timeout(BODY_TIMEOUT, axum::body::to_bytes(body, CHUNK_BYTES + 1)).await;
+    let body = match read {
+        Ok(Ok(body)) => body,
+        Ok(Err(_)) => return upload_answer(Ok(Err(RecordingError::TooBig))),
+        Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
     };
     let result = tokio::task::spawn_blocking(move || {
         hub.put_chunk(

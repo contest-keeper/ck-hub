@@ -227,6 +227,15 @@ pub struct StoredEvent {
     pub integrity: Option<String>,
 }
 
+/// What removing a member did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Removal {
+    Removed,
+    NotMember,
+    /// The member is the only owner, so nothing was removed.
+    LastOwner,
+}
+
 /// Every method fails with [`StoreError`] when the data cannot be read or written.
 pub trait Store: Send + Sync {
     /// Accepts a newer sequence for its boot, keeps it as the stick's latest heartbeat and counts
@@ -262,13 +271,14 @@ pub trait Store: Send + Sync {
     ) -> Result<Option<u64>, StoreError>;
 
     /// Adds an event after the ones already kept for its stick.
+    /// Returns false when the store already had this event (same stick, boot and sequence).
     fn append_event(
         &self,
         organization: &str,
         event: Event,
         received_at: OffsetDateTime,
         integrity: Option<String>,
-    ) -> Result<(), StoreError>;
+    ) -> Result<bool, StoreError>;
 
     /// The newest event of `stick` in `boot`, if any.
     fn last_event_of_boot(
@@ -280,6 +290,9 @@ pub trait Store: Send + Sync {
 
     /// Every event of the stick, in the order they were received.
     fn events(&self, organization: &str, stick: &StickId) -> Result<Vec<StoredEvent>, StoreError>;
+
+    /// How many events the stick has stored.
+    fn event_count(&self, organization: &str, stick: &StickId) -> Result<u64, StoreError>;
 
     /// Keeps the submissions the judge reported that are not kept yet. Returns how many were new.
     fn add_judge_submissions(
@@ -418,10 +431,9 @@ pub trait Store: Send + Sync {
     /// Everyone in the organization, ordered by email.
     fn members_of(&self, organization_id: &str) -> Result<Vec<Member>, StoreError>;
 
-    /// Returns false when the user was not a member.
-    fn remove_member(&self, organization_id: &str, user_id: &str) -> Result<bool, StoreError>;
-
-    fn count_owners(&self, organization_id: &str) -> Result<usize, StoreError>;
+    /// Removes the member, unless that would leave the organization without an owner. The check
+    /// and the removal are one step, so two owners leaving at once cannot both succeed.
+    fn remove_member(&self, organization_id: &str, user_id: &str) -> Result<Removal, StoreError>;
 
     fn set_staff(&self, user_id: &str, staff: bool) -> Result<(), StoreError>;
 

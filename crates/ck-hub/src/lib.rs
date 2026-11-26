@@ -27,6 +27,7 @@ mod registry;
 mod routes;
 mod signing;
 mod signup;
+mod source;
 mod store;
 mod submissions;
 mod watcher;
@@ -55,7 +56,10 @@ pub use enrol::{
     MintedCode, NewEnrolmentCode, Redemption,
 };
 pub use forge::{FORGE_CODE_LIFETIME_SECONDS, ForgeError};
-pub use hub::{HardwareView, Hub, LastHeartbeat, ONLINE_WINDOW_SECONDS, Rejection, StickView};
+pub use hub::{
+    HardwareView, Hub, LastHeartbeat, MAX_EVENTS_PER_BOOT, MAX_EVENTS_PER_STICK,
+    ONLINE_WINDOW_SECONDS, Rejection, StickView,
+};
 pub use images::{Image, ImageSource, ImagesError, MANIFEST_BLOB, StaticImages, StorageImages};
 pub use invite::{AcceptError, INVITATION_LIFETIME_DAYS, InviteError, MemberError, StaffError};
 pub use judge::{EventKey, JudgeSubmission, SubmitEvent, submit_event};
@@ -80,8 +84,8 @@ pub use signup::{
 };
 pub use store::{
     BootSpan, Hardware, Invitation, Member, Membership, MemoryStore, NewProfile, NewUser,
-    Organization, Profile, ProfileSummary, Role, SeenHeartbeat, Stick, StickHardware, Store,
-    StoreError, StoredEvent, TokenPurpose, User, Wallpaper,
+    Organization, Profile, ProfileSummary, Removal, Role, SeenHeartbeat, Stick, StickHardware,
+    Store, StoreError, StoredEvent, TokenPurpose, User, Wallpaper,
 };
 pub use submissions::{JudgeRow, StickSubmission, SubmissionsView};
 pub use watcher::{WatchError, poll_once, run as watch};

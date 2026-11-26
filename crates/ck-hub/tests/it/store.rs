@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ck_hub::{
-    Hub, MemoryStore, NewUser, PasswordCost, PostgresStore, Registry, Rejection, Role, Store,
-    TokenPurpose,
+    Hub, MemoryStore, NewUser, PasswordCost, PostgresStore, Registry, Rejection, Removal, Role,
+    Store, TokenPurpose,
 };
 use ck_protocol::{
     Event, EventKind, FIRST_PREV_HASH, Heartbeat, RecorderState, RecorderStatus, RecordingMode,
@@ -1824,8 +1824,83 @@ fn archive_contract(store: &dyn Store) {
     assert!(store.last_heartbeat(&org, &b_id).expect("read").is_some());
 }
 
+/// Two owners who leave at the same moment must not leave the organization without an owner.
+fn last_owner_contract(store: Arc<dyn Store>) {
+    let hub = Arc::new(
+        Hub::new(
+            Registry::empty(),
+            store,
+            None,
+            Box::new(OffsetDateTime::now_utc),
+        )
+        .with_password_cost(PasswordCost {
+            memory_kib: 8,
+            passes: 1,
+        }),
+    );
+    for round in 0..25 {
+        let tag = format!("{}{round}", unique());
+        let (a, b) = (format!("a{tag}@example.org"), format!("b{tag}@example.org"));
+        let slug = format!("org{tag}");
+        let (a_id, b_id) = (
+            hub.create_user(&a, "correct horse battery").expect("a").id,
+            hub.create_user(&b, "correct horse battery").expect("b").id,
+        );
+        hub.create_organization(&slug, "Org", &a).expect("org");
+        hub.add_member(&slug, &b, Role::Owner).expect("b owner");
+        let sessions: Vec<String> = [&a, &b]
+            .iter()
+            .map(|email| hub.login(email, "correct horse battery").expect("login").0)
+            .collect();
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let answers: Vec<Result<(), ck_hub::MemberError>> = std::thread::scope(|scope| {
+            let leave = |session: String, who: String| {
+                let (hub, slug, gate) = (Arc::clone(&hub), slug.clone(), Arc::clone(&gate));
+                scope.spawn(move || {
+                    gate.wait();
+                    hub.remove_member(&session, &slug, &who)
+                })
+            };
+            let first = leave(sessions[0].clone(), a_id.clone());
+            let second = leave(sessions[1].clone(), b_id.clone());
+            vec![first.join().expect("a"), second.join().expect("b")]
+        });
+        let left = answers.iter().filter(|answer| answer.is_ok()).count();
+        assert_eq!(left, 1, "round {round}: exactly one owner may leave");
+        assert!(
+            answers.contains(&Err(ck_hub::MemberError::LastOwner)),
+            "round {round}: the other is told it is the last owner"
+        );
+    }
+}
+
+/// The same event twice is kept once, and the second call says so.
+fn repeat_event_contract(store: &dyn Store) {
+    let org = store
+        .ensure_organization(&unique(), "Repeat")
+        .expect("organization")
+        .id;
+    let stick = StickId::parse("stick-repeat").expect("id");
+    let mut first = event("stick-repeat", 1, "ana");
+    first.boot_id = unique();
+    assert!(
+        store
+            .append_event(&org, first.clone(), time(0), None)
+            .expect("first")
+    );
+    assert!(
+        !store
+            .append_event(&org, first, time(1), None)
+            .expect("repeat")
+    );
+    assert_eq!(store.events(&org, &stick).expect("read").len(), 1);
+    assert_eq!(store.event_count(&org, &stick).expect("count"), 1);
+}
+
 #[test]
 fn the_memory_store_keeps_its_contract() {
+    repeat_event_contract(&MemoryStore::default());
+    last_owner_contract(Arc::new(MemoryStore::default()));
     enrolment_contract(&MemoryStore::default());
     scoped_enrolment_contract(&MemoryStore::default());
     recoverable_enrolment_contract(&MemoryStore::default());
@@ -1845,6 +1920,8 @@ fn the_memory_store_keeps_its_contract() {
 fn the_postgres_store_keeps_its_contract() {
     let Some(url) = database_url() else { return };
     let store = PostgresStore::connect(&url).expect("connect");
+    last_owner_contract(Arc::new(PostgresStore::connect(&url).expect("connect")));
+    repeat_event_contract(&store);
     enrolment_contract(&store);
     scoped_enrolment_contract(&store);
     recoverable_enrolment_contract(&store);
@@ -2481,9 +2558,18 @@ fn invitations_contract(store: &dyn Store) {
             (cy.email.clone(), Role::Viewer),
         ]
     );
-    assert_eq!(store.count_owners(&org).expect("read"), 1);
-    assert!(store.remove_member(&org, &cy.id).expect("write"));
-    assert!(!store.remove_member(&org, &cy.id).expect("write"));
+    assert_eq!(
+        store.remove_member(&org, &ana.id).expect("write"),
+        Removal::LastOwner
+    );
+    assert_eq!(
+        store.remove_member(&org, &cy.id).expect("write"),
+        Removal::Removed
+    );
+    assert_eq!(
+        store.remove_member(&org, &cy.id).expect("write"),
+        Removal::NotMember
+    );
     assert_eq!(store.members_of(&org).expect("read").len(), 2);
 
     // Staff flag, and the list of organizations.
@@ -2517,4 +2603,77 @@ fn invitations_contract(store: &dyn Store) {
         .map(|o| o.slug)
         .collect();
     assert!(slugs.contains(&format!("{id}-invite")) && slugs.contains(&format!("{id}-other")));
+}
+
+#[test]
+fn postgres_keeps_one_copy_of_an_event_and_the_migration_removes_old_copies() {
+    let Some(url) = database_url() else { return };
+    let store = PostgresStore::connect(&url).expect("connect");
+    let org = store
+        .ensure_organization(&unique(), "Once")
+        .expect("organization")
+        .id;
+    let stick = StickId::parse("stick-once").expect("id");
+    let mut first = event("stick-once", 1, "ana");
+    first.boot_id = unique();
+    store
+        .append_event(&org, first.clone(), time(0), None)
+        .expect("first");
+    store
+        .append_event(&org, first, time(1), None)
+        .expect("a second copy is dropped, not an error");
+    assert_eq!(store.events(&org, &stick).expect("read").len(), 1);
+    assert_eq!(store.event_count(&org, &stick).expect("count"), 1);
+
+    // Copies written before the index existed: the migration keeps the earliest of each. This runs
+    // in a database of its own, because the index is dropped for a moment.
+    let (server, _) = url.rsplit_once('/').expect("a database url");
+    let scratch = format!("ckonce{}", unique());
+    let mut admin = postgres::Client::connect(&url, postgres::NoTls).expect("client");
+    admin
+        .batch_execute(&format!("CREATE DATABASE {scratch}"))
+        .expect("create the scratch database");
+    let scratch_url = format!("{server}/{scratch}");
+    let scratch_org = PostgresStore::connect(&scratch_url)
+        .expect("migrated scratch database")
+        .ensure_organization("once", "Once")
+        .expect("organization")
+        .id;
+    let mut client = postgres::Client::connect(&scratch_url, postgres::NoTls).expect("client");
+    client
+        .batch_execute("DROP INDEX events_once")
+        .expect("drop the index");
+    // Row security binds the table's owner too, unless it is a superuser: name the organization.
+    client
+        .execute("SELECT set_config('ck.org_id', $1, false)", &[&scratch_org])
+        .expect("organization");
+    let insert = "INSERT INTO events (organization_id, stick_id, boot_id, seq, received_at, event)
+                  VALUES ($1, 'stick-once', 'old-boot', 1, now(), $2)";
+    let json = serde_json::json!({ "n": 1 });
+    client
+        .execute(insert, &[&scratch_org, &json])
+        .expect("copy 1");
+    let json2 = serde_json::json!({ "n": 2 });
+    client
+        .execute(insert, &[&scratch_org, &json2])
+        .expect("copy 2");
+    client
+        .batch_execute("SELECT set_config('ck.org_id', '', false)")
+        .expect("forget the organization");
+    client
+        .batch_execute(include_str!("../../migrations/0023_events_once.sql"))
+        .expect("the migration runs over duplicates");
+    client
+        .execute("SELECT set_config('ck.org_id', $1, false)", &[&scratch_org])
+        .expect("organization");
+    let rows = client
+        .query("SELECT event FROM events WHERE boot_id = 'old-boot'", &[])
+        .expect("rows");
+    assert_eq!(rows.len(), 1);
+    let kept: serde_json::Value = rows[0].get(0);
+    assert_eq!(kept, json, "the earliest copy stays");
+    drop(client);
+    admin
+        .batch_execute(&format!("DROP DATABASE {scratch}"))
+        .expect("drop the scratch database");
 }
