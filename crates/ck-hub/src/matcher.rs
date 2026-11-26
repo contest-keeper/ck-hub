@@ -1,11 +1,37 @@
 //! Decides which judge submissions came from a stick.
 //!
-//! First by submission id, then by handle, problem and time. A stick event explains at most one
+//! First by submission id, then, for events that did not read an id, by handle, problem and time. A stick event explains at most one
 //! judge submission, so one submit cannot cover two.
 
+use serde::Serialize;
 use time::Duration;
 
 use crate::judge::{EventKey, JudgeSubmission, SubmitEvent};
+
+/// Whether the code on the judge is the code the stick saw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Code {
+    Same,
+    Different,
+    /// The stick saw the code, but the judge's page has not been read yet (the contest is not over
+    /// or the page shows no source).
+    NotReadYet,
+    /// The stick has no whole-source hash (it saw only a cut of the code), so there is nothing to
+    /// compare.
+    NotComparable,
+}
+
+/// Compares the hash the stick made of its source with the hash made of the judge's page.
+#[must_use]
+pub fn code_check(event: &SubmitEvent, judge_hash: Option<&str>) -> Code {
+    match (event.source_sha256_norm.as_deref(), judge_hash) {
+        (None, _) => Code::NotComparable,
+        (Some(_), None) => Code::NotReadYet,
+        (Some(stick), Some(judge)) if stick.eq_ignore_ascii_case(judge) => Code::Same,
+        (Some(_), Some(_)) => Code::Different,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
@@ -39,7 +65,8 @@ pub fn match_submissions(
         }
     }
 
-    // The rest by handle, problem and time, oldest submission first, closest event first.
+    // The rest by handle, problem and time, oldest submission first, closest event first. An event
+    // that names a submission is for that one only: another submission close in time is not it.
     let mut rest: Vec<usize> = (0..judge.len())
         .filter(|i| verdicts[*i] == Verdict::Unmatched)
         .collect();
@@ -49,6 +76,7 @@ pub fn match_submissions(
         let mut best: Option<(usize, Duration)> = None;
         for (e, event) in events.iter().enumerate() {
             if claimed[e]
+                || event.submission_id.is_some()
                 || event.contest_id != submission.contest_id
                 || event.problem_index != submission.problem_index
                 || !submission
@@ -100,7 +128,18 @@ mod tests {
             at: at(seconds),
             submission_id: id,
             source_sha256_norm: None,
+            accepted: true,
         }
+    }
+
+    #[test]
+    fn the_code_is_compared_only_when_both_sides_have_it() {
+        let mut seen = event(1, "a", "A", 0, None);
+        assert_eq!(code_check(&seen, Some("h")), Code::NotComparable);
+        seen.source_sha256_norm = Some("AB".to_owned());
+        assert_eq!(code_check(&seen, None), Code::NotReadYet);
+        assert_eq!(code_check(&seen, Some("ab")), Code::Same);
+        assert_eq!(code_check(&seen, Some("cd")), Code::Different);
     }
 
     fn key(seq: u64) -> Verdict {
@@ -130,13 +169,14 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_id_falls_through_to_the_window() {
+    fn an_event_that_names_another_submission_is_not_matched_by_time() {
+        // The judge list may only lack submission 7 for now; 99 was not made on that stick.
         let verdicts = match_submissions(
             &[judge(99, "a", "A", 0)],
             &[event(1, "a", "A", 2, Some(7))],
             WINDOW,
         );
-        assert_eq!(verdicts, vec![key(1)]);
+        assert_eq!(verdicts, vec![Verdict::Unmatched]);
     }
 
     #[test]

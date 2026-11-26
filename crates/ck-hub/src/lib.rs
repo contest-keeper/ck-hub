@@ -5,6 +5,7 @@ mod accounts;
 mod acs_mail;
 mod codeforces;
 mod commands;
+mod contest;
 mod credentials;
 mod csrf;
 mod delegation;
@@ -44,6 +45,7 @@ pub use commands::{
     CommandError, CommandState, CommandView, DEFAULT_LIFETIME_SECONDS, HISTORY_DAYS, HISTORY_LIMIT,
     MAX_OPEN_PER_STICK, MAX_PER_MINUTE, MIN_LIFETIME_SECONDS, StoredCommand,
 };
+pub use contest::{ContestRow, ContestView, MatchedBy};
 pub use credentials::CredentialScope;
 pub use delegation::Delegation;
 pub use download::{Download, DownloadError, LINK_LIFETIME_MINUTES};
@@ -58,7 +60,7 @@ pub use images::{Image, ImageSource, ImagesError, MANIFEST_BLOB, StaticImages, S
 pub use invite::{AcceptError, INVITATION_LIFETIME_DAYS, InviteError, MemberError, StaffError};
 pub use judge::{EventKey, JudgeSubmission, SubmitEvent, submit_event};
 pub use mail::{ConsoleMailer, Mail, MailError, Mailer, MemoryMailer, token_after};
-pub use matcher::{Verdict, match_submissions};
+pub use matcher::{Code, Verdict, code_check, match_submissions};
 pub use postgres_store::{DEFAULT_POOL_SIZE, PostgresStore};
 pub use profiles::{
     MAX_SETTINGS_BYTES, MAX_WALLPAPER_BYTES, ProfileError, ProfileInput, WallpaperInput,

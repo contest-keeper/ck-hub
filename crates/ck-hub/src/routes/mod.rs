@@ -67,8 +67,8 @@ use recordings::{
 };
 use reports::{event, heartbeat};
 use sticks::{
-    MAX_REGISTRY_BYTES, archive_stick, delete_stick, network_of, register_in, restore_stick,
-    retire_credential_in, sticks_of, submissions_of,
+    MAX_REGISTRY_BYTES, archive_stick, contest_submissions_of, delete_stick, network_of,
+    register_in, restore_stick, retire_credential_in, sticks_of, submissions_of,
 };
 
 /// The page organizers watch. It is one file with no outside resources, so it works on a network
@@ -171,6 +171,10 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route(
             "/api/v1/orgs/{slug}/sticks/{id}/submissions",
             get(submissions_of),
+        )
+        .route(
+            "/api/v1/orgs/{slug}/contests/{contest}/submissions",
+            get(contest_submissions_of),
         )
         .route("/api/v1/orgs/{slug}/sticks/{id}/network", get(network_of))
         .route("/api/v1/orgs/{slug}/members", get(members_of))

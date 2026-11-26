@@ -14,10 +14,11 @@ use time::{Duration, OffsetDateTime};
 
 use crate::accounts::{Accounts, PasswordCost};
 use crate::codeforces::Judge;
+use crate::contest::{self, ContestView};
 use crate::credentials::CredentialScope;
 use crate::download::Download;
 use crate::images::ImageSource;
-use crate::judge::JudgeSubmission;
+use crate::judge::{JudgeSubmission, SubmitEvent};
 use crate::mail::Mailer;
 use crate::network::{self, NetworkView};
 use crate::recordings::Blobs;
@@ -644,7 +645,23 @@ impl Hub {
             {
                 return Ok(found.clone());
             }
-            let found = judge.submissions_of(contest, handle)?;
+            let found = match judge.submissions_of(contest, handle) {
+                Ok(found) => found,
+                // The watcher keeps what Codeforces said, so a judge that is down for a while does
+                // not blank the page. With nothing kept the judge's own error is told.
+                Err(error) => {
+                    // Only this person's rows count: with none of them the outage is still told.
+                    let mut kept = self
+                        .store
+                        .judge_submissions(organization, "codeforces", contest)
+                        .unwrap_or_default();
+                    kept.retain(|s| s.handles.iter().any(|h| h.eq_ignore_ascii_case(handle)));
+                    if kept.is_empty() {
+                        return Err(error);
+                    }
+                    return Ok(kept);
+                }
+            };
             if let Ok(mut cache) = self.judged.lock() {
                 cache.insert(key, (now, found.clone()));
             }
@@ -655,7 +672,34 @@ impl Hub {
         } else {
             None
         };
-        Ok(Some(submissions::view(&stored, ask)))
+        let hashes = |contest: u64| {
+            self.store
+                .judge_source_hashes(organization, "codeforces", contest)
+                .unwrap_or_default()
+        };
+        Ok(Some(submissions::view(&stored, ask, &hashes)))
+    }
+
+    /// Every Codeforces submission of one contest the Hub has kept, with the stick that reported
+    /// it and whether the code is the same.
+    pub fn contest_submissions(
+        &self,
+        organization: &str,
+        contest_id: u64,
+    ) -> Result<ContestView, StoreError> {
+        let judged = self
+            .store
+            .judge_submissions(organization, "codeforces", contest_id)?;
+        let events: Vec<SubmitEvent> = self
+            .store
+            .submission_events(organization)?
+            .into_iter()
+            .filter(|event| event.contest_id == contest_id && event.accepted)
+            .collect();
+        let hashes = self
+            .store
+            .judge_source_hashes(organization, "codeforces", contest_id)?;
+        Ok(contest::view(contest_id, &judged, &events, &hashes))
     }
 
     /// Every stick of the organization, with its last heartbeat when it has sent one.
