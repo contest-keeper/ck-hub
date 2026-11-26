@@ -30,16 +30,6 @@ async function fetchContest(contest) {
   render();
 }
 
-function codeText(code) {
-  switch (code) {
-    case "same": return "same code";
-    case "different": return "DIFFERENT CODE";
-    case "not_read_yet": return "code not read yet";
-    case "not_comparable": return "not comparable";
-    default: return "—";
-  }
-}
-
 function contestPanel(contest) {
   const box = el("div", "net");
   const key = contestKey(contest);
@@ -74,7 +64,7 @@ function contestPanel(contest) {
   label.prepend(check);
   box.appendChild(label);
   const shown = data.submissions.filter((s) => !suspectOnly.has(key) || s.suspect);
-  box.appendChild(proofTable(["Time", "User", "Problem", "Submission", "Stick", "Matched by", "Code"],
+  box.appendChild(proofTable(["Time", "User", "Problem", "Submission", "Stick", "Matched by"],
     shown.map((s) => [[
       new Date(s.submitted_at).toLocaleTimeString(),
       handleLink(s.handles[0]),
@@ -82,7 +72,6 @@ function contestPanel(contest) {
       submissionLink(data.contest_id, s.submission_id),
       s.stick_id || "SUSPECT: no stick reported it",
       s.matched_by ? (s.matched_by === "id" ? "id" : "time (" + s.time_gap_s + " s apart)") : "—",
-      codeText(s.code),
     ], s.suspect ? "refused" : "ok"])));
   return box;
 }
@@ -132,6 +121,7 @@ const needsLook = (stick) => !isArchived(stick) && (stick.warnings.length > 0 ||
 function fixFor(warning) {
   if (/different users/.test(warning)) return "Ask the team who was logged in. If it was not planned, tell the contest organizer.";
   if (/two machines/.test(warning)) return "Check that the stick was not copied to another disk. If it was, make a new stick in Keeper Forge.";
+  if (/do not agree with the judge/.test(warning)) return "Open the details: they show which submissions are not from this stick, or are not on the judge.";
   if (/^Settings refused/.test(warning)) return "Make this stick again in Keeper Forge if its settings are wrong.";
   if (/^Settings changed/.test(warning)) return "Someone may have edited the stick. Make it again in Keeper Forge if it should not have changed.";
   return "Open the details to see more.";
@@ -144,7 +134,7 @@ function issuesOf(stick) {
     list.push({ text: "Offline for " + span(stick.last.seconds_ago), bad: true,
       fix: "Check the power cable and the network at " + stick.last.hostname + ". It reconnects by itself." });
   }
-  for (const warning of stick.warnings) list.push({ text: warning, fix: fixFor(warning), bad: false });
+  for (const warning of stick.warnings) list.push({ text: warning, fix: fixFor(warning), bad: /do not agree with the judge/.test(warning) });
   return list;
 }
 
@@ -297,8 +287,12 @@ function proofPanel(stick) {
   }
   const data = cached.data;
   const who = data.handles.length ? " by " + data.handles.join(", ") : "";
-  const summary = el("p", data.suspect ? "bad" : "", data.submissions.length + " reported by the stick" + who + ". " +
-    (data.suspect ? data.suspect + " on Codeforces not from this stick: SUSPECT." : "Every Codeforces submission seen was made from this stick."));
+  const problems = data.suspect + data.not_on_judge;
+  const summary = el("p", problems ? "bad" : "", data.submissions.length + " reported by the stick" + who + ". " +
+    (problems ? [
+      data.suspect ? data.suspect + " on Codeforces not from this stick, or with a different time" : "",
+      data.not_on_judge ? data.not_on_judge + " reported by the stick but not on Codeforces" : "",
+    ].filter(Boolean).join("; ") + ": CHECK." : "Every Codeforces submission seen was made from this stick."));
   box.appendChild(summary);
   if (data.judge_note) box.appendChild(el("p", "hint", data.judge_note));
 
@@ -312,20 +306,19 @@ function proofPanel(stick) {
         s.problem || "—",
         s.language || "—",
         s.source_sha256 ? s.source_sha256 + (s.source_bytes ? " (" + s.source_bytes + " B" + (s.source_cut ? ", cut" : "") + ")" : "") : "—",
-        !s.accepted ? "refused by the site" : s.judge_id ? submissionLink(s.contest_id, s.judge_id) : "not found",
-      ], !s.accepted ? "" : s.judge_id ? "ok" : "unconfirmed"])));
+        !s.accepted ? "refused by the site" : s.judge_id ? submissionLink(s.contest_id, s.judge_id) : s.not_on_judge ? "NOT on Codeforces" : "not found yet",
+      ], !s.accepted ? "" : s.judge_id ? "ok" : s.not_on_judge ? "refused" : "unconfirmed"])));
   }
   if (data.judge.length) {
     box.appendChild(el("h4", "", "Seen on Codeforces"));
-    box.appendChild(proofTable(["Time", "User", "Contest", "Problem", "Submission", "From this stick", "Code"],
+    box.appendChild(proofTable(["Time", "User", "Contest", "Problem", "Submission", "From this stick"],
       data.judge.map((j) => [[
         new Date(j.submitted_at).toLocaleTimeString(),
         handleLink(j.handles[0]),
         contestLink(j.contest_id),
         j.problem,
         submissionLink(j.contest_id, j.submission_id),
-        j.from_stick ? "yes" : "SUSPECT: the stick did not report it",
-        codeText(j.code),
+        j.from_stick ? (j.time_off ? "yes, but its time is " + Math.abs(j.time_gap_s) + " s off" : "yes") : "SUSPECT: the stick did not report it",
       ], j.suspect ? "refused" : "ok"])));
   }
   for (const contest of data.contests) box.appendChild(contestPanel(contest));

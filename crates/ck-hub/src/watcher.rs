@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use time::OffsetDateTime;
 
-use crate::codeforces::{Client, CodeforcesError, SourceJudge};
+use crate::codeforces::{Client, CodeforcesError};
 use crate::store::{Store, StoreError};
 
 #[derive(Debug, thiserror::Error)]
@@ -53,76 +53,6 @@ pub fn poll_once(
     }
 }
 
-/// Once the contest is over, reads the source of each kept submission that has no hash yet from the
-/// judge's page and keeps its hash, at most `limit` per call. Returns how many were kept. Before the
-/// end of the contest nothing is read: the code is not public then.
-///
-/// A submission whose page shows no source, or whose page fails, is tried again later. `cursor` is
-/// where in the waiting list the next call starts: each call moves it past what it tried and did not
-/// keep, so a run of such pages cannot keep the ones after it from being read. A failure stops the
-/// pass with an error; what was kept stays.
-///
-/// # Errors
-/// The judge or the store failing.
-pub fn hash_sources(
-    judge: &dyn SourceJudge,
-    store: &dyn Store,
-    organization: &str,
-    contest_id: u64,
-    limit: usize,
-    cursor: &mut usize,
-    pause: Duration,
-) -> Result<usize, WatchError> {
-    // The call before this one was a request too, and the judge allows about one every two seconds.
-    sleep(pause);
-    if judge.phase(contest_id)? != "FINISHED" {
-        return Ok(0);
-    }
-    let known = store.judge_source_hashes(organization, "codeforces", contest_id)?;
-    let mut waiting: Vec<_> = store
-        .judge_submissions(organization, "codeforces", contest_id)?
-        .into_iter()
-        .filter(|submission| !known.contains_key(&submission.submission_id))
-        .collect();
-    let start = if waiting.is_empty() {
-        0
-    } else {
-        *cursor % waiting.len()
-    };
-    waiting.rotate_left(start);
-    let (mut tried, mut kept) = (0, 0);
-    let mut stopped = None;
-    for submission in waiting.into_iter().take(limit) {
-        sleep(pause);
-        tried += 1;
-        match judge.source_hash(contest_id, submission.submission_id) {
-            Ok(Some(hash)) => {
-                let added = store.add_judge_source_hash(
-                    organization,
-                    "codeforces",
-                    contest_id,
-                    submission.submission_id,
-                    &hash,
-                    OffsetDateTime::now_utc(),
-                );
-                if let Err(error) = added {
-                    stopped = Some(WatchError::from(error));
-                    break;
-                }
-                kept += 1;
-            }
-            Ok(None) => {}
-            Err(error) => {
-                stopped = Some(WatchError::from(error));
-                break;
-            }
-        }
-    }
-    // What was tried and not kept stays in the list before the next start.
-    *cursor = start + tried - kept;
-    stopped.map_or(Ok(kept), Err)
-}
-
 /// Polls forever: every `interval`, and after a failure the wait doubles up to `max_wait`, then
 /// goes back to `interval` after a success. A failure is logged without the request, which
 /// carries the API key.
@@ -135,27 +65,17 @@ pub fn run(
     max_wait: Duration,
 ) {
     let mut wait = interval;
-    let mut cursor = 0usize;
     loop {
-        let pause = Duration::from_secs(2);
-        let result =
-            poll_once(client, store, organization, contest_id, 100, pause).and_then(|new| {
-                // `shortcut:` 50 pages per round so the next poll is not far behind; raise it if a
-                // big contest takes too many rounds to hash.
-                let hashed = hash_sources(
-                    client,
-                    store,
-                    organization,
-                    contest_id,
-                    50,
-                    &mut cursor,
-                    pause,
-                )?;
-                Ok((new, hashed))
-            });
-        match result {
-            Ok((new, hashed)) => {
-                tracing::info!(contest_id, new, hashed, "polled codeforces");
+        match poll_once(
+            client,
+            store,
+            organization,
+            contest_id,
+            100,
+            Duration::from_secs(2),
+        ) {
+            Ok(new) => {
+                tracing::info!(contest_id, new, "polled codeforces");
                 wait = interval;
             }
             Err(error) => {
@@ -164,149 +84,5 @@ pub fn run(
             }
         }
         sleep(wait);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::cell::Cell;
-
-    use super::*;
-    use crate::judge::JudgeSubmission;
-    use crate::store::MemoryStore;
-
-    struct FakeJudge {
-        phase: &'static str,
-        /// The submission whose page fails to load, if any.
-        broken: Option<u64>,
-        /// The submission whose page shows no source, if any.
-        hidden: Option<u64>,
-        /// More submissions whose pages show no source.
-        hidden_all: Vec<u64>,
-        calls: Cell<usize>,
-    }
-
-    impl SourceJudge for FakeJudge {
-        fn phase(&self, _: u64) -> Result<String, CodeforcesError> {
-            Ok(self.phase.to_owned())
-        }
-
-        fn source_hash(&self, _: u64, id: u64) -> Result<Option<String>, CodeforcesError> {
-            self.calls.set(self.calls.get() + 1);
-            if self.broken == Some(id) {
-                return Err(CodeforcesError::Request("down".to_owned()));
-            }
-            let shown = self.hidden != Some(id) && !self.hidden_all.contains(&id);
-            Ok(shown.then(|| format!("hash-{id}")))
-        }
-    }
-
-    fn judge(phase: &'static str, broken: Option<u64>, hidden: Option<u64>) -> FakeJudge {
-        FakeJudge {
-            phase,
-            broken,
-            hidden,
-            hidden_all: Vec::new(),
-            calls: Cell::new(0),
-        }
-    }
-
-    fn store_with(ids: &[u64]) -> MemoryStore {
-        let store = MemoryStore::default();
-        let at = OffsetDateTime::from_unix_timestamp(1_800_000_000).expect("time");
-        let submissions: Vec<JudgeSubmission> = ids
-            .iter()
-            .map(|id| JudgeSubmission {
-                submission_id: *id,
-                contest_id: 7,
-                handles: vec!["a".to_owned()],
-                problem_index: "A".to_owned(),
-                submitted_at: at,
-            })
-            .collect();
-        store
-            .add_judge_submissions("org", "codeforces", &submissions, at)
-            .expect("kept");
-        store
-    }
-
-    fn run_pass(judge: &FakeJudge, store: &MemoryStore) -> Result<usize, WatchError> {
-        hash_sources(judge, store, "org", 7, 50, &mut 0, Duration::ZERO)
-    }
-
-    #[test]
-    fn nothing_is_read_before_the_contest_is_over() {
-        let store = store_with(&[1, 2]);
-        let judge = judge("CODING", None, None);
-        assert_eq!(run_pass(&judge, &store).expect("pass"), 0);
-        assert_eq!(judge.calls.get(), 0);
-    }
-
-    #[test]
-    fn a_finished_contest_is_hashed_once_and_a_hidden_page_is_tried_again() {
-        let store = store_with(&[1, 2, 3]);
-        let hidden = judge("FINISHED", None, Some(2));
-        assert_eq!(run_pass(&hidden, &store).expect("pass"), 2);
-        let kept = store
-            .judge_source_hashes("org", "codeforces", 7)
-            .expect("hashes");
-        assert_eq!(kept.get(&1).map(String::as_str), Some("hash-1"));
-        assert!(!kept.contains_key(&2));
-
-        // The second pass asks only about the submission that had no source.
-        let shown = judge("FINISHED", None, None);
-        assert_eq!(run_pass(&shown, &store).expect("pass"), 1);
-        assert_eq!(shown.calls.get(), 1);
-    }
-
-    #[test]
-    fn pages_without_a_source_do_not_starve_the_ones_after_them() {
-        let store = store_with(&[1, 2, 3]);
-        // Two pages show no source and only one page is read per round.
-        let hidden = FakeJudge {
-            hidden_all: vec![1, 2],
-            ..judge("FINISHED", None, None)
-        };
-        let mut cursor = 0;
-        let mut round = || hash_sources(&hidden, &store, "org", 7, 1, &mut cursor, Duration::ZERO);
-        assert_eq!(round().expect("round"), 0);
-        assert_eq!(round().expect("round"), 0);
-        assert_eq!(round().expect("round"), 1, "the third was reached");
-        let hashes = store
-            .judge_source_hashes("org", "codeforces", 7)
-            .expect("hashes");
-        assert!(hashes.contains_key(&3));
-    }
-
-    #[test]
-    fn a_page_that_keeps_failing_does_not_keep_the_others_from_being_read() {
-        let store = store_with(&[1, 2, 3]);
-        // The limit covers the whole list, so the first page fails at the start of every round.
-        let failing = judge("FINISHED", Some(1), None);
-        let mut cursor = 0;
-        let mut round = || hash_sources(&failing, &store, "org", 7, 3, &mut cursor, Duration::ZERO);
-        assert!(round().is_err());
-        assert!(
-            round().is_err(),
-            "the first page fails again, after the others"
-        );
-        let hashes = store
-            .judge_source_hashes("org", "codeforces", 7)
-            .expect("hashes");
-        assert!(hashes.contains_key(&2) && hashes.contains_key(&3));
-    }
-
-    #[test]
-    fn a_failed_page_stops_the_pass_and_keeps_what_was_read() {
-        let store = store_with(&[1, 2, 3]);
-        let failing = judge("FINISHED", Some(2), None);
-        assert!(run_pass(&failing, &store).is_err());
-        let kept = store
-            .judge_source_hashes("org", "codeforces", 7)
-            .expect("hashes");
-        assert_eq!(kept.len(), 1);
-
-        let healed = judge("FINISHED", None, None);
-        assert_eq!(run_pass(&healed, &store).expect("pass"), 2);
     }
 }
