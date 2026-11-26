@@ -1,6 +1,6 @@
 //! Decides which judge submissions came from a stick.
 //!
-//! First by submission id, then by handle, problem and time. A stick event explains at most one
+//! First by submission id, then, for events that did not read an id, by handle, problem and time. A stick event explains at most one
 //! judge submission, so one submit cannot cover two.
 
 use serde::Serialize;
@@ -65,7 +65,8 @@ pub fn match_submissions(
         }
     }
 
-    // The rest by handle, problem and time, oldest submission first, closest event first.
+    // The rest by handle, problem and time, oldest submission first, closest event first. An event
+    // that names a submission is for that one only: another submission close in time is not it.
     let mut rest: Vec<usize> = (0..judge.len())
         .filter(|i| verdicts[*i] == Verdict::Unmatched)
         .collect();
@@ -75,6 +76,7 @@ pub fn match_submissions(
         let mut best: Option<(usize, Duration)> = None;
         for (e, event) in events.iter().enumerate() {
             if claimed[e]
+                || event.submission_id.is_some()
                 || event.contest_id != submission.contest_id
                 || event.problem_index != submission.problem_index
                 || !submission
@@ -167,13 +169,14 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_id_falls_through_to_the_window() {
+    fn an_event_that_names_another_submission_is_not_matched_by_time() {
+        // The judge list may only lack submission 7 for now; 99 was not made on that stick.
         let verdicts = match_submissions(
             &[judge(99, "a", "A", 0)],
             &[event(1, "a", "A", 2, Some(7))],
             WINDOW,
         );
-        assert_eq!(verdicts, vec![key(1)]);
+        assert_eq!(verdicts, vec![Verdict::Unmatched]);
     }
 
     #[test]

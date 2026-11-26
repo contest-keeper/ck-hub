@@ -60,6 +60,7 @@ function contestPanel(contest) {
     return box;
   }
   const data = cached.data;
+  if (cached.failed) box.appendChild(el("p", "hint", "The last refresh failed. Showing older data."));
   box.appendChild(el("p", data.suspect ? "bad" : "", data.submissions.length + " on Codeforces, " + data.matched + " reported by a stick, " + data.suspect + " suspect."));
   const label = el("label", "", " only the suspect ones");
   const check = el("input");
