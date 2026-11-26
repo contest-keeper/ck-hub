@@ -507,6 +507,11 @@ td .sub { display: block; }
 :root[data-look="classic"] tr.sel :focus-visible { outline-color: #fff; }
 .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 
+/* Wide screens: the sidebar stays put while the page scrolls, and scrolls on its own if it is taller than the window. */
+@media (min-width: 821px) {
+  .side { position: sticky; top: 0; align-self: flex-start; height: 100vh; height: 100dvh; box-sizing: border-box; overflow-y: auto; }
+}
+
 /* Phones and small tablets: the sidebar becomes a bar on top, the stick table becomes cards, and nothing is wider than the screen. */
 @media (max-width: 820px) {
   :root[data-look="classic"] { --deskpad: 0px; }
