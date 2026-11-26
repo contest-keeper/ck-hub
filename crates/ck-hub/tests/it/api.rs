@@ -884,7 +884,8 @@ async fn the_contest_view_compares_id_time_and_code_and_a_down_judge_does_not_bl
 
 #[tokio::test]
 async fn the_stick_list_marks_a_stick_whose_account_submitted_from_elsewhere() {
-    let setup = setup();
+    // The list counts only where the details page compares too: with a live judge.
+    let setup = setup_with(Some(Arc::new(DownJudge)));
     let organization = setup
         .store
         .organization_by_slug("default")

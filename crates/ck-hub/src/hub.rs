@@ -735,7 +735,7 @@ impl Hub {
         });
         let hardware = self.store.hardware(organization)?;
         let expected = self.store.expected_configs(organization)?;
-        let (kept, mut views) = (KeptJudge::new(&*self.store, organization), Vec::new());
+        let (kept, mut views) = (KeptJudge::for_hub(self, organization), Vec::new());
         for entry in &entries {
             let seen = self.store.last_heartbeat(organization, &entry.stick_id)?;
             let stored = self.store.events(organization, &entry.stick_id)?;
@@ -906,14 +906,21 @@ fn last_submission(stored: &[StoredEvent]) -> Option<SubmissionView> {
 struct KeptJudge<'a> {
     store: &'a dyn Store,
     organization: &'a str,
+    /// Without a live judge the details page compares nothing, so the list counts nothing either.
+    live: bool,
     rows: RefCell<HashMap<u64, Vec<JudgeSubmission>>>,
 }
 
 impl<'a> KeptJudge<'a> {
-    fn new(store: &'a dyn Store, organization: &'a str) -> Self {
+    fn for_hub(hub: &'a Hub, organization: &'a str) -> Self {
+        Self::new(&*hub.store, organization, hub.judge.is_some())
+    }
+
+    fn new(store: &'a dyn Store, organization: &'a str, live: bool) -> Self {
         Self {
             store,
             organization,
+            live,
             rows: RefCell::default(),
         }
     }
@@ -939,6 +946,9 @@ impl<'a> KeptJudge<'a> {
 
     /// How many submissions of a stick disagree with what the watcher kept of the judge.
     fn problems(&self, stored: &[StoredEvent], now: OffsetDateTime) -> usize {
+        if !self.live {
+            return 0;
+        }
         let seen = submissions::view(stored, Some(&|contest, _| self.rows(contest)), now);
         seen.suspect + seen.not_on_judge
     }

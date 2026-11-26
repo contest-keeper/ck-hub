@@ -215,6 +215,9 @@ impl Client {
     }
 }
 
+/// How many submissions one call to the judge returns. A full answer may have left older ones out.
+pub(crate) const STATUS_PAGE: u64 = 100;
+
 /// Where the submissions of a person in a contest come from. The Codeforces client is the real one;
 /// tests use a fake.
 pub trait Judge: Send + Sync {
@@ -235,7 +238,7 @@ impl Judge for Client {
         contest_id: u64,
         handle: &str,
     ) -> Result<Vec<JudgeSubmission>, CodeforcesError> {
-        self.status_of(contest_id, handle, 100)
+        self.status_of(contest_id, handle, STATUS_PAGE)
     }
 }
 

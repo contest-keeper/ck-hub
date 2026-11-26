@@ -4,14 +4,14 @@
 //! the stick submitted in the contests the stick took part in. A judge submission that no stick
 //! event explains is a suspect: it was made from somewhere else with the same account.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ck_protocol::EventKind;
 use serde::Serialize;
 use serde_json::Value;
 use time::{Duration, OffsetDateTime};
 
-use crate::codeforces::CodeforcesError;
+use crate::codeforces::{CodeforcesError, STATUS_PAGE};
 use crate::judge::{EventKey, JudgeSubmission, SubmitEvent, submit_event};
 use crate::matcher::{Verdict, match_submissions};
 use crate::store::StoredEvent;
@@ -188,10 +188,20 @@ pub type Ask<'a> = dyn Fn(u64, &str) -> Result<Vec<JudgeSubmission>, CodeforcesE
 /// What the judge was asked and answered for: the contests, the people and when.
 #[derive(Clone, Copy)]
 struct Asked<'a> {
-    contests: &'a [u64],
-    handles: &'a [(String, OffsetDateTime)],
+    covered: &'a Covered,
     now: OffsetDateTime,
 }
+
+/// The part of a person's time in a contest that an answer from the judge speaks for: it has every
+/// submission from `from` (or from the start) up to `to`, the newest one it showed. Past `to` the
+/// answer proves nothing, because the judge may have been polled before the submit.
+struct Coverage {
+    from: Option<OffsetDateTime>,
+    to: OffsetDateTime,
+}
+
+/// The coverage of each (contest, lowercase handle) the judge answered for.
+type Covered = HashMap<(u64, String), Coverage>;
 
 /// The submissions the stick reported, one per submit. `asked` is what the judge was asked and
 /// answered for; a submit is "not on the judge" only inside it.
@@ -222,12 +232,14 @@ fn stick_submissions(
         let not_on_judge = judge_id.is_none()
             && event.accepted
             && asked.is_some_and(|asked| {
-                asked.contests.contains(&event.contest_id)
+                asked.now - event.at > WINDOW + GRACE
                     && asked
-                        .handles
-                        .iter()
-                        .any(|(handle, _)| handle.eq_ignore_ascii_case(&event.handle))
-                    && asked.now - event.at > WINDOW + GRACE
+                        .covered
+                        .get(&(event.contest_id, event.handle.to_lowercase()))
+                        .is_some_and(|covered| {
+                            covered.from.is_none_or(|from| event.at >= from)
+                                && covered.to - event.at >= WINDOW
+                        })
             });
         submissions.push(stick_submission(item, judge_id, not_on_judge));
     }
@@ -240,7 +252,9 @@ fn ask_judge(
     ask: Option<&Ask>,
     handles: &[(String, OffsetDateTime)],
     contests: &[u64],
-) -> (Vec<JudgeSubmission>, Option<String>) {
+    known_ids: &HashSet<u64>,
+) -> (Vec<JudgeSubmission>, Covered, Option<String>) {
+    let mut covered = Covered::new();
     let mut note: Option<String> = None;
     let mut judged: Vec<JudgeSubmission> = Vec::new();
     match ask {
@@ -261,12 +275,36 @@ fn ask_judge(
                 for (handle, since) in handles {
                     match ask(*contest, handle) {
                         Ok(found) => {
-                            // Only what was submitted after the person logged in on this stick.
-                            let from = *since - Duration::seconds(120);
-                            judged.extend(found.into_iter().filter(|s| {
-                                s.submitted_at >= from
-                                    && s.handles.iter().any(|h| h.eq_ignore_ascii_case(handle))
-                            }));
+                            let mine: Vec<&JudgeSubmission> = found
+                                .iter()
+                                .filter(|s| {
+                                    s.handles.iter().any(|h| h.eq_ignore_ascii_case(handle))
+                                })
+                                .collect();
+                            if let Some(to) = mine.iter().map(|s| s.submitted_at).max() {
+                                // A full answer may have left older submissions out.
+                                let full =
+                                    u64::try_from(mine.len()).is_ok_and(|n| n >= STATUS_PAGE);
+                                let from = full
+                                    .then(|| mine.iter().map(|s| s.submitted_at).min())
+                                    .flatten();
+                                covered.insert(
+                                    (*contest, handle.to_lowercase()),
+                                    Coverage { from, to },
+                                );
+                            }
+                            // Only what was submitted after the person logged in on this stick, and
+                            // what a stick submit names whatever its time, so a late login does not
+                            // hide the judge's own copy of it.
+                            let bound = *since - Duration::seconds(120);
+                            let wanted: Vec<JudgeSubmission> = mine
+                                .into_iter()
+                                .filter(|s| {
+                                    s.submitted_at >= bound || known_ids.contains(&s.submission_id)
+                                })
+                                .cloned()
+                                .collect();
+                            judged.extend(wanted);
                         }
                         Err(error) => {
                             // The stick list asks for every stick at once; no watcher is not news.
@@ -281,7 +319,7 @@ fn ask_judge(
             }
         }
     }
-    (judged, note)
+    (judged, covered, note)
 }
 
 /// What the stick reported and what the judge says, side by side. `ask` gets the submissions of a
@@ -294,7 +332,13 @@ pub fn view(stored: &[StoredEvent], ask: Option<&Ask>, now: OffsetDateTime) -> S
     contests.reverse();
     contests.truncate(MAX_CONTESTS);
 
-    let (mut judged, note) = ask_judge(ask, &handles, &contests);
+    let known_ids: HashSet<u64> = stored
+        .iter()
+        .filter_map(submit_event)
+        .filter(|event| event.accepted)
+        .filter_map(|event| event.submission_id)
+        .collect();
+    let (mut judged, covered, note) = ask_judge(ask, &handles, &contests, &known_ids);
     judged.sort_by_key(|s| (s.contest_id, s.submission_id));
     judged.dedup_by_key(|s| (s.contest_id, s.submission_id));
 
@@ -339,14 +383,12 @@ pub fn view(stored: &[StoredEvent], ask: Option<&Ask>, now: OffsetDateTime) -> S
     rows.sort_by_key(|row| std::cmp::Reverse(row.submitted_at));
     rows.truncate(MAX_ROWS);
 
-    let judge_answered = ask.is_some() && note.is_none();
     let mut submissions = stick_submissions(
         stored,
         &all_events,
         &explained,
-        judge_answered.then_some(Asked {
-            contests: &contests,
-            handles: &handles,
+        ask.is_some().then_some(Asked {
+            covered: &covered,
             now,
         }),
     );
@@ -487,9 +529,11 @@ mod tests {
     }
 
     #[test]
-    fn a_submit_the_judge_never_shows_is_a_problem_only_after_the_grace() {
+    fn a_submit_the_judge_never_shows_is_a_problem_only_after_the_grace_and_only_when_covered() {
         let stored = vec![login(0), submit_with_id(2, 100, "A", None)];
-        let ask = |_: u64, _: &str| Ok(vec![]);
+        // The judge's newest submission of this person is well after the submit, so the answer
+        // reaches past it and the missing one is a real absence.
+        let ask = |_: u64, _: &str| Ok(vec![judged(7, "B", 400)]);
         let fresh = view(&stored, Some(&ask), at(100 + 60));
         assert_eq!(fresh.not_on_judge, 0, "the judge has had no time yet");
         let late = view(&stored, Some(&ask), at(10_000));
@@ -499,6 +543,65 @@ mod tests {
         let down = |_: u64, _: &str| Err(CodeforcesError::Request(NOTHING_KEPT.to_owned()));
         let unknown = view(&stored, Some(&down), at(10_000));
         assert_eq!(unknown.not_on_judge, 0);
+    }
+
+    #[test]
+    fn an_answer_that_stops_before_the_submit_proves_nothing() {
+        let stored = vec![login(0), submit_with_id(2, 100, "A", None)];
+        // The newest judge submission is older than the submit: the judge may simply not have been
+        // read since.
+        let behind = |_: u64, _: &str| Ok(vec![judged(7, "B", 50)]);
+        assert_eq!(view(&stored, Some(&behind), at(10_000)).not_on_judge, 0);
+        let empty = |_: u64, _: &str| Ok(vec![]);
+        assert_eq!(view(&stored, Some(&empty), at(10_000)).not_on_judge, 0);
+    }
+
+    #[test]
+    fn a_full_page_may_have_left_older_submissions_out() {
+        let stored = vec![login(0), submit_with_id(2, 100, "A", None)];
+        let full = |_: u64, _: &str| {
+            Ok((0..STATUS_PAGE)
+                .map(|n| judged(1000 + n, "B", 200 + i64::try_from(n).expect("small")))
+                .collect())
+        };
+        let seen = view(&stored, Some(&full), at(10_000));
+        assert_eq!(seen.not_on_judge, 0, "older than the page, so unknown");
+    }
+
+    #[test]
+    fn one_contest_that_cannot_be_asked_does_not_hide_the_absence_in_another() {
+        let other = stored(
+            3,
+            120,
+            EventKind::Submission,
+            json!({"platform": "codeforces", "username": "ana", "contest_id": "77",
+                   "problem": "A", "accepted": true}),
+        );
+        let stored = vec![login(0), submit_with_id(2, 100, "A", None), other];
+        let ask = |contest: u64, _: &str| {
+            if contest == 2285 {
+                Ok(vec![judged(7, "B", 400)])
+            } else {
+                Err(CodeforcesError::Request(NOTHING_KEPT.to_owned()))
+            }
+        };
+        let seen = view(&stored, Some(&ask), at(10_000));
+        assert_eq!(seen.not_on_judge, 1);
+        assert!(
+            seen.judge_note.is_some(),
+            "the failed contest is still told"
+        );
+    }
+
+    #[test]
+    fn a_late_login_does_not_hide_the_judge_copy_of_a_submit_that_names_it() {
+        // The login reached the Hub long after the submit, so the judge row is before the login-time
+        // bound; the stick's own id for it keeps it.
+        let stored = vec![login(5_000), submit_with_id(2, 100, "A", Some(900))];
+        let ask = |_: u64, _: &str| Ok(vec![judged(900, "A", 100)]);
+        let seen = view(&stored, Some(&ask), at(10_000));
+        assert_eq!(seen.submissions[0].judge_id, Some(900));
+        assert_eq!(seen.not_on_judge, 0);
     }
 
     #[test]
