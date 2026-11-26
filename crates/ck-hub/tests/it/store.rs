@@ -1874,8 +1874,32 @@ fn last_owner_contract(store: Arc<dyn Store>) {
     }
 }
 
+/// The same event twice is kept once, and the second call says so.
+fn repeat_event_contract(store: &dyn Store) {
+    let org = store
+        .ensure_organization(&unique(), "Repeat")
+        .expect("organization")
+        .id;
+    let stick = StickId::parse("stick-repeat").expect("id");
+    let mut first = event("stick-repeat", 1, "ana");
+    first.boot_id = unique();
+    assert!(
+        store
+            .append_event(&org, first.clone(), time(0), None)
+            .expect("first")
+    );
+    assert!(
+        !store
+            .append_event(&org, first, time(1), None)
+            .expect("repeat")
+    );
+    assert_eq!(store.events(&org, &stick).expect("read").len(), 1);
+    assert_eq!(store.event_count(&org, &stick).expect("count"), 1);
+}
+
 #[test]
 fn the_memory_store_keeps_its_contract() {
+    repeat_event_contract(&MemoryStore::default());
     last_owner_contract(Arc::new(MemoryStore::default()));
     enrolment_contract(&MemoryStore::default());
     scoped_enrolment_contract(&MemoryStore::default());
@@ -1897,6 +1921,7 @@ fn the_postgres_store_keeps_its_contract() {
     let Some(url) = database_url() else { return };
     let store = PostgresStore::connect(&url).expect("connect");
     last_owner_contract(Arc::new(PostgresStore::connect(&url).expect("connect")));
+    repeat_event_contract(&store);
     enrolment_contract(&store);
     scoped_enrolment_contract(&store);
     recoverable_enrolment_contract(&store);

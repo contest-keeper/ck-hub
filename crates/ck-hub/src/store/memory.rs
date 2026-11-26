@@ -23,6 +23,8 @@ pub struct MemoryStore {
     boot_seqs: Mutex<HashMap<(String, StickId, String), u64>>,
     boot_times: Mutex<HashMap<(String, StickId, String), FirstAndLast>>,
     events: Mutex<HashMap<(String, StickId), Vec<StoredEvent>>>,
+    /// (organization, stick, boot, seq) of every stored event, to drop a repeat as the database does.
+    event_keys: Mutex<std::collections::HashSet<(String, StickId, String, u64)>>,
     judge_submissions: Mutex<Vec<(String, String, JudgeSubmission)>>,
     users: Mutex<Vec<User>>,
     sessions: Mutex<HashMap<String, (String, OffsetDateTime)>>,
@@ -273,9 +275,17 @@ impl Store for MemoryStore {
         received_at: OffsetDateTime,
         integrity: Option<String>,
     ) -> Result<bool, StoreError> {
-        self.events
-            .lock()
-            .expect("events lock")
+        let mut events = self.events.lock().expect("events lock");
+        let key = (
+            organization.to_owned(),
+            event.stick_id.clone(),
+            event.boot_id.clone(),
+            event.seq,
+        );
+        if !self.event_keys.lock().expect("event keys lock").insert(key) {
+            return Ok(false);
+        }
+        events
             .entry((organization.to_owned(), event.stick_id.clone()))
             .or_default()
             .push(StoredEvent {
