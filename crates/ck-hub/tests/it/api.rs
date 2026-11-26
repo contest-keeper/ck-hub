@@ -1257,7 +1257,9 @@ async fn the_forge_download_sends_the_visitor_to_a_short_lived_link() {
         }),
     )
     .with_download(download);
-    let response = router(Arc::new(hub))
+    let app = router(Arc::new(hub));
+    let response = app
+        .clone()
         .oneshot(
             Request::get("/download/forge")
                 .body(Body::empty())
@@ -1272,6 +1274,18 @@ async fn the_forge_download_sends_the_visitor_to_a_short_lived_link() {
     ));
     assert!(location.contains("&se=2026-11-14T12%3A05%3A00Z&"));
     assert_eq!(response.headers()["cache-control"], "no-store");
+    let response = app
+        .oneshot(
+            Request::get("/download/forge/macos")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::FOUND);
+    assert!(response.headers()["location"].to_str().expect("text").starts_with(
+        "https://ckdlabc12.blob.core.windows.net/downloads/forge/keeper-forge-macos-universal.dmg?sv="
+    ));
 }
 
 #[tokio::test]
@@ -1294,7 +1308,7 @@ async fn the_image_list_and_download_need_a_login() {
 #[tokio::test]
 async fn an_unknown_page_answers_with_a_page_and_the_api_keeps_its_bare_404() {
     let setup = setup();
-    for path in ["/nope", "/download/forge"] {
+    for path in ["/nope", "/download/forge", "/download/forge/macos"] {
         let response = setup
             .app
             .clone()

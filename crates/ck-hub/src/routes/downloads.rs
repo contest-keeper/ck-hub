@@ -8,6 +8,9 @@ use super::{
 /// The installer's place in the private container. The forge pipeline keeps the name the same.
 pub(super) const FORGE_INSTALLER: &str = "forge/keeper-forge-setup-x64.exe";
 
+/// The macOS disk image, kept beside the installer under the name the forge pipeline gives it.
+pub(super) const FORGE_MACOS_DMG: &str = "forge/keeper-forge-macos-universal.dmg";
+
 /// The Keeper Forge installer. The visitor is sent to a read-only link that works for a few
 /// minutes, so the storage address is never published and a copied link soon stops working.
 pub(super) async fn download_forge(State(hub): State<Arc<Hub>>) -> Response {
@@ -15,6 +18,14 @@ pub(super) async fn download_forge(State(hub): State<Arc<Hub>>) -> Response {
         return super::not_found_page();
     };
     redirect_to(download.link(FORGE_INSTALLER, (hub.clock)()))
+}
+
+/// The Keeper Forge disk image for macOS, through the same short-lived link as the installer.
+pub(super) async fn download_forge_macos(State(hub): State<Arc<Hub>>) -> Response {
+    let Some(download) = hub.download.as_ref() else {
+        return super::not_found_page();
+    };
+    redirect_to(download.link(FORGE_MACOS_DMG, (hub.clock)()))
 }
 
 /// Sends the visitor to a storage link, or answers 503 when the Hub has no key to sign one with.
