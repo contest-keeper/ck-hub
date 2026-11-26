@@ -674,12 +674,7 @@ impl Hub {
         } else {
             None
         };
-        let hashes = |contest: u64| {
-            self.store
-                .judge_source_hashes(organization, "codeforces", contest)
-                .unwrap_or_default()
-        };
-        Ok(Some(submissions::view(&stored, ask, &hashes, now)))
+        Ok(Some(submissions::view(&stored, ask, now)))
     }
 
     /// Every Codeforces submission of one contest the Hub has kept, with the stick that reported
@@ -698,10 +693,7 @@ impl Hub {
             .into_iter()
             .filter(|event| event.contest_id == contest_id && event.accepted)
             .collect();
-        let hashes = self
-            .store
-            .judge_source_hashes(organization, "codeforces", contest_id)?;
-        Ok(contest::view(contest_id, &judged, &events, &hashes))
+        Ok(contest::view(contest_id, &judged, &events))
     }
 
     /// Every stick of the organization, with its last heartbeat when it has sent one.
@@ -912,7 +904,6 @@ struct KeptJudge<'a> {
     store: &'a dyn Store,
     organization: &'a str,
     rows: RefCell<HashMap<u64, Vec<JudgeSubmission>>>,
-    hashes: RefCell<HashMap<u64, HashMap<u64, String>>>,
 }
 
 impl<'a> KeptJudge<'a> {
@@ -921,7 +912,6 @@ impl<'a> KeptJudge<'a> {
             store,
             organization,
             rows: RefCell::default(),
-            hashes: RefCell::default(),
         }
     }
 
@@ -946,25 +936,8 @@ impl<'a> KeptJudge<'a> {
 
     /// How many submissions of a stick disagree with what the watcher kept of the judge.
     fn problems(&self, stored: &[StoredEvent], now: OffsetDateTime) -> usize {
-        let seen = submissions::view(
-            stored,
-            Some(&|contest, _| self.rows(contest)),
-            &|contest| self.hashes(contest),
-            now,
-        );
+        let seen = submissions::view(stored, Some(&|contest, _| self.rows(contest)), now);
         seen.suspect + seen.not_on_judge
-    }
-
-    fn hashes(&self, contest: u64) -> HashMap<u64, String> {
-        self.hashes
-            .borrow_mut()
-            .entry(contest)
-            .or_insert_with(|| {
-                self.store
-                    .judge_source_hashes(self.organization, "codeforces", contest)
-                    .unwrap_or_default()
-            })
-            .clone()
     }
 }
 

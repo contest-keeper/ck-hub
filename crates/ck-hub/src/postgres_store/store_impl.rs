@@ -1,7 +1,5 @@
 //! `impl Store for PostgresStore`: one query or transaction per method.
 
-use std::collections::HashMap;
-
 use super::{
     BootSpan, COMMAND_COLUMNS, CommandAck, Event, Hardware, Heartbeat, Invitation, JudgeSubmission,
     Member, Membership, NewEnrolmentCode, NewProfile, NewUser, OffsetDateTime, Organization,
@@ -267,58 +265,6 @@ impl Store for PostgresStore {
                 problem_index: row.get(2),
                 submitted_at: row.get(3),
             });
-        }
-        Ok(found)
-    }
-
-    fn add_judge_source_hash(
-        &self,
-        organization: &str,
-        judge: &str,
-        contest_id: u64,
-        submission_id: u64,
-        source_sha256: &str,
-        fetched_at: OffsetDateTime,
-    ) -> Result<bool, StoreError> {
-        let contest = i64::try_from(contest_id).map_err(failed)?;
-        let id = i64::try_from(submission_id).map_err(failed)?;
-        self.in_org(organization, |transaction| {
-            transaction.execute(
-                "INSERT INTO judge_source_hashes
-                     (organization_id, judge, contest_id, submission_id, source_sha256, fetched_at)
-                 VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT (organization_id, judge, contest_id, submission_id) DO NOTHING",
-                &[
-                    &organization,
-                    &judge,
-                    &contest,
-                    &id,
-                    &source_sha256,
-                    &fetched_at,
-                ],
-            )
-        })
-        .map(|added| added > 0)
-    }
-
-    fn judge_source_hashes(
-        &self,
-        organization: &str,
-        judge: &str,
-        contest_id: u64,
-    ) -> Result<HashMap<u64, String>, StoreError> {
-        let contest = i64::try_from(contest_id).map_err(failed)?;
-        let rows = self.in_org(organization, |transaction| {
-            transaction.query(
-                "SELECT submission_id, source_sha256 FROM judge_source_hashes
-                 WHERE organization_id = $1 AND judge = $2 AND contest_id = $3",
-                &[&organization, &judge, &contest],
-            )
-        })?;
-        let mut found = HashMap::with_capacity(rows.len());
-        for row in rows {
-            let id: i64 = row.get(0);
-            found.insert(u64::try_from(id).map_err(failed)?, row.get(1));
         }
         Ok(found)
     }

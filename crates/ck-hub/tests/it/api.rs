@@ -844,22 +844,10 @@ async fn the_contest_view_compares_id_time_and_code_and_a_down_judge_does_not_bl
             at("2026-11-12T10:30:00Z"),
         )
         .expect("kept");
-    setup
-        .store
-        .add_judge_source_hash(
-            &organization,
-            "codeforces",
-            2285,
-            800,
-            "abc",
-            at("2026-11-12T11:00:00Z"),
-        )
-        .expect("hash");
-
     let login = serde_json::json!({"platform": "codeforces", "username": "ana"});
     let submit = serde_json::json!({"platform": "codeforces", "username": "ana",
         "contest_id": "2285", "problem": "A", "language": "91", "accepted": true,
-        "submission_id": 800, "source_sha256_norm": "ABC"});
+        "submission_id": 800});
     send_kind(&setup.app, 1, EventKind::Login, login).await;
     send_kind(&setup.app, 2, EventKind::Submission, submit).await;
 
@@ -877,7 +865,6 @@ async fn the_contest_view_compares_id_time_and_code_and_a_down_judge_does_not_bl
     assert_eq!(seen["submissions"][0]["suspect"], true);
     assert_eq!(seen["submissions"][1]["stick_id"], "stick-a");
     assert_eq!(seen["submissions"][1]["matched_by"], "id");
-    assert_eq!(seen["submissions"][1]["code"], "same");
 
     // The judge is down, but the Hub still shows what it kept for the stick.
     let request = Request::get("/api/v1/orgs/default/sticks/stick-a/submissions")
@@ -887,7 +874,6 @@ async fn the_contest_view_compares_id_time_and_code_and_a_down_judge_does_not_bl
     let (_, text) = call(&setup.app, request).await;
     let stick: serde_json::Value = serde_json::from_str(&text).expect("json");
     assert_eq!(stick["judge"][0]["submission_id"], 800);
-    assert_eq!(stick["judge"][0]["code"], "same");
     assert_eq!(stick["suspect"], 0);
 
     let request = Request::get("/api/v1/orgs/default/contests/2285/submissions")

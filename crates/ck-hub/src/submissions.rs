@@ -13,7 +13,7 @@ use time::{Duration, OffsetDateTime};
 
 use crate::codeforces::CodeforcesError;
 use crate::judge::{EventKey, JudgeSubmission, SubmitEvent, submit_event};
-use crate::matcher::{Code, Verdict, code_check, match_submissions};
+use crate::matcher::{Verdict, match_submissions};
 use crate::store::StoredEvent;
 
 /// How far apart the stick's report and the judge's clock may be for the same submit.
@@ -79,8 +79,6 @@ pub struct JudgeRow {
     pub time_gap_s: Option<i64>,
     /// A stick reported it, but its time is further from the judge's than [`WINDOW`].
     pub time_off: bool,
-    /// Whether the code on the judge is the code the stick saw; `None` when no stick reported it.
-    pub code: Option<Code>,
     pub suspect: bool,
 }
 
@@ -187,30 +185,6 @@ fn who_and_where(stored: &[StoredEvent]) -> (Vec<(String, OffsetDateTime)>, Vec<
 /// Asks the judge for the submissions of a person in a contest.
 pub type Ask<'a> = dyn Fn(u64, &str) -> Result<Vec<JudgeSubmission>, CodeforcesError> + 'a;
 
-/// The kept source hashes of a contest, by judge submission id.
-pub type Hashes<'a> = dyn Fn(u64) -> HashMap<u64, String> + 'a;
-
-/// Whether the code on the judge is the code of the stick that reported this submission.
-fn code_of(
-    verdict: &Verdict,
-    submission: &JudgeSubmission,
-    events: &[SubmitEvent],
-    hashes: &Hashes,
-    hash_of: &mut HashMap<u64, HashMap<u64, String>>,
-) -> Option<Code> {
-    let Verdict::Matched(key) = verdict else {
-        return None;
-    };
-    let event = events.iter().find(|event| &event.key == key)?;
-    let known = hash_of
-        .entry(submission.contest_id)
-        .or_insert_with(|| hashes(submission.contest_id));
-    Some(code_check(
-        event,
-        known.get(&submission.submission_id).map(String::as_str),
-    ))
-}
-
 /// What the judge was asked and answered for: the contests, the people and when.
 #[derive(Clone, Copy)]
 struct Asked<'a> {
@@ -311,14 +285,8 @@ fn ask_judge(
 }
 
 /// What the stick reported and what the judge says, side by side. `ask` gets the submissions of a
-/// person in a contest from the judge; `None` when no judge is set up. `hashes` gives the source
-/// hashes the Hub read from the judge's pages.
-pub fn view(
-    stored: &[StoredEvent],
-    ask: Option<&Ask>,
-    hashes: &Hashes,
-    now: OffsetDateTime,
-) -> SubmissionsView {
+/// person in a contest from the judge; `None` when no judge is set up.
+pub fn view(stored: &[StoredEvent], ask: Option<&Ask>, now: OffsetDateTime) -> SubmissionsView {
     let (mut handles, mut contests) = who_and_where(stored);
     // The latest few, newest people and contests first.
     handles.reverse();
@@ -338,7 +306,6 @@ pub fn view(
         .cloned()
         .collect();
     let verdicts = match_submissions(&judged, &events, WINDOW);
-    let mut hash_of: HashMap<u64, HashMap<u64, String>> = HashMap::new();
     let mut explained: HashMap<EventKey, u64> = HashMap::new();
     let mut rows: Vec<JudgeRow> = Vec::new();
     for (submission, verdict) in judged.iter().zip(&verdicts) {
@@ -346,7 +313,6 @@ pub fn view(
             explained.insert(key.clone(), submission.submission_id);
         }
         let from_stick = matches!(verdict, Verdict::Matched(_));
-        let code = code_of(verdict, submission, &events, hashes, &mut hash_of);
         let time_gap_s = match verdict {
             Verdict::Matched(key) => events
                 .iter()
@@ -365,8 +331,7 @@ pub fn view(
             from_stick,
             time_gap_s,
             time_off,
-            code,
-            suspect: !from_stick || time_off || code == Some(Code::Different),
+            suspect: !from_stick || time_off,
         });
     }
     let suspect = rows.iter().filter(|r| r.suspect).count();
@@ -471,7 +436,7 @@ mod tests {
                 judged(5, "A", -3600),
             ])
         };
-        let seen = view(&stored, Some(&ask), &|_| HashMap::new(), at(10_000));
+        let seen = view(&stored, Some(&ask), at(10_000));
         assert_eq!(seen.handles, ["ana"]);
         assert_eq!(seen.contests, [2285]);
         assert_eq!(
@@ -512,7 +477,7 @@ mod tests {
     fn an_id_that_matches_with_a_time_that_does_not_is_a_problem() {
         let stored = vec![login(0), submit_with_id(2, 100, "A", Some(20))];
         let ask = |_: u64, _: &str| Ok(vec![judged(20, "A", 100 + 300)]);
-        let seen = view(&stored, Some(&ask), &|_| HashMap::new(), at(10_000));
+        let seen = view(&stored, Some(&ask), at(10_000));
         assert!(seen.judge[0].from_stick, "the id matched");
         assert!(seen.judge[0].time_off);
         assert_eq!(seen.judge[0].time_gap_s, Some(-300));
@@ -524,14 +489,14 @@ mod tests {
     fn a_submit_the_judge_never_shows_is_a_problem_only_after_the_grace() {
         let stored = vec![login(0), submit_with_id(2, 100, "A", None)];
         let ask = |_: u64, _: &str| Ok(vec![]);
-        let fresh = view(&stored, Some(&ask), &|_| HashMap::new(), at(100 + 60));
+        let fresh = view(&stored, Some(&ask), at(100 + 60));
         assert_eq!(fresh.not_on_judge, 0, "the judge has had no time yet");
-        let late = view(&stored, Some(&ask), &|_| HashMap::new(), at(10_000));
+        let late = view(&stored, Some(&ask), at(10_000));
         assert_eq!(late.not_on_judge, 1);
         assert!(late.submissions[0].not_on_judge);
         // When the judge could not be asked, nothing is claimed about it.
         let down = |_: u64, _: &str| Err(CodeforcesError::Request(NOTHING_KEPT.to_owned()));
-        let unknown = view(&stored, Some(&down), &|_| HashMap::new(), at(10_000));
+        let unknown = view(&stored, Some(&down), at(10_000));
         assert_eq!(unknown.not_on_judge, 0);
     }
 
@@ -548,29 +513,24 @@ mod tests {
             assert_eq!(contest, 1900);
             Ok(vec![])
         };
-        let seen = view(
-            &[login(0), pages],
-            Some(&ask),
-            &|_| HashMap::new(),
-            at(10_000),
-        );
+        let seen = view(&[login(0), pages], Some(&ask), at(10_000));
         assert_eq!(seen.contests, [1900]);
         assert_eq!(seen.submissions.len(), 0);
     }
 
     #[test]
     fn it_says_why_nothing_is_compared() {
-        let none = view(&[login(0)], None, &|_| HashMap::new(), at(10_000));
+        let none = view(&[login(0)], None, at(10_000));
         assert!(none.judge_note.expect("a note").contains("not set up"));
         let ask = |_: u64, _: &str| Ok(vec![]);
-        let nobody = view(&[], Some(&ask), &|_| HashMap::new(), at(10_000));
+        let nobody = view(&[], Some(&ask), at(10_000));
         assert!(
             nobody
                 .judge_note
                 .expect("a note")
                 .contains("No one has logged in")
         );
-        let no_contest = view(&[login(0)], Some(&ask), &|_| HashMap::new(), at(10_000));
+        let no_contest = view(&[login(0)], Some(&ask), at(10_000));
         assert!(
             no_contest
                 .judge_note
@@ -581,7 +541,6 @@ mod tests {
         let down = view(
             &[login(0), submit(2, 5, "A", true)],
             Some(&failing),
-            &|_| HashMap::new(),
             at(10_000),
         );
         assert!(
@@ -598,7 +557,7 @@ mod tests {
         let ask = |_: u64, _: &str| -> Result<Vec<JudgeSubmission>, CodeforcesError> {
             panic!("must not be asked")
         };
-        let seen = view(&[odd], Some(&ask), &|_| HashMap::new(), at(10_000));
+        let seen = view(&[odd], Some(&ask), at(10_000));
         assert_eq!(seen.handles.len(), 0);
     }
 }

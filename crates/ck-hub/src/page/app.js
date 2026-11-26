@@ -19,16 +19,6 @@ async function fetchContest(contest) {
   render();
 }
 
-function codeText(code) {
-  switch (code) {
-    case "same": return "same code";
-    case "different": return "DIFFERENT CODE";
-    case "not_read_yet": return "code not read yet";
-    case "not_comparable": return "not comparable";
-    default: return "—";
-  }
-}
-
 function contestPanel(contest) {
   const box = el("div", "net");
   const open = openContests.has(contest);
@@ -59,7 +49,7 @@ function contestPanel(contest) {
   label.prepend(check);
   box.appendChild(label);
   const shown = data.submissions.filter((s) => !suspectOnly.has(contest) || s.suspect);
-  box.appendChild(proofTable(["Time", "User", "Problem", "Submission", "Stick", "Matched by", "Code"],
+  box.appendChild(proofTable(["Time", "User", "Problem", "Submission", "Stick", "Matched by"],
     shown.map((s) => [[
       new Date(s.submitted_at).toLocaleTimeString(),
       handleLink(s.handles[0]),
@@ -67,7 +57,6 @@ function contestPanel(contest) {
       submissionLink(data.contest_id, s.submission_id),
       s.stick_id || "SUSPECT: no stick reported it",
       s.matched_by ? (s.matched_by === "id" ? "id" : "time (" + s.time_gap_s + " s apart)") : "—",
-      codeText(s.code),
     ], s.suspect ? "refused" : "ok"])));
   return box;
 }
@@ -307,7 +296,7 @@ function proofPanel(stick) {
   }
   if (data.judge.length) {
     box.appendChild(el("h4", "", "Seen on Codeforces"));
-    box.appendChild(proofTable(["Time", "User", "Contest", "Problem", "Submission", "From this stick", "Code"],
+    box.appendChild(proofTable(["Time", "User", "Contest", "Problem", "Submission", "From this stick"],
       data.judge.map((j) => [[
         new Date(j.submitted_at).toLocaleTimeString(),
         handleLink(j.handles[0]),
@@ -315,7 +304,6 @@ function proofPanel(stick) {
         j.problem,
         submissionLink(j.contest_id, j.submission_id),
         j.from_stick ? (j.time_off ? "yes, but its time is " + Math.abs(j.time_gap_s) + " s off" : "yes") : "SUSPECT: the stick did not report it",
-        codeText(j.code),
       ], j.suspect ? "refused" : "ok"])));
   }
   for (const contest of data.contests) box.appendChild(contestPanel(contest));

@@ -29,9 +29,6 @@ pub struct SubmitEvent {
     /// By the stick's clock.
     pub at: OffsetDateTime,
     pub submission_id: Option<u64>,
-    /// The hash of the source as the stick saw it, after `normalize_source`. Missing when the
-    /// stick saw only a cut of the code.
-    pub source_sha256_norm: Option<String>,
     /// `false` when the stick saw the site refuse the form, so this submit explains no judge one.
     pub accepted: bool,
 }
@@ -74,10 +71,6 @@ pub fn submit_event(stored: &StoredEvent) -> Option<SubmitEvent> {
         submission_id: payload
             .get("submission_id")
             .and_then(serde_json::Value::as_u64),
-        source_sha256_norm: payload
-            .get("source_sha256_norm")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
         accepted: payload.get("accepted").and_then(serde_json::Value::as_bool) != Some(false),
     })
 }
@@ -112,8 +105,7 @@ mod tests {
         let event = stored(
             EventKind::Submission,
             json!({"judge": "codeforces", "handle": "tourist", "contest_id": 1900,
-                   "problem_index": "B", "submission_id": 245_000_123_u64,
-                   "source_sha256_norm": "abc"}),
+                   "problem_index": "B", "submission_id": 245_000_123_u64}),
         );
         let read = submit_event(&event).expect("a submit event");
         assert_eq!(read.key, ("03c9f556".to_owned(), "boot-1".to_owned(), 7));
@@ -121,7 +113,6 @@ mod tests {
         assert_eq!(read.contest_id, 1900);
         assert_eq!(read.problem_index, "B");
         assert_eq!(read.submission_id, Some(245_000_123));
-        assert_eq!(read.source_sha256_norm.as_deref(), Some("abc"));
     }
 
     #[test]
