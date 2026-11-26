@@ -49,7 +49,9 @@ use accounts::{
     password_reset_confirm, sign_up, verify_email,
 };
 use commands::{commands_of, one_command, send_command_in};
-use downloads::{download_forge, download_image, download_source_offer, list_images};
+use downloads::{
+    download_forge, download_forge_macos, download_image, download_source_offer, list_images,
+};
 use enrolment::{
     MAX_SIGN_REQUEST_BYTES, claim_enrolment, config_hash_in, config_signing_key, enrol,
     hardware_write_in, mint_code_in, sign_config_in,
@@ -93,6 +95,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route("/forge/connect", get(page))
         .route("/people", get(page))
         .route("/download/forge", get(download_forge))
+        .route("/download/forge/macos", get(download_forge_macos))
         .route("/download/image", get(page))
         .route("/download/image/{id}", get(download_image))
         .route(
