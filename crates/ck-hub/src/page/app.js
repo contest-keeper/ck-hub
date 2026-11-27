@@ -668,19 +668,18 @@ function facts(stick) {
   };
   add("Contest", stick.contest);
   add("Site", stick.site);
-  add("Computer", last ? last.hostname : "—");
-  add("Up for", last ? span(last.uptime_s) : "—");
-  add("Recorder", last ? last.recorder : "—");
-  add("Heartbeats", last ? String(last.heartbeats) : "—");
-  add("Image", last ? last.image_version : "—");
+  add("Logged in as", stick.current_user || "Nobody right now");
+  add("Last seen", last ? ago(last.seconds_ago) : "Never");
+  add("Computer name", last ? last.hostname : "—");
+  add("Running for", last ? span(last.uptime_s) : "—");
+  add("Screen recording", last ? last.recorder : "—");
+  add("Keeper OS version", last ? last.image_version : "—");
   const disk = stick.hardware;
   if (disk) {
-    add("USB disk", (disk.serial_hint ? "serial ending " + disk.serial_hint + ", " : "") + "id " + disk.id);
+    add("USB stick", disk.serial_hint ? "serial ends in " + disk.serial_hint : "id " + disk.id);
     add("Written", disk.write_count === 1 ? "once" : disk.write_count + " times (rewritten)");
   }
-  add("Events", String(stick.events));
-  add("Requests", String(stick.network_requests));
-  add("Refused", String(stick.blocked_requests));
+  add("Web activity", stick.network_requests + " requests, " + stick.blocked_requests + " blocked");
   add("Submissions", String(stick.submissions));
   const sub = stick.last_submission;
   if (sub) {
@@ -732,10 +731,16 @@ function statusPill(stick) {
   return el("span", "pill off", "Offline");
 }
 
-function selectStick(id, scroll) {
+const detailDialog = document.getElementById("detail-dialog");
+detailDialog.addEventListener("close", () => { selected = null; render(); });
+document.getElementById("detail-close").addEventListener("click", () => detailDialog.close());
+// A click on the backdrop (the dialog itself, not its content) closes it.
+detailDialog.addEventListener("click", (event) => { if (event.target === detailDialog) detailDialog.close(); });
+
+function selectStick(id) {
   selected = id;
   render();
-  if (scroll) document.getElementById("detail").scrollIntoView({ block: "nearest" });
+  if (!detailDialog.open) detailDialog.showModal();
 }
 
 const DETAIL_TABS = [
@@ -898,7 +903,7 @@ function drawSticks() {
     why.appendChild(el("b", "", teamName(stick) + ": " + issue.text));
     why.appendChild(el("span", "", issue.fix));
     item.appendChild(why);
-    const view = act("View", "view-" + stick.stick_id, () => selectStick(stick.stick_id, true));
+    const view = act("View", "view-" + stick.stick_id, () => selectStick(stick.stick_id));
     view.setAttribute("aria-label", "View " + teamName(stick));
     item.appendChild(view);
     list.appendChild(item);
@@ -914,7 +919,8 @@ function drawSticks() {
     pick.dataset.key = "row:" + stick.stick_id;
     pick.setAttribute("aria-label", "Show details for " + teamName(stick));
     if (stick.stick_id === selected) pick.setAttribute("aria-current", "true");
-    pick.addEventListener("click", () => selectStick(stick.stick_id, true));
+    // The whole row opens the details; the button stays for the keyboard and screen readers.
+    row.addEventListener("click", () => selectStick(stick.stick_id));
     team.appendChild(pick);
     team.appendChild(el("span", "sub", [stick.machine_number ? "Machine " + stick.machine_number : "", stick.last ? stick.last.hostname : stick.site].filter(Boolean).join(" · ")));
     cell(row, "").appendChild(statusPill(stick));
