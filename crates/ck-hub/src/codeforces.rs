@@ -198,11 +198,6 @@ impl Client {
         &self,
         params: &[(&str, String)],
     ) -> Result<Vec<JudgeSubmission>, CodeforcesError> {
-        // The watcher, the follower and the page all ask from one address.
-        if self.base == PUBLIC_SITE {
-            static LAST: Mutex<Option<Instant>> = Mutex::new(None);
-            wait_turn(&LAST, CALL_GAP);
-        }
         let query = match &self.credentials {
             Some((key, secret)) => {
                 let now = OffsetDateTime::now_utc();
@@ -223,6 +218,12 @@ impl Client {
                 .join("&"),
         };
         let url = format!("{}/api/contest.status?{query}", self.base);
+        // The watcher, the follower and the page all ask from one address.
+        // The turn is taken last, so nothing between it and the request can eat into the gap.
+        if self.base == PUBLIC_SITE {
+            static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+            wait_turn(&LAST, CALL_GAP);
+        }
         let mut response = self
             .agent
             .get(&url)
