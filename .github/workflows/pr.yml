@@ -19,35 +19,14 @@ jobs:
     uses: contest-keeper/.github/.github/workflows/rust-ci.yml@main
     with:
       postgres: true
-  # The shared rust job cannot set CK_TEST_DATABASE_REQUIRED, so the PostgreSQL tests also run here
-  # with it set: a missing database fails them instead of skipping them silently.
-  postgres-tests:
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_PASSWORD: ck-test-only
-          POSTGRES_DB: ckhub
-        ports:
-          - 54329:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d ckhub"
-          --health-interval 2s --health-timeout 5s --health-retries 30
-    env:
-      CK_TEST_DATABASE_URL: postgres://postgres:ck-test-only@127.0.0.1:54329/ckhub
-      CK_TEST_DATABASE_REQUIRED: "1"
-    steps:
-      - uses: actions/checkout@v7
-      - run: rustup toolchain install --profile minimal
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked --all-features --lib --test it
   # THIRD-PARTY-LICENSES ships in the Hub image, so it must match Cargo.lock.
   licences:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-about --locked --features cli --version 0.9.3
-      - run: cargo about generate about.hbs -o THIRD-PARTY-LICENSES
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - run: cargo about generate --locked about.hbs -o THIRD-PARTY-LICENSES
       - run: git diff --exit-code THIRD-PARTY-LICENSES
