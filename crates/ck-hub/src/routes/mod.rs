@@ -79,10 +79,10 @@ const APP_JS: &str = include_str!("../page/app.js");
 const APP_CSS: &str = include_str!("../page/app.css");
 
 /// Where sticks send events. The stick's agent uses the same address.
-const EVENTS_PATH: &str = "/api/v1/events";
+pub(crate) const EVENTS_PATH: &str = "/api/v1/events";
 
 /// A heartbeat is a few hundred bytes. Anything much bigger is not one.
-const MAX_BODY_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_BODY_BYTES: usize = 64 * 1024;
 
 /// Every address the Hub answers, in one list.
 #[allow(clippy::too_many_lines)]
@@ -211,7 +211,10 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .fallback(unknown_address)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(axum::middleware::from_fn(crate::csrf::guard))
-        .layer(axum::middleware::from_fn(crate::source::layer))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&hub),
+            crate::source::layer,
+        ))
         .layer(axum::middleware::map_response(security_headers))
         .with_state(hub)
 }

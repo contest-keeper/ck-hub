@@ -36,8 +36,15 @@ impl Store for PostgresStore {
                      (organization_id, stick_id, boot_id, seq, received_at, count, heartbeat)
                  SELECT organization_id, stick_id, boot_id, seq, $5, 1, $6 FROM newer_boot
                  ON CONFLICT (stick_id) DO UPDATE SET
-                     boot_id = EXCLUDED.boot_id, seq = EXCLUDED.seq,
-                     received_at = EXCLUDED.received_at, heartbeat = EXCLUDED.heartbeat,
+                     -- A queued heartbeat of an earlier boot is counted but does not replace a
+                     -- later one.
+                     boot_id = CASE WHEN heartbeats.received_at > EXCLUDED.received_at
+                         THEN heartbeats.boot_id ELSE EXCLUDED.boot_id END,
+                     seq = CASE WHEN heartbeats.received_at > EXCLUDED.received_at
+                         THEN heartbeats.seq ELSE EXCLUDED.seq END,
+                     heartbeat = CASE WHEN heartbeats.received_at > EXCLUDED.received_at
+                         THEN heartbeats.heartbeat ELSE EXCLUDED.heartbeat END,
+                     received_at = GREATEST(heartbeats.received_at, EXCLUDED.received_at),
                      count = heartbeats.count + 1
                  WHERE heartbeats.organization_id = EXCLUDED.organization_id",
                 &[
@@ -139,7 +146,7 @@ impl Store for PostgresStore {
             transaction.query_opt(
                 "SELECT event, received_at, integrity FROM events
                  WHERE organization_id = $1 AND stick_id = $2 AND boot_id = $3
-                 ORDER BY id DESC LIMIT 1",
+                 ORDER BY seq DESC LIMIT 1",
                 &[&organization, &stick.as_str(), &boot],
             )
         })?;
@@ -195,7 +202,7 @@ impl Store for PostgresStore {
         let rows = self.in_org(organization, |transaction| {
             transaction.query(
                 "SELECT event, received_at, integrity FROM events
-                 WHERE organization_id = $1 AND stick_id = $2 ORDER BY id",
+                 WHERE organization_id = $1 AND stick_id = $2 ORDER BY received_at, id",
                 &[&organization, &stick.as_str()],
             )
         })?;
@@ -284,7 +291,7 @@ impl Store for PostgresStore {
         let rows = self.in_org(organization, |transaction| {
             transaction.query(
                 "SELECT event, received_at, integrity FROM events
-                 WHERE organization_id = $1 AND event->>'kind' = 'submission' ORDER BY id",
+                 WHERE organization_id = $1 AND event->>'kind' = 'submission' ORDER BY received_at, id",
                 &[&organization],
             )
         })?;

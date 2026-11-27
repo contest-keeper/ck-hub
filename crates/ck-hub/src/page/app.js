@@ -802,6 +802,7 @@ function detailPanel(stick) {
       note.appendChild(why);
       panel.appendChild(note);
     }
+    for (const text of stick.notes) panel.appendChild(el("p", "hint", text));
     if (neverSeen(stick)) {
       const note = el("div", "attn");
       const why = el("div", "why");

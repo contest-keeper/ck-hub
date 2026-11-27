@@ -15,6 +15,7 @@ use ck_hub::{
     Registry, Role, StorageImages, Store, StoreError, VjudgeClient, add_member,
     create_organization, create_user, register_sticks, router,
 };
+use ck_hub::{Inbox, Ingress, ingress_router};
 use clap::{Args, Parser, Subcommand};
 use time::OffsetDateTime;
 
@@ -46,6 +47,31 @@ enum Command {
     RevokeStaff(StaffArgs),
     /// Register the sticks of an admin tool registry file in the database. Safe to run twice
     ImportRegistry(ImportRegistryArgs),
+    /// Run the proxy in front of the Hub, which queues what sticks send while the Hub cannot take
+    /// it, and shows the status page
+    Ingress(IngressArgs),
+}
+
+#[derive(Args)]
+struct IngressArgs {
+    /// Where to listen
+    #[arg(long, env = "CK_LISTEN", default_value = "127.0.0.1:8089")]
+    listen: SocketAddr,
+    /// The Hub's own address, which requests are passed to
+    #[arg(long, env = "CK_HUB_URL")]
+    hub_url: String,
+    /// The Azure Service Bus queue to keep messages in while the Hub cannot take them
+    #[arg(long, env = "CK_QUEUE_URL")]
+    queue_url: String,
+    /// The secret shared with the Hub, so it believes the client address the proxy sends
+    #[arg(long, env = "CK_INGRESS_SECRET", hide_env_values = true)]
+    ingress_secret: String,
+    /// The blob the status history is kept in, so it survives a restart
+    #[arg(long, env = "CK_STATUS_URL")]
+    status_url: Option<String>,
+    /// The client id of the user-assigned managed identity
+    #[arg(long, env = "AZURE_CLIENT_ID")]
+    client_id: Option<String>,
 }
 
 #[derive(Args)]
@@ -69,6 +95,10 @@ struct ServeArgs {
     /// A file to add one line to for every heartbeat, accepted or not. No secrets go in it
     #[arg(long)]
     log: Option<PathBuf>,
+    /// The Azure Service Bus queue that holds what sticks sent while the Hub could not be reached,
+    /// like `https://<namespace>.servicebus.windows.net/<queue>`. Read with the managed identity
+    #[arg(long, env = "CK_QUEUE_URL")]
+    queue_url: Option<String>,
     #[command(flatten)]
     download: DownloadArgs,
     #[command(flatten)]
@@ -87,6 +117,9 @@ struct ServeArgs {
     /// With `--mail acs`: the sender, an address of a verified sender domain
     #[arg(long, env = "CK_MAIL_FROM")]
     mail_from: Option<String>,
+    /// The secret the proxy in front of this Hub sends, so its client address is believed
+    #[arg(long, env = "CK_INGRESS_SECRET", hide_env_values = true)]
+    ingress_secret: Option<String>,
     /// The address people reach this Hub at, for the links in mail, such as
     /// <https://hub.contestkeeper.com>
     #[arg(long, env = "CK_PUBLIC_URL")]
@@ -257,6 +290,7 @@ async fn main() -> ExitCode {
         Some(Command::MakeStaff(args)) => set_staff(args, true).await,
         Some(Command::RevokeStaff(args)) => set_staff(args, false).await,
         Some(Command::ImportRegistry(args)) => import_registry(args).await,
+        Some(Command::Ingress(args)) => run_ingress(args).await,
         None => run(cli.serve).await,
     };
     match result {
@@ -591,10 +625,16 @@ async fn run(args: ServeArgs) -> Result<(), String> {
         None,
     )));
     hub = hub.with_vjudge(Arc::new(VjudgeClient::new("https://vjudge.net")));
+    if let Some(secret) = args.ingress_secret.filter(|secret| !secret.is_empty()) {
+        hub = hub.with_ingress_secret(secret);
+    }
     let hub = Arc::new(hub);
     start_recording_purge(&hub);
     start_archive_purge(&hub);
     start_following(&hub);
+    if let Some(queue) = args.queue_url.as_deref().filter(|url| !url.is_empty()) {
+        start_inbox(&hub, queue, args.download.storage_client_id.clone())?;
+    }
 
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
@@ -620,6 +660,64 @@ fn settings_signing_key(text: Option<&str>) -> Result<Option<ConfigSigningKey>, 
         .map_err(|_| "CK_CONFIG_SIGNING_KEY is not a settings signing key".to_owned())?;
     tracing::info!(key = %key.verifying_key().key_id(), "stick settings signing is on");
     Ok(Some(key))
+}
+
+/// Runs the proxy until it is told to stop, then keeps the status history.
+async fn run_ingress(args: IngressArgs) -> Result<(), String> {
+    // The identity's token and the shared secret go with the requests.
+    for (name, address) in [
+        ("CK_QUEUE_URL", Some(&args.queue_url)),
+        ("CK_STATUS_URL", args.status_url.as_ref()),
+    ] {
+        if address.is_some_and(|address| !address.starts_with("https://")) {
+            return Err(format!("{name} must be an https address"));
+        }
+    }
+    if !args.hub_url.starts_with("https://") {
+        return Err("CK_HUB_URL must be an https address".to_owned());
+    }
+    let (Ok(identity), Ok(header)) = (
+        std::env::var("IDENTITY_ENDPOINT"),
+        std::env::var("IDENTITY_HEADER"),
+    ) else {
+        return Err("the proxy needs a managed identity (IDENTITY_ENDPOINT)".to_owned());
+    };
+    let queue = Inbox::new(&args.queue_url, identity, header, args.client_id);
+    let starting = tokio::task::spawn_blocking(move || {
+        Ingress::start(&args.hub_url, queue, args.ingress_secret, args.status_url)
+    });
+    let ingress = starting.await.map_err(|e| e.to_string())?;
+    let listener = tokio::net::TcpListener::bind(args.listen)
+        .await
+        .map_err(|e| format!("cannot listen on {}: {e}", args.listen))?;
+    tracing::info!("passing requests on from {}", args.listen);
+    axum::serve(
+        listener,
+        ingress_router(Arc::clone(&ingress)).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || ingress.save_status())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Empties the queue of messages that waited while the Hub could not be reached.
+fn start_inbox(hub: &Arc<Hub>, queue: &str, client_id: Option<String>) -> Result<(), String> {
+    // The identity's token goes with every request.
+    if !queue.starts_with("https://") {
+        return Err("CK_QUEUE_URL must be an https address".to_owned());
+    }
+    let (Ok(identity), Ok(header)) = (
+        std::env::var("IDENTITY_ENDPOINT"),
+        std::env::var("IDENTITY_HEADER"),
+    ) else {
+        return Err("CK_QUEUE_URL needs a managed identity (IDENTITY_ENDPOINT)".to_owned());
+    };
+    Inbox::new(queue, identity, header, client_id)
+        .start(Arc::clone(hub))
+        .map_err(|error| format!("the queue cannot be read: {error}"))
 }
 
 /// Asks the judges about the people sticks saw submit, one at a time, because Codeforces allows

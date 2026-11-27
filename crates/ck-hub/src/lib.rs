@@ -15,6 +15,8 @@ mod follow;
 mod forge;
 mod hub;
 mod images;
+mod inbox;
+mod ingress;
 mod invite;
 mod judge;
 mod mail;
@@ -30,6 +32,7 @@ mod secrets;
 mod signing;
 mod signup;
 mod source;
+mod status;
 mod store;
 mod submissions;
 mod vjudge;
@@ -65,6 +68,8 @@ pub use hub::{
     ONLINE_WINDOW_SECONDS, Rejection, StickView,
 };
 pub use images::{Image, ImageSource, ImagesError, MANIFEST_BLOB, StaticImages, StorageImages};
+pub use inbox::Inbox;
+pub use ingress::{Ingress, ingress_router};
 pub use invite::{AcceptError, INVITATION_LIFETIME_DAYS, InviteError, MemberError, StaffError};
 pub use judge::{EventKey, JudgeKind, JudgeSubmission, SubmitEvent, submit_event};
 pub use mail::{ConsoleMailer, Mail, MailError, Mailer, MemoryMailer, token_after};

@@ -3,8 +3,9 @@
 //! source from using them up for everyone.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
-use axum::extract::{ConnectInfo, Request};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::Response;
@@ -28,7 +29,7 @@ pub struct Source(pub String);
 /// The rightmost `X-Forwarded-For` entry is the address the Azure Container Apps ingress appended,
 /// so a client cannot choose it; the entries before it are whatever the client sent. Without the
 /// header the address of the socket is used.
-fn source_of(headers: &HeaderMap, peer: Option<SocketAddr>) -> Source {
+pub(crate) fn source_of(headers: &HeaderMap, peer: Option<SocketAddr>) -> Source {
     let forwarded = headers
         .get_all("x-forwarded-for")
         .iter()
@@ -45,13 +46,38 @@ fn source_of(headers: &HeaderMap, peer: Option<SocketAddr>) -> Source {
     Source(text.chars().take(64).collect())
 }
 
+/// What the proxy in front of the Hub adds to a request it passes on. They count only with the
+/// secret the two share: anyone can send a header.
+pub(crate) const INGRESS_SECRET: &str = "x-ck-ingress-secret";
+pub(crate) const CLIENT_ADDRESS: &str = "x-ck-client-ip";
+pub(crate) const PUBLIC_HOST: &str = "x-ck-forwarded-host";
+
+/// When the proxy sent the request, takes the client's address and the public host name from it.
+/// Without that every client would count as one source, and a browser's `Origin` would not match.
+fn behind_proxy(headers: &mut HeaderMap, secret: Option<&str>) -> Option<Source> {
+    let given = headers.remove(INGRESS_SECRET);
+    let client = headers.remove(CLIENT_ADDRESS);
+    let host = headers.remove(PUBLIC_HOST);
+    // Compared as hashes, so the time taken says nothing about the secret.
+    let hash = |bytes: &[u8]| ck_crypto::sha256_hex(bytes);
+    if hash(given?.as_bytes()) != hash(secret?.as_bytes()) {
+        return None;
+    }
+    if let Some(host) = host {
+        headers.insert("x-forwarded-host", host);
+    }
+    let client = client?.to_str().ok()?.chars().take(64).collect();
+    Some(Source(client))
+}
+
 /// Puts the [`Source`] of the request where the handlers can read it.
-pub async fn layer(mut request: Request, next: Next) -> Response {
+pub async fn layer(State(hub): State<Arc<Hub>>, mut request: Request, next: Next) -> Response {
     let peer = request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|info| info.0);
-    let source = source_of(request.headers(), peer);
+    let source = behind_proxy(request.headers_mut(), hub.ingress_secret.as_deref())
+        .unwrap_or_else(|| source_of(request.headers(), peer));
     request.extensions_mut().insert(source);
     next.run(request).await
 }
@@ -100,6 +126,33 @@ mod tests {
             map.append("x-forwarded-for", value.parse().expect("header"));
         }
         map
+    }
+
+    #[test]
+    fn the_proxys_headers_count_only_with_its_secret() {
+        let proxied = |secret: &str| {
+            let mut map = HeaderMap::new();
+            for (name, value) in [
+                (INGRESS_SECRET, secret),
+                (CLIENT_ADDRESS, "9.9.9.9"),
+                (PUBLIC_HOST, "hub.example.org"),
+            ] {
+                map.insert(name, value.parse().expect("header"));
+            }
+            map
+        };
+        let mut good = proxied("s3cret");
+        assert_eq!(
+            behind_proxy(&mut good, Some("s3cret")),
+            Some(Source("9.9.9.9".into()))
+        );
+        assert_eq!(good["x-forwarded-host"], "hub.example.org");
+        assert!(!good.contains_key(INGRESS_SECRET));
+        for (given, kept) in [("guess", Some("s3cret")), ("s3cret", None)] {
+            let mut map = proxied(given);
+            assert_eq!(behind_proxy(&mut map, kept), None);
+            assert!(map.is_empty());
+        }
     }
 
     #[test]

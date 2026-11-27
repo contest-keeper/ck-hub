@@ -314,15 +314,20 @@ impl Hub {
 
     /// Closes the command an ack event names. An ack the Hub cannot place is dropped, never an
     /// error: the event itself is already kept and the stick must not send it again.
-    pub(crate) fn apply_ack(&self, organization: &str, stick: &StickId, event: &Event) {
+    pub(crate) fn apply_ack(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        event: &Event,
+        received_at: OffsetDateTime,
+    ) {
         let Ok(ack) = serde_json::from_value::<CommandAck>(event.payload.clone()) else {
             return;
         };
-        let now = (self.clock)();
         // A failure here is not the stick's problem either; the command then simply expires.
         let _ = self
             .store
-            .record_command_ack(organization, stick, &ack, now);
+            .record_command_ack(organization, stick, &ack, received_at);
     }
 
     fn command_rate_limit(&self, user: &str, now: OffsetDateTime) -> Result<(), CommandError> {

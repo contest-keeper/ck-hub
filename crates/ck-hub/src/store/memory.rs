@@ -215,14 +215,20 @@ impl Store for MemoryStore {
         let key = (organization.to_owned(), heartbeat.stick_id.clone());
         let mut heartbeats = self.heartbeats.lock().expect("heartbeats lock");
         let count = heartbeats.get(&key).map_or(0, |seen| seen.count) + 1;
-        heartbeats.insert(
-            key,
-            SeenHeartbeat {
-                heartbeat,
-                received_at,
-                count,
-            },
-        );
+        match heartbeats.get_mut(&key) {
+            // A queued heartbeat of an earlier boot is counted but does not replace a later one.
+            Some(seen) if seen.received_at > received_at => seen.count = count,
+            _ => {
+                heartbeats.insert(
+                    key,
+                    SeenHeartbeat {
+                        heartbeat,
+                        received_at,
+                        count,
+                    },
+                );
+            }
+        }
         Ok(None)
     }
 
@@ -286,7 +292,11 @@ impl Store for MemoryStore {
             .lock()
             .expect("events lock")
             .get(&(organization.to_owned(), stick.clone()))
-            .and_then(|all| all.iter().rev().find(|s| s.event.boot_id == boot))
+            .and_then(|all| {
+                all.iter()
+                    .filter(|s| s.event.boot_id == boot)
+                    .max_by_key(|s| s.event.seq)
+            })
             .cloned())
     }
 
@@ -307,14 +317,19 @@ impl Store for MemoryStore {
         if !self.event_keys.lock().expect("event keys lock").insert(key) {
             return Ok(false);
         }
-        events
+        let kept = events
             .entry((organization.to_owned(), event.stick_id.clone()))
-            .or_default()
-            .push(StoredEvent {
+            .or_default();
+        // A queued event arrives late but belongs where it was received.
+        let at = kept.partition_point(|s| s.received_at <= received_at);
+        kept.insert(
+            at,
+            StoredEvent {
                 received_at,
                 event,
                 integrity,
-            });
+            },
+        );
         Ok(true)
     }
 
