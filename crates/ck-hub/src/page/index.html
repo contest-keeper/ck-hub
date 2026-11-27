@@ -60,23 +60,30 @@
       <span class="help" id="pass-help" hidden></span>
     </div>
     <button class="btn pri" type="submit" id="login-submit">Log in</button>
-    <p class="muted" id="login-links"><span id="new-here">New here? <a href="#" id="to-register">Create an account</a> with the email your invitation went to.</span><button class="btn sm" type="button" id="to-login" hidden>Back to log in</button></p>
+    <p class="muted" id="login-links"><span id="new-here">New here? <a href="#" id="to-register">Create an account</a></span><button class="btn sm" type="button" id="to-login" hidden>Back to log in</button></p>
   </form>
   <section id="forge" class="card center" hidden aria-live="polite">
-    <div class="stack"><h1>Connect Keeper Forge</h1><p class="muted">Keeper Forge on your PC asks to register the sticks it makes under your organization.</p></div>
-    <div class="card well pair" id="forge-code-box" hidden><span class="muted">Check that this code matches Keeper Forge</span><b class="mono pair-code" id="forge-code"></b><span class="muted">If it is different, do not connect. The code works for 10 minutes.</span></div>
+    <div class="stack"><h1>Connect Keeper Forge</h1><p class="muted">Allow Keeper Forge to register sticks for your organization.</p></div>
+    <div class="card well pair" id="forge-code-box" hidden><span class="muted">Confirm this code matches Keeper Forge</span><b class="mono pair-code" id="forge-code"></b><span class="muted">Expires in 10 minutes.</span></div>
     <dl class="facts"><div><dt>Signed in as</dt><dd id="forge-who"></dd></div><div><dt>Organization</dt><dd id="forge-org"></dd></div></dl>
-    <ul class="list"><li>Registers the sticks it makes</li><li>Stays connected for 12 hours</li></ul>
     <div id="forge-result" role="alert" hidden></div>
     <div class="row"><button class="btn pri" type="button" id="forge-yes">Connect Keeper Forge</button><button class="btn" type="button" id="forge-no">Cancel</button></div>
   </section>
   <section id="view-downloads" class="stack" hidden>
-    <div class="head"><div><h1>Keeper OS</h1><p>The system your sticks start from. Download it once, then use it in Keeper Forge.</p></div></div>
+    <div class="head"><div><h1>Downloads</h1><p>Get Keeper Forge to make sticks, or download Keeper OS for offline use.</p></div></div>
+    <section class="card" aria-labelledby="forge-dl">
+      <div class="row"><h2 id="forge-dl">Keeper Forge</h2><span class="grow"></span><span class="muted">Desktop app</span></div>
+      <p class="muted">Writes and configures contest sticks. Downloads Keeper OS automatically when signed in.</p>
+      <div class="row">
+        <a class="btn pri" href="/download/forge">Download for Windows</a>
+        <a class="btn" href="/download/forge/macos">Download for macOS</a>
+      </div>
+    </section>
     <section class="card" aria-labelledby="how"><h2 id="how">How to use a download</h2>
       <ol class="stepper" id="how-steps">
-        <li><span class="dot on">1</span>Download the image below</li>
-        <li><span class="dot">2</span>In <a href="/download/forge">Keeper Forge</a>, choose Import download… under Base image</li>
-        <li><span class="dot">3</span>Select the file and paste its SHA-256, so Forge can check it</li>
+        <li><span class="dot on">1</span><span>Sign in to Keeper Forge to fetch Keeper OS automatically</span></li>
+        <li><span class="dot">2</span><span>For an offline image, download below, then click Use a file from this PC → Choose image file…</span></li>
+        <li><span class="dot">3</span><span>Verify the SHA-256 if needed</span></li>
       </ol>
     </section>
     <p id="image-download-status" class="hint" role="status"></p>
@@ -88,7 +95,7 @@
     </details>
   </section>
   <section id="view-people" class="stack" hidden>
-    <div class="head"><div><h1>People</h1><p>Choose who can see this organization's sticks and who can change things.</p></div></div>
+    <div class="head"><div><h1>People</h1><p>Manage members and invitations.</p></div></div>
     <p id="people-denied" class="muted" hidden>Only an owner or an admin can see the people of an organization.</p>
     <div id="people" class="cols" hidden>
       <div class="a stack">
@@ -98,8 +105,8 @@
       <section class="b card" aria-labelledby="new-h">
         <h2 id="new-h">Invite someone</h2>
         <form class="stack" id="invite-form">
-          <div class="field"><label for="invite-email">Their email</label><input class="input" id="invite-email" type="email" required autocomplete="off"><span class="help">We send a link. They choose their own password.</span></div>
-          <fieldset class="stack" id="invite-roles"><legend class="sr">What can they do?</legend></fieldset>
+          <div class="field"><label for="invite-email">Email</label><input class="input" id="invite-email" type="email" required autocomplete="off"></div>
+          <fieldset class="stack" id="invite-roles"><legend class="sr">Role</legend></fieldset>
           <button class="btn pri" type="submit">Send invitation</button>
           <div id="invite-msg" class="form-msg" role="status"></div>
         </form>
