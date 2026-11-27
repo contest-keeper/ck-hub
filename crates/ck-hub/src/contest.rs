@@ -16,6 +16,8 @@ use crate::submissions::WINDOW;
 #[derive(Debug, Serialize, PartialEq)]
 pub struct ContestView {
     pub contest_id: u64,
+    /// Where the judge's pages are; the Hub sets it, the page builds its links from it.
+    pub site: &'static str,
     /// Newest first.
     pub submissions: Vec<ContestRow>,
     pub matched: usize,
@@ -87,6 +89,7 @@ pub fn view(contest_id: u64, judge: &[JudgeSubmission], events: &[SubmitEvent]) 
     rows.sort_by_key(|row| std::cmp::Reverse((row.submitted_at, row.submission_id)));
     ContestView {
         contest_id,
+        site: "",
         matched: rows.iter().filter(|row| row.stick_id.is_some()).count(),
         suspect: rows.iter().filter(|row| row.suspect).count(),
         submissions: rows,
@@ -113,6 +116,7 @@ mod tests {
 
     fn event(stick: &str, handle: &str, seconds: i64, id: Option<u64>) -> SubmitEvent {
         SubmitEvent {
+            judge: crate::judge::JudgeKind::Codeforces,
             key: (stick.to_owned(), "boot".to_owned(), 1),
             handle: handle.to_owned(),
             contest_id: 1,

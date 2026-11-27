@@ -17,3 +17,4 @@ mod signup;
 mod startup;
 mod sticks;
 mod store;
+mod vjudge_watcher;

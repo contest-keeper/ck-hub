@@ -8,8 +8,8 @@ Work in progress. Today the Hub receives signed heartbeats and events from stick
 organizers every stick with its last heartbeat, who is logged in and what needs a look. It has
 accounts (sign-up with mail confirmation, password reset), organizations with owner, admin and viewer
 roles, invitations, platform staff, and mail through Azure Communication Services. It follows a
-Codeforces contest and matches the judge's submissions to the stick events; watching Kilonova and vJudge is
-not built, and nothing on the page shows the matches yet.
+Codeforces and VJudge contest and matches the judge's submissions to the stick events; watching Kilonova is
+not built.
 
 To deploy it, see [ck-infra](https://github.com/contest-keeper/ck-infra) (Azure or Docker Compose).
 
@@ -41,6 +41,11 @@ cargo run -p ck-hub -- --registry ck-registry.json --log hub.log
 - `--codeforces-contest ID --codeforces-organization SLUG` makes the Hub poll that Codeforces contest and match its
   submissions to the organization's stick events. It works anonymously; for a gym or group contest set
   `CK_CODEFORCES_KEY` and `CK_CODEFORCES_SECRET` (environment only, never logged or stored).
+- `--vjudge-contest ID --vjudge-organization SLUG` (or `CK_VJUDGE_CONTEST` and `CK_VJUDGE_ORGANIZATION`) does the
+  same for a VJudge contest. VJudge's status list is public, so no key is needed. A stick's VJudge submit is
+  matched by its run id and by VJudge's own submit time, which the stick reads from VJudge, so the stick's clock
+  does not matter. Contest numbers are kept apart per judge; `GET .../contests/{id}/submissions?judge=vjudge`
+  is the VJudge contest view.
 - `--log` adds one line per heartbeat, accepted or refused. It never holds a secret or a signature.
 
 | Route | What it does |

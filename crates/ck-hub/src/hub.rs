@@ -19,7 +19,7 @@ use crate::contest::{self, ContestView};
 use crate::credentials::CredentialScope;
 use crate::download::Download;
 use crate::images::ImageSource;
-use crate::judge::{JudgeSubmission, SubmitEvent};
+use crate::judge::{JudgeKind, JudgeSubmission, SubmitEvent};
 use crate::mail::Mailer;
 use crate::network::{self, NetworkView};
 use crate::recordings::Blobs;
@@ -169,8 +169,8 @@ pub struct LastHeartbeat {
     pub heartbeats: u64,
 }
 
-/// Per contest and handle: when the judge was asked and what it said.
-type JudgedCache = HashMap<(u64, String), (OffsetDateTime, Vec<JudgeSubmission>)>;
+/// Per judge, contest and handle: when the judge was asked and what it said.
+type JudgedCache = HashMap<(JudgeKind, u64, String), (OffsetDateTime, Vec<JudgeSubmission>)>;
 
 pub struct Hub {
     pub(crate) registry: Mutex<Registry>,
@@ -207,7 +207,7 @@ pub struct Hub {
     pub(crate) mailer: Option<(Arc<dyn Mailer>, String)>,
     pub(crate) clock: Box<dyn Fn() -> OffsetDateTime + Send + Sync>,
     /// Where the submissions of a person in a contest are asked, once set up.
-    judge: Option<Arc<dyn Judge>>,
+    judges: HashMap<JudgeKind, Arc<dyn Judge>>,
     /// What the judge answered lately, so a page that refreshes does not ask again each time.
     judged: Mutex<JudgedCache>,
 }
@@ -253,7 +253,7 @@ impl Hub {
             images: None,
             mailer: None,
             clock,
-            judge: None,
+            judges: HashMap::new(),
             judged: Mutex::new(HashMap::new()),
             sign_rates: Mutex::new(HashMap::new()),
             config_key: None,
@@ -263,7 +263,14 @@ impl Hub {
     /// Lets the Hub ask the judge what people submitted, to compare with what sticks reported.
     #[must_use]
     pub fn with_judge(mut self, judge: Arc<dyn Judge>) -> Self {
-        self.judge = Some(judge);
+        self.judges.insert(JudgeKind::Codeforces, judge);
+        self
+    }
+
+    /// Lets the Hub ask `VJudge` the same, for the sticks used there.
+    #[must_use]
+    pub fn with_vjudge(mut self, judge: Arc<dyn Judge>) -> Self {
+        self.judges.insert(JudgeKind::Vjudge, judge);
         self
     }
 
@@ -674,6 +681,7 @@ impl Hub {
     }
 
     /// What the stick reported as submitted, and what the judge says the same people submitted.
+    /// The fields are Codeforces; `vjudge` holds the same for `VJudge` when the stick was used there.
     pub fn submissions_of(
         &self,
         organization: &str,
@@ -684,12 +692,26 @@ impl Hub {
         };
         let stored = self.store.events(organization, &id)?;
         let now = (self.clock)();
+        let mut view = self.submissions_for(organization, JudgeKind::Codeforces, &stored, now);
+        let vjudge = self.submissions_for(organization, JudgeKind::Vjudge, &stored, now);
+        view.vjudge = (!vjudge.handles.is_empty() || !vjudge.submissions.is_empty())
+            .then(|| Box::new(vjudge));
+        Ok(Some(view))
+    }
+
+    fn submissions_for(
+        &self,
+        organization: &str,
+        kind: JudgeKind,
+        stored: &[StoredEvent],
+        now: OffsetDateTime,
+    ) -> SubmissionsView {
         let ask = |contest: u64, handle: &str| {
             let judge = self
-                .judge
-                .as_ref()
+                .judges
+                .get(&kind)
                 .expect("asked only when there is a judge");
-            let key = (contest, handle.to_lowercase());
+            let key = (kind, contest, handle.to_lowercase());
             if let Ok(cache) = self.judged.lock()
                 && let Some((at, found)) = cache.get(&key)
                 && now - *at < Duration::seconds(30)
@@ -698,13 +720,13 @@ impl Hub {
             }
             let found = match judge.submissions_of(contest, handle) {
                 Ok(found) => found,
-                // The watcher keeps what Codeforces said, so a judge that is down for a while does
+                // The watcher keeps what the judge said, so a judge that is down for a while does
                 // not blank the page. With nothing kept the judge's own error is told.
                 Err(error) => {
                     // Only this person's rows count: with none of them the outage is still told.
                     let mut kept = self
                         .store
-                        .judge_submissions(organization, "codeforces", contest)
+                        .judge_submissions(organization, kind.key(), contest)
                         .unwrap_or_default();
                     kept.retain(|s| s.handles.iter().any(|h| h.eq_ignore_ascii_case(handle)));
                     if kept.is_empty() {
@@ -718,31 +740,34 @@ impl Hub {
             }
             Ok(found)
         };
-        let ask: Option<&submissions::Ask<'_>> = if self.judge.is_some() {
+        let ask: Option<&submissions::Ask<'_>> = if self.judges.contains_key(&kind) {
             Some(&ask)
         } else {
             None
         };
-        Ok(Some(submissions::view(&stored, ask, now)))
+        submissions::view_of(kind, stored, ask, now)
     }
 
-    /// Every Codeforces submission of one contest the Hub has kept, with the stick that reported
-    /// it and whether the code is the same.
+    /// Every submission of one contest of a judge the Hub has kept, with the stick that reported
+    /// it and whether the time agrees.
     pub fn contest_submissions(
         &self,
         organization: &str,
+        kind: JudgeKind,
         contest_id: u64,
     ) -> Result<ContestView, StoreError> {
         let judged = self
             .store
-            .judge_submissions(organization, "codeforces", contest_id)?;
+            .judge_submissions(organization, kind.key(), contest_id)?;
         let events: Vec<SubmitEvent> = self
             .store
             .submission_events(organization)?
             .into_iter()
-            .filter(|event| event.contest_id == contest_id && event.accepted)
+            .filter(|event| event.judge == kind && event.contest_id == contest_id && event.accepted)
             .collect();
-        Ok(contest::view(contest_id, &judged, &events))
+        let mut view = contest::view(contest_id, &judged, &events);
+        view.site = kind.site();
+        Ok(view)
     }
 
     /// Every stick of the organization, with its last heartbeat when it has sent one.
@@ -953,16 +978,23 @@ struct KeptJudge<'a> {
     store: &'a dyn Store,
     organization: &'a str,
     /// Without a live judge the details page compares nothing, so the list counts nothing either.
-    live: bool,
-    rows: RefCell<HashMap<u64, Vec<JudgeSubmission>>>,
+    live: Vec<JudgeKind>,
+    rows: RefCell<HashMap<(JudgeKind, u64), Vec<JudgeSubmission>>>,
 }
 
 impl<'a> KeptJudge<'a> {
     fn for_hub(hub: &'a Hub, organization: &'a str) -> Self {
-        Self::new(&*hub.store, organization, hub.judge.is_some())
+        Self::new(
+            &*hub.store,
+            organization,
+            JudgeKind::ALL
+                .into_iter()
+                .filter(|kind| hub.judges.contains_key(kind))
+                .collect(),
+        )
     }
 
-    fn new(store: &'a dyn Store, organization: &'a str, live: bool) -> Self {
+    fn new(store: &'a dyn Store, organization: &'a str, live: Vec<JudgeKind>) -> Self {
         Self {
             store,
             organization,
@@ -971,14 +1003,14 @@ impl<'a> KeptJudge<'a> {
         }
     }
 
-    fn rows(&self, contest: u64) -> Result<Vec<JudgeSubmission>, CodeforcesError> {
+    fn rows(&self, kind: JudgeKind, contest: u64) -> Result<Vec<JudgeSubmission>, CodeforcesError> {
         let mut known = self.rows.borrow_mut();
-        if let Some(rows) = known.get(&contest) {
+        if let Some(rows) = known.get(&(kind, contest)) {
             return Ok(rows.clone());
         }
         let rows = self
             .store
-            .judge_submissions(self.organization, "codeforces", contest)
+            .judge_submissions(self.organization, kind.key(), contest)
             .map_err(|error| CodeforcesError::Request(error.to_string()))?;
         // No watcher for this contest: nothing is known, so nothing is flagged.
         if rows.is_empty() {
@@ -986,17 +1018,24 @@ impl<'a> KeptJudge<'a> {
                 submissions::NOTHING_KEPT.to_owned(),
             ));
         }
-        known.insert(contest, rows.clone());
+        known.insert((kind, contest), rows.clone());
         Ok(rows)
     }
 
-    /// How many submissions of a stick disagree with what the watcher kept of the judge.
+    /// How many submissions of a stick disagree with what the watcher kept of the judges.
     fn problems(&self, stored: &[StoredEvent], now: OffsetDateTime) -> usize {
-        if !self.live {
-            return 0;
-        }
-        let seen = submissions::view(stored, Some(&|contest, _| self.rows(contest)), now);
-        seen.suspect + seen.not_on_judge
+        self.live
+            .iter()
+            .map(|kind| {
+                let seen = submissions::view_of(
+                    *kind,
+                    stored,
+                    Some(&|contest, _| self.rows(*kind, contest)),
+                    now,
+                );
+                seen.suspect + seen.not_on_judge
+            })
+            .sum()
     }
 }
 

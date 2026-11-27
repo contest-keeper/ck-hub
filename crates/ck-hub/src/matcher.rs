@@ -95,6 +95,7 @@ mod tests {
 
     fn event(seq: u64, handle: &str, problem: &str, seconds: i64, id: Option<u64>) -> SubmitEvent {
         SubmitEvent {
+            judge: crate::judge::JudgeKind::Codeforces,
             key: ("stick".to_owned(), "boot".to_owned(), seq),
             handle: handle.to_owned(),
             contest_id: 1,

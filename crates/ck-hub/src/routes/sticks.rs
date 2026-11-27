@@ -4,6 +4,7 @@ use super::{
     Access, Arc, Bytes, Deserialize, HeaderMap, Hub, IntoResponse, Json, NewStick, Path,
     RegisterError, Response, Role, State, StatusCode, denied, json, require_in, unavailable,
 };
+use crate::JudgeKind;
 
 /// A whole registry of a few hundred sticks. Only the admin-only registering route allows this much.
 pub(super) const MAX_REGISTRY_BYTES: usize = 2 * 1024 * 1024;
@@ -166,19 +167,30 @@ pub(super) async fn submissions_of(
     }
 }
 
+/// `?judge=vjudge` asks for a `VJudge` contest; without it the contest is a Codeforces one.
+#[derive(serde::Deserialize)]
+pub(super) struct ContestQuery {
+    judge: Option<String>,
+}
+
 pub(super) async fn contest_submissions_of(
     State(hub): State<Arc<Hub>>,
     Path((slug, contest)): Path<(String, String)>,
+    axum::extract::Query(query): axum::extract::Query<ContestQuery>,
     headers: HeaderMap,
 ) -> Response {
     match require_in(&hub, &headers, slug, Role::Viewer).await {
         Ok(access) => {
             // Read after the sign-in check, so a stranger gets 401 whatever the path says.
-            let Ok(contest) = contest.parse::<u64>() else {
+            let kind = query
+                .judge
+                .as_deref()
+                .map_or(Some(JudgeKind::Codeforces), JudgeKind::from_key);
+            let (Ok(contest), Some(kind)) = (contest.parse::<u64>(), kind) else {
                 return (StatusCode::NOT_FOUND, "there is no such contest").into_response();
             };
             match tokio::task::spawn_blocking(move || {
-                hub.contest_submissions(&access.organization.id, contest)
+                hub.contest_submissions(&access.organization.id, kind, contest)
             })
             .await
             {

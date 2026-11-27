@@ -10,10 +10,10 @@ use std::time::Duration;
 use ck_crypto::ConfigSigningKey;
 use ck_hub::{
     AcsMailer, AzureBlobs, CodeforcesClient, ConsoleMailer, CreateUserError, DEFAULT_POOL_SIZE,
-    DEFAULT_RETENTION_DAYS, Delegation, Download, Hub, MIN_PASSWORD_LENGTH, Mailer, MemoryStore,
-    NewStick, OrganizationError, PasswordCost, PostgresStore, RegisterError, Registry, Role,
-    StorageImages, Store, StoreError, add_member, create_organization, create_user,
-    register_sticks, router,
+    DEFAULT_RETENTION_DAYS, Delegation, Download, Hub, JudgeKind, MIN_PASSWORD_LENGTH, Mailer,
+    MemoryStore, NewStick, OrganizationError, Pages, PasswordCost, PostgresStore, RegisterError,
+    Registry, Role, StorageImages, Store, StoreError, VjudgeClient, add_member,
+    create_organization, create_user, register_sticks, router,
 };
 use clap::{Args, Parser, Subcommand};
 use time::OffsetDateTime;
@@ -70,6 +70,8 @@ struct ServeArgs {
     download: DownloadArgs,
     #[command(flatten)]
     codeforces: CodeforcesArgs,
+    #[command(flatten)]
+    vjudge: VjudgeArgs,
     /// How the Hub sends mail. `console` prints it, links included, and is for a developer's
     /// machine only. `acs` sends through Azure Communication Services (the key is read from the
     /// environment variable `CK_ACS_KEY`). Without this, sign-up and password reset answer 503
@@ -162,6 +164,18 @@ struct CodeforcesArgs {
         requires = "codeforces_key"
     )]
     codeforces_secret: Option<String>,
+}
+
+// The field names make the flags `--vjudge-contest` and so on, so the shared prefix stays.
+#[allow(clippy::struct_field_names)]
+#[derive(Args)]
+struct VjudgeArgs {
+    /// Follow this `VJudge` contest and keep its submissions. `VJudge` needs no key: the list is public
+    #[arg(long, env = "CK_VJUDGE_CONTEST", requires = "vjudge_organization")]
+    vjudge_contest: Option<u64>,
+    /// The slug of the organization the contest belongs to
+    #[arg(long, env = "CK_VJUDGE_ORGANIZATION", requires = "vjudge_contest")]
+    vjudge_organization: Option<String>,
 }
 
 #[derive(Args)]
@@ -539,17 +553,7 @@ async fn run(args: ServeArgs) -> Result<(), String> {
             "no database and no --registry: the Hub knows no stick and refuses every heartbeat"
         );
     }
-    if let (Some(contest), Some(slug)) = (
-        args.codeforces.codeforces_contest,
-        &args.codeforces.codeforces_organization,
-    ) {
-        let credentials = args
-            .codeforces
-            .codeforces_key
-            .clone()
-            .zip(args.codeforces.codeforces_secret.clone());
-        start_codeforces_watcher(&store, slug, contest, credentials).await?;
-    }
+    start_contest_watchers(&store, &args.codeforces, &args.vjudge).await?;
     let mut hub = Hub::new(registry, store, log, Box::new(OffsetDateTime::now_utc));
     if let Some(account) = &args.download.download_account {
         let (download, recordings) = storage_containers(&args.download, account)?;
@@ -572,6 +576,7 @@ async fn run(args: ServeArgs) -> Result<(), String> {
         "https://codeforces.com",
         None,
     )));
+    hub = hub.with_vjudge(Arc::new(VjudgeClient::new("https://vjudge.net")));
     let hub = Arc::new(hub);
     start_recording_purge(&hub);
     start_archive_purge(&hub);
@@ -643,13 +648,45 @@ fn start_archive_purge(hub: &Arc<Hub>) {
     }
 }
 
-/// Follows a Codeforces contest on a thread of its own, because the store and the HTTP client
-/// block. The key and the secret are never logged.
-async fn start_codeforces_watcher(
+/// Follows the Codeforces and `VJudge` contests the Hub was told about.
+async fn start_contest_watchers(
+    store: &Arc<dyn Store>,
+    codeforces: &CodeforcesArgs,
+    vjudge: &VjudgeArgs,
+) -> Result<(), String> {
+    if let (Some(contest), Some(slug)) = (
+        codeforces.codeforces_contest,
+        &codeforces.codeforces_organization,
+    ) {
+        let credentials = codeforces
+            .codeforces_key
+            .clone()
+            .zip(codeforces.codeforces_secret.clone());
+        let client = CodeforcesClient::new("https://codeforces.com", credentials);
+        start_watcher(
+            store,
+            slug,
+            JudgeKind::Codeforces,
+            contest,
+            Box::new(client),
+        )
+        .await?;
+    }
+    if let (Some(contest), Some(slug)) = (vjudge.vjudge_contest, &vjudge.vjudge_organization) {
+        let client = VjudgeClient::new("https://vjudge.net");
+        start_watcher(store, slug, JudgeKind::Vjudge, contest, Box::new(client)).await?;
+    }
+    Ok(())
+}
+
+/// Follows a contest of a judge on a thread of its own, because the store and the HTTP client
+/// block. A Codeforces key and secret are never logged.
+async fn start_watcher(
     store: &Arc<dyn Store>,
     slug: &str,
+    kind: JudgeKind,
     contest: u64,
-    credentials: Option<(String, String)>,
+    client: Box<dyn Pages + Send>,
 ) -> Result<(), String> {
     let lookup = Arc::clone(store);
     let wanted = slug.to_owned();
@@ -657,16 +694,16 @@ async fn start_codeforces_watcher(
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("no organization {slug} for the Codeforces contest"))?;
-    let client = CodeforcesClient::new("https://codeforces.com", credentials);
+        .ok_or_else(|| format!("no organization {slug} for the {} contest", kind.label()))?;
     let store = Arc::clone(store);
     std::thread::Builder::new()
-        .name("codeforces".into())
+        .name(kind.key().into())
         .spawn(move || {
             ck_hub::watch(
-                &client,
+                &*client,
                 &*store,
                 &organization.id,
+                kind,
                 contest,
                 Duration::from_secs(30),
                 Duration::from_secs(600),
@@ -676,7 +713,8 @@ async fn start_codeforces_watcher(
     tracing::info!(
         contest,
         organization = slug,
-        "following the Codeforces contest"
+        "following the {} contest",
+        kind.label()
     );
     Ok(())
 }
