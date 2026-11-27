@@ -56,6 +56,18 @@ fn who_logged_in_is_checked_in_the_opened_contest_and_again_later() {
         Box::new(move || *clock.lock().expect("clock")),
     )
     .with_judge(judge.clone());
+    // A Hub started again on the same store.
+    let restarted = || {
+        let registry = Registry::open(dir.path().join("registry.json")).expect("open");
+        let clock = Arc::clone(&now);
+        Hub::new(
+            registry,
+            store.clone(),
+            None,
+            Box::new(move || *clock.lock().expect("clock")),
+        )
+        .with_judge(judge.clone())
+    };
     let pass = |seconds| *now.lock().expect("clock") += Duration::seconds(seconds);
     assert!(!hub.check_next_followed().expect("nobody yet"));
 
@@ -100,10 +112,14 @@ fn who_logged_in_is_checked_in_the_opened_contest_and_again_later() {
 
     pass(61);
     assert!(hub.check_next_followed().expect("asked again"));
+    // After a restart the same person is followed, with no new event from the stick.
+    let again = restarted();
+    again.follow_recent().expect("restored");
+    assert!(again.check_next_followed().expect("asked after a restart"));
     pass(7 * 3600);
     assert!(!hub.check_next_followed().expect("forgotten"));
     assert_eq!(
         *judge.0.lock().expect("asked"),
-        vec![(1900, "Ana".to_owned()), (1900, "Ana".to_owned())]
+        vec![(1900, "Ana".to_owned()); 3]
     );
 }

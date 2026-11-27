@@ -12,7 +12,7 @@ use time::{Duration, OffsetDateTime};
 
 use crate::codeforces::CodeforcesError;
 use crate::hub::Hub;
-use crate::judge::{JudgeKind, SubmitEvent, submit_event};
+use crate::judge::{JudgeKind, submit_event};
 use crate::store::{StoreError, StoredEvent};
 use crate::submissions::{is_handle, pairs_of};
 
@@ -137,27 +137,32 @@ impl Hub {
         }
     }
 
-    /// Follows again whoever submitted lately, after a restart.
+    /// Follows again, after a restart, whoever the sticks heard from lately are compared on.
     ///
     /// # Errors
     /// The store failing.
     pub fn follow_recent(&self) -> Result<(), StoreError> {
         let now = (self.clock)();
         for organization in self.store.organizations()? {
-            for submit in self.store.submission_events(&organization.id)? {
-                if submit.accepted && now - submit.at < FOLLOW_FOR {
-                    let SubmitEvent {
-                        judge,
-                        handle,
-                        contest_id,
-                        at,
-                        ..
-                    } = submit;
-                    self.follow(&organization.id, judge, &handle, contest_id, at, false);
+            for entry in self.stick_entries(&organization.id)? {
+                let stored = self.store.events(&organization.id, &entry.stick_id)?;
+                if let Some(active) = stored.iter().map(|item| item.received_at).max()
+                    && now - active < FOLLOW_FOR
+                {
+                    self.follow_pairs(&organization.id, &stored, active);
                 }
             }
         }
         Ok(())
+    }
+
+    /// Follows every pair the comparison of a stick with these events uses.
+    fn follow_pairs(&self, organization: &str, stored: &[StoredEvent], active: OffsetDateTime) {
+        for judge in JudgeKind::ALL {
+            for (handle, contest_id) in pairs_of(judge, stored) {
+                self.follow(organization, judge, &handle, contest_id, active, false);
+            }
+        }
     }
 
     /// Reads one stick that sent something new, at most once in [`ASK_AGAIN`], and follows the
@@ -187,11 +192,7 @@ impl Hub {
                 return Err(error);
             }
         };
-        for judge in JudgeKind::ALL {
-            for (handle, contest_id) in pairs_of(judge, &stored) {
-                self.follow(&organization, judge, &handle, contest_id, now, false);
-            }
-        }
+        self.follow_pairs(&organization, &stored, now);
         Ok(())
     }
 

@@ -796,7 +796,7 @@ impl Hub {
         Ok(view)
     }
 
-    fn stick_entries(&self, organization: &str) -> Result<Vec<Stick>, StoreError> {
+    pub(crate) fn stick_entries(&self, organization: &str) -> Result<Vec<Stick>, StoreError> {
         // The registry file's sticks belong to the default organization.
         let mut entries: Vec<Stick> = if organization == self.default_org_id()? {
             let mut registry = self.registry.lock().expect("registry lock");
