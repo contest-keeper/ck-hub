@@ -13,6 +13,8 @@ use super::{
 #[derive(Deserialize, Default)]
 pub(super) struct MintBody {
     #[serde(default)]
+    stick_id: Option<String>,
+    #[serde(default)]
     team: String,
     #[serde(default)]
     site: String,
@@ -60,6 +62,7 @@ pub(super) fn enrol_refusal(error: EnrolError) -> Response {
         |status: StatusCode, why: String| (status, Json(json!({ "error": why }))).into_response();
     match error {
         EnrolError::BadRequest(why) => refuse(StatusCode::BAD_REQUEST, why),
+        EnrolError::Conflict(why) => refuse(StatusCode::CONFLICT, why),
         EnrolError::RateLimited => refuse(StatusCode::TOO_MANY_REQUESTS, error.to_string()),
         EnrolError::Invalid => refuse(StatusCode::UNAUTHORIZED, error.to_string()),
         EnrolError::Store(error) => {
@@ -231,11 +234,23 @@ pub(super) async fn mint(hub: Arc<Hub>, access: Access, body: Bytes) -> Response
             }
         }
     };
+    let stick_id = match spec.stick_id {
+        Some(id) => match ck_protocol::StickId::parse(&id) {
+            Ok(id) => Some(id),
+            Err(_) => {
+                return enrol_refusal(EnrolError::BadRequest(
+                    "the stick id is not valid".to_owned(),
+                ));
+            }
+        },
+        None => None,
+    };
     let result = tokio::task::spawn_blocking(move || {
         hub.mint_enrolment_code(
             &access.organization.id,
             &access.account,
             EnrolmentSpec {
+                stick_id,
                 team: spec.team,
                 site: spec.site,
                 contest: spec.contest,

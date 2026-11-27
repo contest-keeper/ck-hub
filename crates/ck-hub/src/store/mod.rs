@@ -588,12 +588,14 @@ pub trait Store: Send + Sync {
         before: OffsetDateTime,
     ) -> Result<(), StoreError>;
 
-    /// Keeps a one-time enrolment code (its hash) for a stick of the organization.
+    /// Keeps a one-time enrolment code (its hash) for a stick of the organization. When
+    /// `code.stick_id` is set, pre-registers that stick with an empty secret in the same step;
+    /// returns false, and changes nothing, when that stick id is already taken.
     fn add_enrolment_code(
         &self,
         organization: &str,
         code: NewEnrolmentCode,
-    ) -> Result<(), StoreError>;
+    ) -> Result<bool, StoreError>;
 
     /// Uses up the code with this hash and registers a new stick, in one step, in the organization
     /// the code was made for. A code that is unknown, used or expired changes nothing. When the stick

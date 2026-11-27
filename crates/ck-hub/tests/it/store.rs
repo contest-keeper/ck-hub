@@ -1270,6 +1270,7 @@ fn enrolment_contract(store: &dyn Store) {
         expires_at: time(ends),
         credential_scope: None,
         hardware: None,
+        stick_id: None,
     };
     // Sticks are never deleted from a database, so ids from an earlier run must not come again.
     let base = SystemTime::now()
@@ -1391,8 +1392,9 @@ fn scoped_enrolment_contract(store: &dyn Store) {
         expires_at: time(600),
         credential_scope: Some(scope.clone()),
         hardware: None,
+        stick_id: None,
     };
-    store.add_enrolment_code(&org.id, code).expect("mint");
+    assert!(store.add_enrolment_code(&org.id, code).expect("mint"));
     let stick = StickId::parse(&id).expect("stick ID");
     let outcome = store
         .redeem_enrolment_code(&id, time(1), &stick, &Token::new("fixture-secret-token"))
@@ -1400,6 +1402,192 @@ fn scoped_enrolment_contract(store: &dyn Store) {
     assert!(matches!(outcome, Redemption::Done(_)));
     let (_, registered) = store.stick(&stick).expect("read").expect("registered");
     assert_eq!(registered.credential_scope, Some(scope));
+}
+
+fn preregistered_enrolment_contract(store: &dyn Store) {
+    use ck_hub::{NewEnrolmentCode, Redemption};
+
+    let code = unique();
+    let org = store
+        .create_organization(&code, "Pre-registered contest")
+        .expect("write")
+        .expect("organization");
+    let stick = StickId::parse(&format!("{code}-pre")).expect("stick ID");
+    let token = Token::new("claimed-client-token-for-preregistered");
+    let make_code = |hash: &str, stick_id: Option<StickId>| NewEnrolmentCode {
+        code_hash: hash.to_owned(),
+        created_by_user_id: "u-1".to_owned(),
+        team: "Team Pre".to_owned(),
+        site: "Hall 1".to_owned(),
+        contest: "Final".to_owned(),
+        machine_number: Some(8),
+        created_at: time(0),
+        expires_at: time(600),
+        credential_scope: None,
+        hardware: None,
+        stick_id,
+    };
+    assert!(
+        store
+            .add_enrolment_code(&org.id, make_code(&code, Some(stick.clone())))
+            .expect("mint")
+    );
+    // Same stick_id cannot be pre-registered a second time.
+    assert!(
+        !store
+            .add_enrolment_code(
+                &org.id,
+                make_code(&format!("{code}-2"), Some(stick.clone()))
+            )
+            .expect("conflict")
+    );
+    let (_, stored) = store.stick(&stick).expect("read").expect("pre-registered");
+    assert_eq!(stored.token.expose(), "");
+    // Legacy redeem and wrong stick_id claim are refused without activating.
+    assert_eq!(
+        store
+            .redeem_enrolment_code(&code, time(10), &stick, &token)
+            .expect("redeem"),
+        Redemption::Invalid
+    );
+    let other = StickId::parse(&format!("{code}-other")).expect("other");
+    assert_eq!(
+        store
+            .claim_enrolment_code(&code, time(10), &other, &token)
+            .expect("claim"),
+        Redemption::Invalid
+    );
+    assert!(matches!(
+        store
+            .claim_enrolment_code(&code, time(10), &stick, &token)
+            .expect("claim"),
+        Redemption::Done(_)
+    ));
+    let (_, activated) = store.stick(&stick).expect("read").expect("activated");
+    assert_eq!(activated.token, token);
+
+    // Retiring a never-activated pre-registered stick tombstones it immediately.
+    let ghost = StickId::parse(&format!("{code}-ghost")).expect("ghost");
+    assert!(
+        store
+            .add_enrolment_code(
+                &org.id,
+                make_code(&format!("{code}-g"), Some(ghost.clone()))
+            )
+            .expect("mint")
+    );
+    assert!(
+        store
+            .retire_stick(&org.id, &ghost, None, time(20))
+            .expect("retire ghost")
+    );
+    let (_, tomb) = store.stick(&ghost).expect("read").expect("tombstone");
+    assert!(tomb.deleted_at.is_some());
+
+    preregistered_deletion_contract(store);
+}
+
+fn preregistered_deletion_contract(store: &dyn Store) {
+    use ck_hub::{NewEnrolmentCode, Redemption};
+
+    let code = unique();
+    let org = store
+        .create_organization(&code, "Pre-registered deletion")
+        .expect("write")
+        .expect("organization");
+    let token = Token::new("claimed-client-token-for-preregistered");
+    let make_code = |hash: &str, stick_id: Option<StickId>| NewEnrolmentCode {
+        code_hash: hash.to_owned(),
+        created_by_user_id: "u-1".to_owned(),
+        team: "Team Pre".to_owned(),
+        site: "Hall 1".to_owned(),
+        contest: "Final".to_owned(),
+        machine_number: Some(8),
+        created_at: time(0),
+        expires_at: time(600),
+        credential_scope: None,
+        hardware: None,
+        stick_id,
+    };
+
+    // Deleting an unactivated pre-registered stick invalidates its unused reserved code so it
+    // cannot be reclaimed with the original stick ID or a fresh unrestricted stick ID.
+    let unactivated = StickId::parse(&format!("{code}-unactivated")).expect("unactivated");
+    let unactivated_code = format!("{code}-u");
+    assert!(
+        store
+            .add_enrolment_code(
+                &org.id,
+                make_code(&unactivated_code, Some(unactivated.clone()))
+            )
+            .expect("mint")
+    );
+    assert!(
+        store
+            .archive_stick(&org.id, &unactivated, None, time(21), time(100))
+            .expect("archive unactivated")
+    );
+    assert!(
+        store
+            .delete_stick(&org.id, &unactivated, time(22))
+            .expect("delete unactivated")
+    );
+    assert_eq!(
+        store
+            .claim_enrolment_code(&unactivated_code, time(23), &unactivated, &token)
+            .expect("claim original"),
+        Redemption::Invalid
+    );
+    let fresh = StickId::parse(&format!("{code}-fresh")).expect("fresh");
+    assert_eq!(
+        store
+            .claim_enrolment_code(&unactivated_code, time(23), &fresh, &token)
+            .expect("claim fresh"),
+        Redemption::Invalid
+    );
+    assert_eq!(
+        store
+            .redeem_enrolment_code(&unactivated_code, time(23), &fresh, &token)
+            .expect("redeem fresh"),
+        Redemption::Invalid
+    );
+
+    // Deleting an activated pre-registered stick keeps its already-used code refused as well.
+    let activated = StickId::parse(&format!("{code}-activated")).expect("activated");
+    let activated_code = format!("{code}-a");
+    assert!(
+        store
+            .add_enrolment_code(&org.id, make_code(&activated_code, Some(activated.clone())))
+            .expect("mint activated")
+    );
+    assert!(matches!(
+        store
+            .claim_enrolment_code(&activated_code, time(23), &activated, &token)
+            .expect("claim activated"),
+        Redemption::Done(_)
+    ));
+    assert!(
+        store
+            .archive_stick(&org.id, &activated, None, time(24), time(100))
+            .expect("archive activated")
+    );
+    assert!(
+        store
+            .delete_stick(&org.id, &activated, time(25))
+            .expect("delete activated")
+    );
+    assert_eq!(
+        store
+            .claim_enrolment_code(&activated_code, time(26), &activated, &token)
+            .expect("reclaim activated"),
+        Redemption::Invalid
+    );
+    assert_eq!(
+        store
+            .claim_enrolment_code(&activated_code, time(26), &fresh, &token)
+            .expect("reclaim activated as fresh"),
+        Redemption::Invalid
+    );
 }
 
 fn recoverable_enrolment_contract(store: &dyn Store) {
@@ -1429,6 +1617,7 @@ fn recoverable_enrolment_contract(store: &dyn Store) {
                 expires_at: time(86_400),
                 credential_scope: Some(credential_scope.clone()),
                 hardware: None,
+                stick_id: None,
             },
         )
         .expect("mint");
@@ -1548,6 +1737,7 @@ fn hardware_contract(store: &dyn Store) {
         expires_at: time(1000),
         credential_scope: None,
         hardware: Some(disk.clone()),
+        stick_id: None,
     };
     store.add_enrolment_code(&one, code).expect("write");
     assert_eq!(store.hardware(&one).expect("read")[0].write_count, 3);
@@ -1903,6 +2093,7 @@ fn the_memory_store_keeps_its_contract() {
     last_owner_contract(Arc::new(MemoryStore::default()));
     enrolment_contract(&MemoryStore::default());
     scoped_enrolment_contract(&MemoryStore::default());
+    preregistered_enrolment_contract(&MemoryStore::default());
     recoverable_enrolment_contract(&MemoryStore::default());
     concurrent_heartbeats(&MemoryStore::default());
     commands_contract(&MemoryStore::default());
@@ -1924,6 +2115,7 @@ fn the_postgres_store_keeps_its_contract() {
     repeat_event_contract(&store);
     enrolment_contract(&store);
     scoped_enrolment_contract(&store);
+    preregistered_enrolment_contract(&store);
     recoverable_enrolment_contract(&store);
     concurrent_heartbeats(&store);
     commands_contract(&store);

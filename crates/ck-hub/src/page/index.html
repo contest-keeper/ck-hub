@@ -128,18 +128,16 @@
       <button class="chip" type="button" data-filter="all" aria-pressed="true">All <small id="c-all"></small></button>
       <button class="chip" type="button" data-filter="attn" aria-pressed="false">Need a look <small id="c-attn"></small></button>
       <button class="chip" type="button" data-filter="offline" aria-pressed="false">Offline <small id="c-offline"></small></button>
-      <button class="chip" type="button" data-filter="new" aria-pressed="false">Not seen yet <small id="c-new"></small></button>
+      <button class="chip" type="button" data-filter="new" aria-pressed="false">Not activated <small id="c-new"></small></button>
       <button class="chip" type="button" data-filter="archived" aria-pressed="false">Archived <small id="c-archived"></small></button>
     </div>
     <div class="cols">
       <div class="a">
-        <div class="wrap"><table><thead><tr><th>Team</th><th>Status</th><th>Logged in as</th><th>Last seen</th></tr></thead><tbody id="rows"></tbody></table><p class="muted" id="empty" hidden></p></div>
-        <p class="hint" id="list-hint"></p>
+        <div class="wrap"><table><thead><tr><th>Team</th><th>Status</th><th>Logged in as</th><th>Last seen</th></tr></thead><tbody id="rows"></tbody></table><p class="muted empty" id="empty" hidden></p></div>
       </div>
       <aside class="b card" id="detail" aria-label="Stick details"></aside>
       <p class="sr-only" id="cmd-status" role="status"></p>
     </div>
-    <section class="card more" id="more" hidden></section>
   </section>
 </main>
 </div>

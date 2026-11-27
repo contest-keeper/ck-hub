@@ -84,6 +84,8 @@ pub struct StickView {
     pub site: String,
     pub contest: String,
     pub machine_number: Option<u32>,
+    /// `false` while the stick was created in Forge and has not yet claimed its secret on first boot.
+    pub activated: bool,
     /// `false` until the first heartbeat, after [`ONLINE_WINDOW_SECONDS`] of silence, or after
     /// the credential is retired.
     pub online: bool,
@@ -431,10 +433,14 @@ impl Hub {
         id: &StickId,
     ) -> Result<Option<(String, Token, Option<CredentialScope>)>, StoreError> {
         let stored = self.store.stick(id)?;
-        if stored
-            .as_ref()
-            .is_some_and(|(_, stick)| stick.retired_at.is_some() || stick.archived_at.is_some())
-        {
+        // A pre-registered stick has an empty secret until its first boot, so it must never pass
+        // HMAC authentication before claiming a real credential.
+        if stored.as_ref().is_some_and(|(_, stick)| {
+            stick.token.expose().is_empty()
+                || stick.retired_at.is_some()
+                || stick.archived_at.is_some()
+                || stick.deleted_at.is_some()
+        }) {
             return Ok(None);
         }
         let from_file = {
@@ -770,9 +776,7 @@ impl Hub {
         Ok(view)
     }
 
-    /// Every stick of the organization, with its last heartbeat when it has sent one.
-    pub fn sticks(&self, organization: &str) -> Result<Vec<StickView>, StoreError> {
-        let now = (self.clock)();
+    fn stick_entries(&self, organization: &str) -> Result<Vec<Stick>, StoreError> {
         // The registry file's sticks belong to the default organization.
         let mut entries: Vec<Stick> = if organization == self.default_org_id()? {
             let mut registry = self.registry.lock().expect("registry lock");
@@ -804,6 +808,13 @@ impl Hub {
                 b.stick_id.as_str(),
             ))
         });
+        Ok(entries)
+    }
+
+    /// Every stick of the organization, with its last heartbeat when it has sent one.
+    pub fn sticks(&self, organization: &str) -> Result<Vec<StickView>, StoreError> {
+        let now = (self.clock)();
+        let entries = self.stick_entries(organization)?;
         let hardware = self.store.hardware(organization)?;
         let expected = self.store.expected_configs(organization)?;
         let (kept, mut views) = (KeptJudge::for_hub(self, organization), Vec::new());
@@ -837,7 +848,9 @@ impl Hub {
                 site: entry.site.clone(),
                 contest: entry.contest.clone(),
                 machine_number: entry.machine_number,
-                online: entry.retired_at.is_none()
+                activated: !entry.token.expose().is_empty(),
+                online: !entry.token.expose().is_empty()
+                    && entry.retired_at.is_none()
                     && entry.archived_at.is_none()
                     && last
                         .as_ref()

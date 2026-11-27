@@ -901,8 +901,13 @@ impl Store for PostgresStore {
                 "DELETE FROM commands WHERE organization_id = $1 AND stick_id = $2",
                 "DELETE FROM recordings WHERE organization_id = $1 AND stick_id = $2",
                 "DELETE FROM expected_configs WHERE organization_id = $1 AND stick_id = $2",
-                "UPDATE enrolment_codes SET claimed_stick_id = NULL
-                 WHERE organization_id = $1 AND claimed_stick_id = $2",
+                "DELETE FROM enrolment_codes
+                 WHERE organization_id = $1 AND stick_id = $2 AND used_at IS NULL",
+                "UPDATE enrolment_codes SET
+                     claimed_stick_id = CASE WHEN claimed_stick_id = $2 THEN NULL ELSE claimed_stick_id END,
+                     stick_id = CASE WHEN stick_id = $2 THEN NULL ELSE stick_id END
+                 WHERE organization_id = $1 AND used_at IS NOT NULL
+                   AND (claimed_stick_id = $2 OR stick_id = $2)",
             ] {
                 transaction.execute(table, &args)?;
             }
@@ -1199,7 +1204,7 @@ impl Store for PostgresStore {
         &self,
         organization: &str,
         code: NewEnrolmentCode,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         let scope = code
             .credential_scope
             .as_ref()
@@ -1213,13 +1218,34 @@ impl Store for PostgresStore {
             .map_err(failed)?;
         let fingerprint = code.hardware.as_ref().map(|h| h.fingerprint.clone());
         let serial_hint = code.hardware.as_ref().map(|h| h.serial_hint.clone());
-        self.in_org(organization, |transaction| {
+        let stick_id = code.stick_id.as_ref().map(StickId::as_str);
+        self.in_org_transaction(organization, |transaction| {
+            if let Some(stick_id) = stick_id {
+                let added = transaction.execute(
+                    "INSERT INTO sticks
+                         (organization_id, stick_id, token, team, site, contest, machine_number,
+                          credential_scope)
+                     VALUES ($1, $2, '', $3, $4, $5, $6, $7) ON CONFLICT (stick_id) DO NOTHING",
+                    &[
+                        &organization,
+                        &stick_id,
+                        &code.team,
+                        &code.site,
+                        &code.contest,
+                        &machine,
+                        &scope,
+                    ],
+                )?;
+                if added == 0 {
+                    return Ok((false, false));
+                }
+            }
             transaction.execute(
                 "INSERT INTO enrolment_codes
                      (code_hash, organization_id, created_by_user_id, team, site, contest,
                       machine_number, created_at, expires_at, credential_scope,
-                      hardware_fingerprint, hardware_serial_hint)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                      hardware_fingerprint, hardware_serial_hint, stick_id)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
                 &[
                     &code.code_hash,
                     &organization,
@@ -1233,10 +1259,11 @@ impl Store for PostgresStore {
                     &scope,
                     &fingerprint,
                     &serial_hint,
+                    &stick_id,
                 ],
-            )
+            )?;
+            Ok((true, true))
         })
-        .map(|_| ())
     }
 
     fn redeem_enrolment_code(

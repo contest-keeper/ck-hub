@@ -546,3 +546,99 @@ async fn one_source_guessing_codes_does_not_lock_enrolment_for_another() {
         StatusCode::OK
     );
 }
+
+#[tokio::test]
+async fn a_preregistered_stick_appears_unactivated_before_boot_and_activates_on_claim() {
+    let s = setup();
+    let owner = cookie(&s.app, "owner@example.org").await;
+    let id = "664ce6e2-d29d-4eb7-a3f3-e4e806382d7b";
+    let disk = json!({ "fingerprint": "ab".repeat(32), "serial_hint": "1234" });
+
+    let (status, minted) = mint(
+        &s.app,
+        &owner,
+        &json!({
+            "stick_id": id,
+            "team": "Team Pre",
+            "site": "Lab 2",
+            "contest": "Spring",
+            "machine_number": 5,
+            "hardware": disk,
+            "lifetime_minutes": 30 * 24 * 60,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{minted}");
+    let code = minted["code"].as_str().expect("code").to_owned();
+
+    // Immediately visible in Hub as not activated, and impossible to forge with an empty secret.
+    let listed = sticks_of_default(&s.app, &owner).await;
+    let stick = listed
+        .iter()
+        .find(|row| row["stick_id"] == id)
+        .expect("pre-registered stick is listed before boot");
+    assert_eq!(stick["activated"], false);
+    assert_eq!(stick["online"], false);
+    assert_eq!(stick["last"], Value::Null);
+    assert_eq!(stick["team"], "Team Pre");
+    assert_eq!(stick["machine_number"], 5);
+    assert_eq!(heartbeat(&s.app, id, "").await, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        heartbeat(&s.app, id, "wrong-secret-token-for-unactivated").await,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // Same stick id cannot be pre-registered twice; legacy enrol and mismatched claim id fail.
+    assert_eq!(
+        mint(&s.app, &owner, &json!({ "stick_id": id })).await.0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(enrol(&s.app, &code).await.0, StatusCode::UNAUTHORIZED);
+    let token = "an-unused-client-token-for-claim-tests";
+    assert_eq!(
+        claim(&s.app, &code, "other-id", token).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // First boot activates the stick with the token it chose.
+    assert_eq!(
+        claim(&s.app, &code, id, token).await,
+        (StatusCode::OK, json!({ "stick_id": id }))
+    );
+    assert_eq!(heartbeat(&s.app, id, token).await, StatusCode::OK);
+    let listed = sticks_of_default(&s.app, &owner).await;
+    let stick = listed
+        .iter()
+        .find(|row| row["stick_id"] == id)
+        .expect("activated stick");
+    assert_eq!(stick["activated"], true);
+    assert_eq!(stick["online"], true);
+    assert_eq!(stick["hardware"]["write_count"], 1);
+
+    // Cancelling an unwritten stick removes the unactivated ghost instead of leaving it behind.
+    let ghost = "11111111-2222-4333-8444-555555555555";
+    let (status, ghost_mint) = mint(&s.app, &owner, &json!({ "stick_id": ghost })).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let retire = Request::delete(format!("/api/v1/orgs/default/sticks/{ghost}/credential"))
+        .header("cookie", &owner)
+        .body(Body::empty())
+        .expect("request");
+    assert_eq!(call(&s.app, retire).await.0, StatusCode::NO_CONTENT);
+    assert!(
+        !sticks_of_default(&s.app, &owner)
+            .await
+            .iter()
+            .any(|row| row["stick_id"] == ghost)
+    );
+    assert_eq!(
+        claim(
+            &s.app,
+            ghost_mint["code"].as_str().expect("code"),
+            ghost,
+            token
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+}
