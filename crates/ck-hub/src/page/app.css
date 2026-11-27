@@ -1,4 +1,4 @@
-/* Two looks (modern = "New", classic) x two modes (light, dark). theme.js sets data-look and data-mode before first paint. */
+/* Two looks (modern, classic) x three modes (light, dark, system). theme.js sets data-look and data-mode before first paint. */
 :root {
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   --head: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
@@ -284,6 +284,8 @@ td .sub{display:block;font-size:12.5px;color:var(--muted)}
 .set-panel.down{right:0;top:calc(100% + 8px)}
 :root[data-look="classic"] .set-panel{box-shadow:var(--winsh);padding:12px}
 .set-opts{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.set-opts.three{grid-template-columns:repeat(3,1fr)}
+.set-opts.three .set-opt{align-items:center;justify-content:center;text-align:center}
 .set-opt{display:flex;flex-direction:column;gap:6px;align-items:stretch;min-height:44px;padding:10px;border:0;border-radius:var(--r);background:var(--field);box-shadow:inset 0 0 0 1px var(--line);text-align:left;cursor:pointer}
 .set-opt b{font:600 14px/1.2 var(--ui)}
 .set-opt span{font-size:12px;color:var(--muted)}
@@ -481,6 +483,7 @@ td .sub { display: block; }
   .hero .big { font-size: 44px; }
 }
 .list li > div:first-child { flex: 1 1 200px; min-width: 0; }
+.list li > .cmd-confirm { flex: 1 1 100%; margin-top: 4px; }
 .topline .set-btn { width: auto; }
 .topline .brand, .side .brand { text-decoration: none; }
 #login-links { display: block; text-align: center; }

@@ -509,6 +509,18 @@ async fn the_page_is_served_and_needs_nothing_from_outside() {
         html.contains("data-settings") && page.contains("ck-mode") && page.contains("data-look"),
         "every page has the Settings button, and the look and theme are kept"
     );
+    assert!(
+        html.contains("/download/forge") && html.contains("/download/forge/macos"),
+        "the downloads view includes links for Keeper Forge on Windows and macOS"
+    );
+    assert!(
+        page.contains("history.pushState") && page.contains("popstate"),
+        "the sidebar navigates between views without full reloads"
+    );
+    assert!(
+        page.contains("\"Modern\"") && page.contains("\"System\""),
+        "settings offer Modern look and System theme mode"
+    );
     // Script and style come from this server: nothing from another address.
     assert!(
         !page.contains("http://") && !page.contains("https://"),
@@ -517,6 +529,10 @@ async fn the_page_is_served_and_needs_nothing_from_outside() {
     assert!(
         !page.contains("innerHTML"),
         "stick names must not be put into the page as markup"
+    );
+    assert!(
+        !page.contains("confirm("),
+        "confirmations are inline rather than native browser dialogs"
     );
 }
 
@@ -1423,6 +1439,7 @@ async fn an_unknown_page_answers_with_a_page_and_the_api_keeps_its_bare_404() {
             .to_bytes();
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("Page not found"), "{path}");
+        assert!(text.contains("Back to Keeper Hub"), "{path}");
         assert!(text.contains("href=\"/\""), "{path}");
     }
     for request in [

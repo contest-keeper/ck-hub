@@ -836,9 +836,17 @@ function render(goto) {
   keepFocus(drawSticks, goto);
 }
 
-// Escape closes an open confirmation in the stick details and puts the focus back on the button that opened it.
+// Escape closes an open confirmation in the stick details or people list and restores focus.
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape" || !document.getElementById("detail").contains(document.activeElement)) return;
+  if (event.key !== "Escape") return;
+  if (confirmingMember && document.getElementById("members").contains(document.activeElement)) {
+    const was = confirmingMember;
+    confirmingMember = null;
+    event.preventDefault();
+    drawPeople("people:m-" + was);
+    return;
+  }
+  if (!document.getElementById("detail").contains(document.activeElement)) return;
   const stick = sticks.find((s) => s.stick_id === selected);
   if (!stick) return;
   const draft = draftOf(stick);
@@ -918,21 +926,29 @@ function drawSticks() {
   empty.hidden = shown.length > 0;
   empty.textContent = sticks.length ? "No matching sticks." : "No sticks yet.";
 
-  if (page !== "sticks") return;
+  if (currentPage() !== "sticks") return;
   const current = sticks.find((s) => s.stick_id === selected);
   detailPanel(current);
 }
 
-// Keeper Forge opens /forge/connect?port=..&state=.. . The port and the state are only passed on:
-// the Hub checks them and builds the address the browser goes back to.
-const forgeAsk = location.pathname === "/forge/connect" ? new URLSearchParams(location.search) : null;
-const page = forgeAsk ? "forge" : location.pathname === "/download/image" ? "downloads" : location.pathname === "/people" ? "people" : "sticks";
+function currentPage() {
+  if (location.pathname === "/forge/connect") return "forge";
+  if (location.pathname === "/download/image") return "downloads";
+  if (location.pathname === "/people") return "people";
+  return "sticks";
+}
+
+// Keeper Forge opens /forge/connect?code=K7QM-42XP or legacy ?port=..&state=.. .
+function currentForgeAsk() {
+  return location.pathname === "/forge/connect" ? new URLSearchParams(location.search) : null;
+}
 const imageStatus = document.getElementById("image-download-status");
 const imageRetry = document.getElementById("image-download-retry");
 const imageOlder = document.getElementById("image-older");
 const imageList = document.getElementById("image-download-list");
 const imageOlderList = document.getElementById("image-older-list");
 const TITLES = { login: "Log in", forge: "Connect Keeper Forge", sticks: "Sticks", people: "People", downloads: "Downloads" };
+let downloadsLoaded = false;
 
 // What organizers call each Linux; a family not listed shows its own name capitalised.
 const LINUX_NAMES = { ubuntu: "Ubuntu", debian: "Debian", mint: "Linux Mint" };
@@ -962,12 +978,11 @@ function imageItem(image) {
   head.appendChild(el("span", "grow"));
   head.appendChild(el("span", "muted", bytesText(image.size)));
   item.appendChild(head);
-  if (recommended) item.appendChild(el("p", "muted", "The stable release. Choose this unless support asks for another version."));
-  if (isDevBuild(image)) item.appendChild(el("p", "muted", "For testing new features. Do not use it for a real contest."));
-  item.appendChild(el("p", "muted", [image.name, image.profile, image.filename].filter(Boolean).join(" · ")));
+  const meta = [image.profile, image.filename].filter(Boolean).join(" · ");
+  if (meta) item.appendChild(el("p", "muted", meta));
   const field = el("div", "field");
   const id = "sha-" + (shaCount += 1);
-  const label = el("label", "", "SHA-256 (to check the file)");
+  const label = el("label", "", "SHA-256");
   label.htmlFor = id;
   field.appendChild(label);
   const line = el("div", "row");
@@ -995,9 +1010,10 @@ async function loadImageDownloads() {
   imageStatus.textContent = "Loading images…";
   try {
     const result = await call("GET", "/api/v1/images");
-    if (result.status === 401) { location.reload(); return; }
+    if (result.status === 401) { downloadsLoaded = false; location.reload(); return; }
     const images = result.data?.images;
     if (!result.ok || !Array.isArray(images)) throw new Error("No image list");
+    downloadsLoaded = true;
     imageStatus.textContent = images.length ? "" : "No Keeper OS images are available yet.";
     const newest = images.filter((image) => image.latest);
     const older = images.filter((image) => !image.latest);
@@ -1006,6 +1022,7 @@ async function loadImageDownloads() {
     document.getElementById("image-older-summary").textContent = "Older versions (" + older.length + ")";
     imageOlder.hidden = older.length === 0;
   } catch (error) {
+    downloadsLoaded = false;
     imageStatus.textContent = "Keeper OS images are unavailable right now.";
     imageRetry.hidden = false;
   }
@@ -1015,20 +1032,42 @@ imageRetry.addEventListener("click", loadImageDownloads);
 
 // Keeper Forge opens /forge/connect?code=K7QM-42XP: the code it shows on its own screen. The older
 // /forge/connect?port=..&state=.. still works for a Forge that has not been updated.
-const pairingCode = forgeAsk ? (forgeAsk.get("code") || "").toUpperCase() : "";
-const validPairingCode = /^[A-Z0-9]{4}-?[A-Z0-9]{4}$/.test(pairingCode);
+function forgeCodeInfo(forgeAsk) {
+  const pairingCode = forgeAsk ? (forgeAsk.get("code") || "").toUpperCase() : "";
+  const validPairingCode = /^[A-Z0-9]{4}-?[A-Z0-9]{4}$/.test(pairingCode);
+  return { pairingCode, validPairingCode };
+}
+let forgeCompleted = false;
 
-function showForge(email, organization) {
+function showForge(email, orgs) {
+  if (forgeCompleted) return;
+  const forgeAsk = currentForgeAsk();
+  const { pairingCode, validPairingCode } = forgeCodeInfo(forgeAsk);
   document.getElementById("forge-who").textContent = email;
-  document.getElementById("forge-org").textContent = organization || "None yet";
-  const pairing = forgeAsk.has("code");
+  const orgLabel = orgs.length === 1
+    ? orgs[0].name
+    : orgs.length === 0
+      ? "None yet"
+      : orgs.map((o) => o.name).join(", ");
+  document.getElementById("forge-org").textContent = orgLabel;
+  const pairing = !!forgeAsk && forgeAsk.has("code");
   document.getElementById("forge-code-box").hidden = !pairing;
   if (pairing) document.getElementById("forge-code").textContent = pairingCode;
-  document.getElementById("forge-yes").textContent = pairing ? "Yes, connect Forge" : "Connect Keeper Forge";
+  const yes = document.getElementById("forge-yes");
+  yes.textContent = pairing ? "Yes, connect Forge" : "Connect Keeper Forge";
   document.getElementById("forge-no").textContent = pairing ? "It is not my code" : "Cancel";
   if (pairing && !validPairingCode) {
     forgeMessage("bad", "This link has no valid code. Start the sign-in again in Keeper Forge.");
-    document.getElementById("forge-yes").disabled = true;
+    yes.disabled = true;
+  } else if (orgs.length === 0) {
+    forgeMessage("bad", "You are not a member of any organization yet. Ask an owner to add you before connecting Keeper Forge.");
+    yes.disabled = true;
+  } else if (orgs.length > 1) {
+    forgeMessage("bad", "Keeper Forge requires an account with one organization. This account belongs to " + orgs.length + " (" + orgs.map((o) => o.name).join(", ") + "). Sign in with an account that belongs to a single organization.");
+    yes.disabled = true;
+  } else {
+    document.getElementById("forge-result").hidden = true;
+    yes.disabled = false;
   }
 }
 
@@ -1040,12 +1079,14 @@ function forgeMessage(kind, text) {
 }
 
 function forgeDone(text) {
+  forgeCompleted = true;
   forgeMessage("ok", text);
   document.getElementById("forge-yes").hidden = true;
   document.getElementById("forge-no").hidden = true;
 }
 
 async function answerPairing(approve) {
+  const { pairingCode } = forgeCodeInfo(currentForgeAsk());
   const response = await fetch("/api/v1/forge/pairings/answer", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1059,7 +1100,9 @@ async function answerPairing(approve) {
 }
 
 document.getElementById("forge-no").addEventListener("click", async () => {
-  if (!forgeAsk.has("code")) { location.assign("/"); return; }
+  const forgeAsk = currentForgeAsk();
+  if (!forgeAsk || !forgeAsk.has("code")) { location.assign("/"); return; }
+  const { validPairingCode } = forgeCodeInfo(forgeAsk);
   document.getElementById("forge-yes").disabled = true;
   try { if (await answerPairing(false)) forgeDone("Not connected. If you did not start this, you can close the tab."); }
   catch (error) {
@@ -1070,10 +1113,11 @@ document.getElementById("forge-no").addEventListener("click", async () => {
 });
 
 document.getElementById("forge-yes").addEventListener("click", async () => {
+  const forgeAsk = currentForgeAsk();
   const button = document.getElementById("forge-yes");
   const fail = (text) => { forgeMessage("bad", text); button.disabled = false; };
   button.disabled = true;
-  if (forgeAsk.has("code")) {
+  if (forgeAsk && forgeAsk.has("code")) {
     try { if (await answerPairing(true)) forgeDone("Keeper Forge is connected. You can close this tab; Keeper Forge carries on by itself within a few seconds."); }
     catch (error) { fail("Could not reach the Hub. Check the connection and try again."); }
     return;
@@ -1121,6 +1165,8 @@ let inviteToken = null;
 let myRole = null;
 let myEmail = null;
 let noticeTimer = null;
+let confirmingMember = null;
+let peopleData = null;
 
 async function call(method, path, body) {
   const response = await fetch(path, {
@@ -1150,7 +1196,7 @@ function say2(id, text, good) {
 }
 
 function actionButton(label, what, onClick, key) {
-  const button = el("button", "btn sm" + (/^(Remove|Leave|Cancel)/.test(label) ? " danger" : ""), label);
+  const button = el("button", "btn sm" + (/^(Remove|Leave|Cancel|Confirm)/.test(label) ? " danger" : ""), label);
   button.type = "button";
   button.dataset.key = "people:" + key;
   button.setAttribute("aria-label", label.replace("…", "") + " " + what);
@@ -1158,18 +1204,10 @@ function actionButton(label, what, onClick, key) {
   return button;
 }
 
-async function loadPeople() {
-  const admin = myRole === "owner" || myRole === "admin";
-  document.getElementById("people").hidden = !admin;
-  document.getElementById("people-denied").hidden = admin;
-  if (!admin) return;
-  const roles = rolesBelow(myRole).reverse();
-  const base = "/api/v1/orgs/" + encodeURIComponent(org);
-  const [members, invitations] = await Promise.all([call("GET", base + "/members"), call("GET", base + "/invitations")]);
-  if (!members.ok || !invitations.ok) {
-    say2("people-msg", "The people list could not be loaded. It will try again.", false);
-    return;
-  }
+function drawPeople(goto) {
+  if (!peopleData) return;
+  const { base, members, invitations, roles } = peopleData;
+  if (confirmingMember && !members.some((m) => m.user_id === confirmingMember)) confirmingMember = null;
   keepFocus(() => {
     const choices = document.getElementById("invite-roles");
     if (choices.dataset.roles !== roles.join()) {
@@ -1188,37 +1226,57 @@ async function loadPeople() {
       }));
     }
 
-    document.getElementById("mem-count").textContent = members.data.length;
+    document.getElementById("mem-count").textContent = members.length;
     const memberRows = document.getElementById("members");
     memberRows.replaceChildren();
-    for (const member of members.data) {
+    for (const member of members) {
       const row = el("li");
       const text = el("div");
-      const name = el("b", "", member.email);
-      text.appendChild(name);
+      text.appendChild(el("b", "", member.email));
       const own = member.email === myEmail;
       if (own) { text.appendChild(document.createTextNode(" ")); text.appendChild(el("span", "pill new", "You")); }
-      text.appendChild(el("div", "hint", capital(member.role) + ": " + ROLE_TEXT[member.role]));
       row.appendChild(text);
       row.appendChild(el("span", "muted", capital(member.role)));
       if (own || RANK[myRole] > RANK[member.role]) {
-        row.appendChild(actionButton(own ? "Leave…" : "Remove…", member.email, async () => {
-          if (!confirm((own ? "Leave this organization?" : "Remove " + member.email + "?"))) return;
-          const result = await call("DELETE", base + "/members/" + encodeURIComponent(member.user_id));
-          if (!result.ok) say2("people-msg", (result.data && result.data.error) || "That did not work.", false);
-          await refresh();
-        }, "m-" + member.user_id));
+        if (confirmingMember === member.user_id) {
+          const ask = el("div", "cmd-confirm");
+          const qId = "member-q-" + member.user_id;
+          const question = el("p", "bad", own ? "Leave this organization?" : "Remove " + member.email + "?");
+          question.id = qId;
+          ask.appendChild(question);
+          const buttons = el("div", "cmd-bar");
+          const yes = actionButton("Confirm", member.email, async () => {
+            confirmingMember = null;
+            const result = await call("DELETE", base + "/members/" + encodeURIComponent(member.user_id));
+            if (!result.ok) say2("people-msg", (result.data && result.data.error) || "That did not work.", false);
+            await refresh();
+          }, "m-yes-" + member.user_id);
+          const no = el("button", "btn sm", "Cancel");
+          no.type = "button";
+          no.dataset.key = "people:m-no-" + member.user_id;
+          no.addEventListener("click", () => { confirmingMember = null; drawPeople("people:m-" + member.user_id); });
+          for (const b of [yes, no]) b.setAttribute("aria-describedby", qId);
+          buttons.appendChild(yes);
+          buttons.appendChild(no);
+          ask.appendChild(buttons);
+          row.appendChild(ask);
+        } else {
+          row.appendChild(actionButton(own ? "Leave…" : "Remove…", member.email, () => {
+            confirmingMember = member.user_id;
+            drawPeople("people:m-no-" + member.user_id);
+          }, "m-" + member.user_id));
+        }
       }
       memberRows.appendChild(row);
     }
 
     const inviteRows = document.getElementById("invitations");
     inviteRows.replaceChildren();
-    for (const invitation of invitations.data) {
+    for (const invitation of invitations) {
       const row = el("li");
       const text = el("div");
       text.appendChild(el("b", "", invitation.email));
-      text.appendChild(el("div", "hint", capital(invitation.role) + " · the link works until " + new Date(invitation.expires_at).toLocaleString()));
+      text.appendChild(el("div", "hint", capital(invitation.role) + " · expires " + new Date(invitation.expires_at).toLocaleString()));
       row.appendChild(text);
       if (RANK[myRole] > RANK[invitation.role]) {
         row.appendChild(actionButton("Send again", invitation.email, async () => {
@@ -1233,8 +1291,26 @@ async function loadPeople() {
       }
       inviteRows.appendChild(row);
     }
-    document.getElementById("no-invitations").hidden = invitations.data.length > 0;
-  });
+    document.getElementById("no-invitations").hidden = invitations.length > 0;
+  }, goto);
+}
+
+async function loadPeople() {
+  const admin = myRole === "owner" || myRole === "admin";
+  document.getElementById("people").hidden = !admin;
+  document.getElementById("people-denied").hidden = admin;
+  if (!admin || !org) { peopleData = null; return; }
+  const requestedOrg = org;
+  const roles = rolesBelow(myRole).reverse();
+  const base = "/api/v1/orgs/" + encodeURIComponent(org);
+  const [members, invitations] = await Promise.all([call("GET", base + "/members"), call("GET", base + "/invitations")]);
+  if (org !== requestedOrg) return;
+  if (!members.ok || !invitations.ok) {
+    say2("people-msg", "The people list could not be loaded. It will try again.", false);
+    return;
+  }
+  peopleData = { base, members: members.data, invitations: invitations.data, roles };
+  drawPeople();
 }
 
 async function loadStaff(isStaff) {
@@ -1255,11 +1331,21 @@ async function loadStaff(isStaff) {
   document.getElementById("orgs-summary").textContent = result.data.length + (result.data.length === 1 ? " existing organization" : " existing organizations");
 }
 
+let navGen = 0;
+let refreshFailed = false;
+
 async function refresh() {
   const problem = document.getElementById("problem");
+  const myGen = navGen;
+  const page = currentPage();
   try {
     let me = await fetch("/api/v1/me", { cache: "no-store" });
+    if (myGen !== navGen) return;
     if (me.status === 401) {
+      refreshFailed = false;
+      downloadsLoaded = false;
+      peopleData = null;
+      confirmingMember = null;
       show("login");
       problem.style.display = "none";
       return;
@@ -1275,9 +1361,11 @@ async function refresh() {
         notice((result.data && result.data.error) || "That invitation did not work.", false);
       }
       me = await fetch("/api/v1/me", { cache: "no-store" });
+      if (myGen !== navGen) return;
     }
     if (!me.ok) throw new Error("HTTP " + me.status);
     const account = await me.json();
+    if (myGen !== navGen) return;
     const orgs = account.organizations;
     const select = document.getElementById("org");
     if (!orgs.some((o) => o.slug === org)) org = orgs.length ? orgs[0].slug : null;
@@ -1293,27 +1381,52 @@ async function refresh() {
     document.getElementById("org-name").hidden = orgs.length > 1;
     document.getElementById("who-name").textContent = account.email + (current ? " · " + capital(current.role) : "");
     document.getElementById("nav-people").hidden = !(myRole === "owner" || myRole === "admin" || account.staff === true);
-    const openImageDownloads = page === "downloads" && view !== "downloads";
     show(page);
-    if (forgeAsk) { showForge(account.email, current ? current.name : ""); return; }
-    if (page === "people") await loadStaff(account.staff === true);
-    if (openImageDownloads) await loadImageDownloads();
+    if (page === "forge") {
+      refreshFailed = false;
+      problem.style.display = "none";
+      showForge(account.email, orgs);
+      return;
+    }
+    if (page === "downloads") {
+      refreshFailed = false;
+      problem.style.display = "none";
+      if (!downloadsLoaded) await loadImageDownloads();
+      return;
+    }
+    if (page === "people") {
+      await loadStaff(account.staff === true);
+      if (myGen !== navGen) return;
+    }
     if (!org) {
+      refreshFailed = false;
       sticks = [];
-      render();
+      if (page === "sticks") render();
       if (page === "people") await loadPeople();
+      if (myGen !== navGen) return;
       problem.textContent = "You are not a member of any organization yet. Ask an owner to add you.";
       problem.style.display = "flex";
       return;
     }
+    if (page === "people") {
+      await loadPeople();
+      if (myGen !== navGen) return;
+      refreshFailed = false;
+      problem.style.display = "none";
+      return;
+    }
     const response = await fetch("/api/v1/orgs/" + encodeURIComponent(org) + "/sticks", { cache: "no-store" });
+    if (myGen !== navGen) return;
     if (!response.ok) throw new Error("HTTP " + response.status);
     sticks = await response.json();
+    if (myGen !== navGen) return;
+    refreshFailed = false;
     render();
-    if (page === "people") await loadPeople();
     document.getElementById("live-text").textContent = "Live · updated " + new Date().toLocaleTimeString();
     problem.style.display = "none";
   } catch (error) {
+    if (myGen !== navGen) return;
+    refreshFailed = true;
     problem.textContent = page === "sticks" ? "The Hub cannot be reached. The list below is the last one received." : "The Hub cannot be reached. Check the connection; this page tries again by itself.";
     problem.style.display = "flex";
   }
@@ -1321,14 +1434,17 @@ async function refresh() {
 
 document.getElementById("org").addEventListener("change", (event) => {
   org = event.target.value;
+  confirmingMember = null;
+  peopleData = null;
+  navGen += 1;
   refresh();
 });
 
 const MODES = {
-  login: { title: "Welcome back", intro: page === "downloads" ? "Log in with your organizer account to download Keeper OS." : "Log in to see which contest computers are online.", email: true, pass: "Password", autocomplete: "current-password", button: "Log in", path: "/api/v1/login" },
-  register: { title: "Create an account", intro: "We email you a link to confirm your address. After that, an owner of your organization adds you to it.", email: true, pass: "Password", help: "At least 12 characters.", autocomplete: "new-password", button: "Create account", path: "/api/v1/register", done: "Check your email for the link." },
-  forgot: { title: "Reset your password", intro: "Enter your email. We email you a link that works for one hour.", email: true, pass: null, button: "Send reset link", path: "/api/v1/password-reset", done: "Check your email. If that address has an account, a link is on its way." },
-  reset: { title: "Choose a new password", intro: "Pick a password you do not use anywhere else.", email: false, pass: "New password", help: "At least 12 characters.", autocomplete: "new-password", button: "Change password", path: "/api/v1/password-reset/confirm", done: "Password changed. Log in with it." },
+  login: { title: "Welcome back", intro: "Sign in to your Keeper Hub account.", email: true, pass: "Password", autocomplete: "current-password", button: "Log in", path: "/api/v1/login" },
+  register: { title: "Create an account", intro: "Confirm your email, then ask an owner to add you.", email: true, pass: "Password", help: "At least 12 characters.", autocomplete: "new-password", button: "Create account", path: "/api/v1/register", done: "Check your email for the link." },
+  forgot: { title: "Reset your password", intro: "We email a one-hour reset link.", email: true, pass: null, button: "Send reset link", path: "/api/v1/password-reset", done: "Check your email. If that address has an account, a link is on its way." },
+  reset: { title: "Choose a new password", intro: "Enter a new password for your account.", email: false, pass: "New password", help: "At least 12 characters.", autocomplete: "new-password", button: "Change password", path: "/api/v1/password-reset/confirm", done: "Password changed. Log in with it." },
 };
 let mode = "login";
 let resetToken = null;
@@ -1482,7 +1598,36 @@ async function openedFromMail() {
   } catch (error) { say("Could not reach the Hub.", false); }
 }
 
-if (page === "downloads") setMode("login");
+function resetRouteState(guardLogin) {
+  navGen += 1;
+  confirmingMember = null;
+  peopleData = null;
+  say2("people-msg", "", true);
+  if (!guardLogin || (view && view !== "login")) show(currentPage());
+  refresh();
+}
+
+function navigate(path) {
+  if (location.pathname !== path) history.pushState(null, "", path);
+  resetRouteState(false);
+}
+
+const SPA_ROUTES = new Set(["/", "/people", "/download/image"]);
+for (const root of [document.getElementById("side"), document.getElementById("main")]) {
+  root.addEventListener("click", (event) => {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const anchor = event.target.closest("a[href]");
+    if (!anchor || anchor.target || anchor.hasAttribute("download")) return;
+    const url = new URL(anchor.href, location.href);
+    if (url.origin !== location.origin || !SPA_ROUTES.has(url.pathname)) return;
+    event.preventDefault();
+    navigate(url.pathname);
+  });
+}
+
+window.addEventListener("popstate", () => resetRouteState(true));
+
+setMode("login");
 document.getElementById("search").addEventListener("input", (event) => {
   query = event.target.value.trim().toLowerCase();
   render();
@@ -1501,4 +1646,6 @@ for (const chip of document.querySelectorAll(".chip")) {
 
 openedFromMail().then(refresh);
 window.addEventListener("hashchange", () => openedFromMail());
-setInterval(refresh, REFRESH_MS);
+setInterval(() => {
+  if (view === "sticks" || view === "people" || refreshFailed) refresh();
+}, REFRESH_MS);
