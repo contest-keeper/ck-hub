@@ -594,6 +594,7 @@ async fn run(args: ServeArgs) -> Result<(), String> {
     let hub = Arc::new(hub);
     start_recording_purge(&hub);
     start_archive_purge(&hub);
+    start_following(&hub);
 
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
@@ -619,6 +620,38 @@ fn settings_signing_key(text: Option<&str>) -> Result<Option<ConfigSigningKey>, 
         .map_err(|_| "CK_CONFIG_SIGNING_KEY is not a settings signing key".to_owned())?;
     tracing::info!(key = %key.verifying_key().key_id(), "stick settings signing is on");
     Ok(Some(key))
+}
+
+/// Asks the judges about the people sticks saw submit, one at a time, because Codeforces allows
+/// about one call every two seconds.
+fn start_following(hub: &Arc<Hub>) {
+    let hub = Arc::clone(hub);
+    let started = std::thread::Builder::new()
+        .name("follow".into())
+        .spawn(move || {
+            let mut wait = Duration::from_secs(2);
+            // Until it works, nobody who submitted before the start is followed.
+            let mut restored = false;
+            loop {
+                if !restored {
+                    match hub.follow_recent() {
+                        Ok(()) => restored = true,
+                        Err(error) => tracing::error!("the recent submits cannot be read: {error}"),
+                    }
+                }
+                wait = match hub.check_next_followed() {
+                    Ok(_) => Duration::from_secs(2),
+                    Err(error) => {
+                        tracing::warn!("a judge could not be checked: {error}");
+                        (wait * 2).min(Duration::from_secs(60))
+                    }
+                };
+                std::thread::sleep(wait);
+            }
+        });
+    if let Err(error) = started {
+        tracing::error!("the judge checks cannot start: {error}");
+    }
 }
 
 /// Removes expired recordings every hour, on a thread of its own because the store and the storage

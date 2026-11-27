@@ -11,6 +11,7 @@ mod csrf;
 mod delegation;
 mod download;
 mod enrol;
+mod follow;
 mod forge;
 mod hub;
 mod images;
@@ -57,6 +58,7 @@ pub use enrol::{
     MAX_FAILED_PER_MINUTE, MAX_LIFETIME_MINUTES, MAX_MINTS_PER_MINUTE, MIN_LIFETIME_MINUTES,
     MintedCode, NewEnrolmentCode, Redemption,
 };
+pub use follow::FollowError;
 pub use forge::{FORGE_CODE_LIFETIME_SECONDS, ForgeError};
 pub use hub::{
     HardwareView, Hub, LastHeartbeat, MAX_EVENTS_PER_BOOT, MAX_EVENTS_PER_STICK,

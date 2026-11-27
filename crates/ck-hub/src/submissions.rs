@@ -89,7 +89,7 @@ pub struct JudgeRow {
 }
 
 /// Handles are letters, digits and a few signs. Anything else is not asked about or linked to.
-fn is_handle(text: &str) -> bool {
+pub(crate) fn is_handle(text: &str) -> bool {
     (1..=24).contains(&text.len())
         && text
             .bytes()
@@ -336,6 +336,38 @@ fn view(stored: &[StoredEvent], ask: Option<&Ask>, now: OffsetDateTime) -> Submi
     view_of(JudgeKind::Codeforces, stored, ask, now)
 }
 
+/// The events of a stick that say something about `kind`.
+fn of_judge(kind: JudgeKind, all: &[StoredEvent]) -> Vec<StoredEvent> {
+    all.iter()
+        .filter(|item| match item.event.kind {
+            // What the proxy carried is the pages of codeforces.com.
+            EventKind::Network => kind == JudgeKind::Codeforces,
+            _ => JudgeKind::of_payload(&item.event.payload) == Some(kind),
+        })
+        .cloned()
+        .collect()
+}
+
+/// The people and contests a stick is compared on: the latest few, newest first.
+fn compared(stored: &[StoredEvent]) -> (Vec<(String, OffsetDateTime)>, Vec<u64>) {
+    let (mut handles, mut contests) = who_and_where(stored);
+    handles.reverse();
+    handles.truncate(MAX_HANDLES);
+    contests.reverse();
+    contests.truncate(MAX_CONTESTS);
+    (handles, contests)
+}
+
+/// Every (handle, contest) of `kind` the comparison of this stick asks a judge about, so the
+/// follower asks about the same ones.
+pub(crate) fn pairs_of(kind: JudgeKind, all: &[StoredEvent]) -> Vec<(String, u64)> {
+    let (handles, contests) = compared(&of_judge(kind, all));
+    handles
+        .iter()
+        .flat_map(|(handle, _)| contests.iter().map(|contest| (handle.clone(), *contest)))
+        .collect()
+}
+
 /// [`view`] for one judge. Contest numbers repeat between judges, so only the events of this judge
 /// are read.
 pub fn view_of(
@@ -344,22 +376,9 @@ pub fn view_of(
     ask: Option<&Ask>,
     now: OffsetDateTime,
 ) -> SubmissionsView {
-    let mine: Vec<StoredEvent> = all
-        .iter()
-        .filter(|item| match item.event.kind {
-            // What the proxy carried is the pages of codeforces.com.
-            EventKind::Network => kind == JudgeKind::Codeforces,
-            _ => JudgeKind::of_payload(&item.event.payload) == Some(kind),
-        })
-        .cloned()
-        .collect();
+    let mine = of_judge(kind, all);
     let stored = &mine[..];
-    let (mut handles, mut contests) = who_and_where(stored);
-    // The latest few, newest people and contests first.
-    handles.reverse();
-    handles.truncate(MAX_HANDLES);
-    contests.reverse();
-    contests.truncate(MAX_CONTESTS);
+    let (handles, contests) = compared(stored);
 
     let known_ids: HashSet<u64> = stored
         .iter()

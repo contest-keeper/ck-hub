@@ -18,6 +18,7 @@ use crate::codeforces::{CodeforcesError, Judge};
 use crate::contest::{self, ContestView};
 use crate::credentials::CredentialScope;
 use crate::download::Download;
+use crate::follow::Follows;
 use crate::images::ImageSource;
 use crate::judge::{JudgeKind, JudgeSubmission, SubmitEvent};
 use crate::mail::Mailer;
@@ -211,7 +212,9 @@ pub struct Hub {
     pub(crate) mailer: Option<(Arc<dyn Mailer>, String)>,
     pub(crate) clock: Box<dyn Fn() -> OffsetDateTime + Send + Sync>,
     /// Where the submissions of a person in a contest are asked, once set up.
-    judges: HashMap<JudgeKind, Arc<dyn Judge>>,
+    pub(crate) judges: HashMap<JudgeKind, Arc<dyn Judge>>,
+    /// The people the Hub keeps asking the judges about.
+    pub(crate) follows: Follows,
     /// What the judge answered lately, so a page that refreshes does not ask again each time.
     judged: Mutex<JudgedCache>,
 }
@@ -258,6 +261,7 @@ impl Hub {
             mailer: None,
             clock,
             judges: HashMap::new(),
+            follows: Follows::default(),
             judged: Mutex::new(HashMap::new()),
             sign_rates: Mutex::new(HashMap::new()),
             config_key: None,
@@ -644,6 +648,11 @@ impl Hub {
         };
         let seq = event.seq;
         let ack_event = (event.kind == EventKind::CommandAck).then(|| event.clone());
+        let follow = StoredEvent {
+            received_at: (self.clock)(),
+            event: event.clone(),
+            integrity: None,
+        };
         let stored = match self.store.append_event(
             &organization,
             event,
@@ -662,6 +671,7 @@ impl Hub {
             if let Some(total) = self.event_totals.lock().expect("totals lock").get_mut(&id) {
                 *total += 1;
             }
+            self.follow_event(&organization, &follow);
             if let Some(event) = ack_event {
                 self.apply_ack(&organization, &id, &event);
             }
@@ -786,7 +796,7 @@ impl Hub {
         Ok(view)
     }
 
-    fn stick_entries(&self, organization: &str) -> Result<Vec<Stick>, StoreError> {
+    pub(crate) fn stick_entries(&self, organization: &str) -> Result<Vec<Stick>, StoreError> {
         // The registry file's sticks belong to the default organization.
         let mut entries: Vec<Stick> = if organization == self.default_org_id()? {
             let mut registry = self.registry.lock().expect("registry lock");
