@@ -90,4 +90,4 @@ pub use store::{
 };
 pub use submissions::{JudgeRow, StickSubmission, SubmissionsView};
 pub use vjudge::Client as VjudgeClient;
-pub use watcher::{Page, Pages, WatchError, poll_once, run as watch};
+pub use watcher::{Page, Pages, WatchError, backfill, poll_once, run as watch};

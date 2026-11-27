@@ -49,12 +49,50 @@ impl Pages for vjudge::Client {
     }
 }
 
+/// What one pass over a contest's pages needs.
+struct Scan<'a> {
+    client: &'a dyn Pages,
+    store: &'a dyn Store,
+    organization: &'a str,
+    judge: JudgeKind,
+    contest_id: u64,
+    page_size: u64,
+    pause: Duration,
+    /// Read to the oldest page even when a page has nothing new.
+    full: bool,
+}
+
+fn scan(job: &Scan) -> Result<usize, WatchError> {
+    let mut total = 0;
+    let mut from = 1;
+    loop {
+        let page = job.client.page(job.contest_id, from, job.page_size)?;
+        let added = job.store.add_judge_submissions(
+            job.organization,
+            job.judge.key(),
+            &page.rows,
+            OffsetDateTime::now_utc(),
+        )?;
+        total += added;
+        let short = page.raw < usize::try_from(job.page_size).unwrap_or(usize::MAX);
+        // A page of usable rows that the Hub already has marks where an earlier poll got to. A page
+        // with no usable rows says nothing about that, so it never ends the poll.
+        let known = added == 0 && !page.rows.is_empty();
+        if short || (known && !job.full) {
+            return Ok(total);
+        }
+        from += job.page_size;
+        sleep(job.pause);
+    }
+}
+
 /// Reads pages from the newest submission backwards and keeps them, until a page has nothing the
 /// Hub did not already have, or is short (the oldest page). Returns how many were new.
 ///
 /// A failed page stops the poll with an error: what was kept stays, and the next poll starts
-/// again from the newest page, so nothing is skipped. `pause` sits between pages because
-/// Codeforces allows about one call every two seconds.
+/// again from the newest page. After a failure use [`backfill`] once, because a page that is
+/// already kept would end this poll before the pages that failed. `pause` sits between pages
+/// because Codeforces allows about one call every two seconds.
 ///
 /// # Errors
 /// The judge or the store failing.
@@ -67,24 +105,42 @@ pub fn poll_once(
     page_size: u64,
     pause: Duration,
 ) -> Result<usize, WatchError> {
-    let mut total = 0;
-    let mut from = 1;
-    loop {
-        let page = client.page(contest_id, from, page_size)?;
-        let added = store.add_judge_submissions(
-            organization,
-            judge.key(),
-            &page.rows,
-            OffsetDateTime::now_utc(),
-        )?;
-        total += added;
-        let short = page.raw < usize::try_from(page_size).unwrap_or(usize::MAX);
-        if added == 0 || short {
-            return Ok(total);
-        }
-        from += page_size;
-        sleep(pause);
-    }
+    scan(&Scan {
+        client,
+        store,
+        organization,
+        judge,
+        contest_id,
+        page_size,
+        pause,
+        full: false,
+    })
+}
+
+/// [`poll_once`] that reads every page to the oldest one, for the first poll and for the one after
+/// a failure, when pages the Hub has may sit in front of pages it does not.
+///
+/// # Errors
+/// The judge or the store failing.
+pub fn backfill(
+    client: &dyn Pages,
+    store: &dyn Store,
+    organization: &str,
+    judge: JudgeKind,
+    contest_id: u64,
+    page_size: u64,
+    pause: Duration,
+) -> Result<usize, WatchError> {
+    scan(&Scan {
+        client,
+        store,
+        organization,
+        judge,
+        contest_id,
+        page_size,
+        pause,
+        full: true,
+    })
 }
 
 /// Polls forever: every `interval`, and after a failure the wait doubles up to `max_wait`, then
@@ -100,8 +156,11 @@ pub fn run(
     max_wait: Duration,
 ) {
     let mut wait = interval;
+    // The first poll, and the one after a failure, read every page.
+    let mut caught_up = false;
     loop {
-        match poll_once(
+        let poll = if caught_up { poll_once } else { backfill };
+        match poll(
             client,
             store,
             organization,
@@ -113,10 +172,12 @@ pub fn run(
             Ok(new) => {
                 tracing::info!(contest_id, new, judge = judge.key(), "polled the judge");
                 wait = interval;
+                caught_up = true;
             }
             Err(error) => {
                 tracing::warn!(contest_id, %error, judge = judge.key(), "the judge poll failed");
                 wait = (wait * 2).min(max_wait);
+                caught_up = false;
             }
         }
         sleep(wait);
