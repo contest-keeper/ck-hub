@@ -114,7 +114,12 @@ impl Hub {
             contest_id,
             handle: handle.to_lowercase(),
         };
+        let now = (self.clock)();
         let people = &mut self.follows.0.lock().expect("follows lock").people;
+        // Those whose time is up must not keep a new one out.
+        if people.len() >= MAX_FOLLOWED {
+            people.retain(|_, times| now - times.active < FOLLOW_FOR);
+        }
         if let Some(times) = people.get_mut(&key) {
             times.active = times.active.max(active);
             if at_once {
@@ -171,7 +176,17 @@ impl Hub {
         let Some((organization, stick)) = next else {
             return Ok(());
         };
-        let stored = self.store.events(&organization, &stick)?;
+        let stored = match self.store.events(&organization, &stick) {
+            Ok(stored) => stored,
+            Err(error) => {
+                // Still to be read. Only the mark: an event may have set it again meanwhile.
+                let sticks = &mut self.follows.0.lock().expect("follows lock").sticks;
+                if let Some(state) = sticks.get_mut(&(organization, stick)) {
+                    state.0 = true;
+                }
+                return Err(error);
+            }
+        };
         for judge in JudgeKind::ALL {
             for (handle, contest_id) in pairs_of(judge, &stored) {
                 self.follow(&organization, judge, &handle, contest_id, now, false);

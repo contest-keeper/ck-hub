@@ -615,11 +615,16 @@ fn start_following(hub: &Arc<Hub>) {
     let started = std::thread::Builder::new()
         .name("follow".into())
         .spawn(move || {
-            if let Err(error) = hub.follow_recent() {
-                tracing::error!("the recent submits cannot be read: {error}");
-            }
             let mut wait = Duration::from_secs(2);
+            // Until it works, nobody who submitted before the start is followed.
+            let mut restored = false;
             loop {
+                if !restored {
+                    match hub.follow_recent() {
+                        Ok(()) => restored = true,
+                        Err(error) => tracing::error!("the recent submits cannot be read: {error}"),
+                    }
+                }
                 wait = match hub.check_next_followed() {
                     Ok(_) => Duration::from_secs(2),
                     Err(error) => {

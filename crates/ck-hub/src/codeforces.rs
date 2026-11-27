@@ -1,7 +1,8 @@
 //! Talking to the Codeforces API.
 
 use std::fmt::Write;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use sha2::{Digest, Sha512};
@@ -117,6 +118,21 @@ pub fn signed_query(
     format!("{joined}&apiSig={rand}{}", hex(&digest))
 }
 
+/// The real site, as opposed to a stand-in a test runs.
+const PUBLIC_SITE: &str = "https://codeforces.com";
+/// Codeforces allows about one call every two seconds.
+const CALL_GAP: Duration = Duration::from_secs(2);
+
+/// Waits until `gap` has passed since the last turn taken from `last`, and takes the next one.
+/// Callers queue on the lock.
+fn wait_turn(last: &Mutex<Option<Instant>>, gap: Duration) {
+    let mut last = last.lock().expect("turn lock");
+    if let Some(at) = *last {
+        std::thread::sleep(gap.saturating_sub(at.elapsed()));
+    }
+    *last = Some(Instant::now());
+}
+
 /// A Codeforces API client. With credentials every call is signed, which also covers gyms and
 /// group contests; without them only public contests can be read.
 pub struct Client {
@@ -182,6 +198,11 @@ impl Client {
         &self,
         params: &[(&str, String)],
     ) -> Result<Vec<JudgeSubmission>, CodeforcesError> {
+        // The watcher, the follower and the page all ask from one address.
+        if self.base == PUBLIC_SITE {
+            static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+            wait_turn(&LAST, CALL_GAP);
+        }
         let query = match &self.credentials {
             Some((key, secret)) => {
                 let now = OffsetDateTime::now_utc();
@@ -245,6 +266,19 @@ impl Judge for Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn callers_of_one_site_take_turns_a_gap_apart() {
+        let last = Mutex::new(None);
+        let gap = Duration::from_millis(40);
+        let start = Instant::now();
+        std::thread::scope(|scope| {
+            for _ in 0..3 {
+                scope.spawn(|| wait_turn(&last, gap));
+            }
+        });
+        assert!(start.elapsed() >= gap * 2);
+    }
 
     const BODY: &str = r#"{"status":"OK","result":[
         {"id":20,"contestId":1900,"creationTimeSeconds":1800000100,
