@@ -12,7 +12,7 @@ use serde_json::Value;
 use time::{Duration, OffsetDateTime};
 
 use crate::codeforces::{CodeforcesError, STATUS_PAGE};
-use crate::judge::{EventKey, JudgeSubmission, SubmitEvent, submit_event};
+use crate::judge::{EventKey, JudgeKind, JudgeSubmission, SubmitEvent, submit_event};
 use crate::matcher::{Verdict, match_submissions};
 use crate::store::StoredEvent;
 
@@ -31,6 +31,8 @@ const MAX_ROWS: usize = 200;
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct SubmissionsView {
+    /// The judge these are about.
+    pub kind: JudgeKind,
     /// What the stick reported, newest first.
     pub submissions: Vec<StickSubmission>,
     /// What the judge says these people submitted since they logged in on the stick, newest first.
@@ -44,6 +46,9 @@ pub struct SubmissionsView {
     pub handles: Vec<String>,
     /// Why the judge's side is missing or incomplete, when it is.
     pub judge_note: Option<String>,
+    /// The same for `VJudge`, when this stick was used there. The fields above are Codeforces.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vjudge: Option<Box<SubmissionsView>>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -249,6 +254,7 @@ fn stick_submissions(
 /// Asks the judge for each person in each contest. The note says why the answer is missing or
 /// incomplete, when it is.
 fn ask_judge(
+    label: &str,
     ask: Option<&Ask>,
     handles: &[(String, OffsetDateTime)],
     contests: &[u64],
@@ -312,7 +318,7 @@ fn ask_judge(
                             {
                                 tracing::warn!(contest, %error, "the judge could not be asked");
                             }
-                            note = Some("Codeforces could not be asked just now.".to_owned());
+                            note = Some(format!("{label} could not be asked just now."));
                         }
                     }
                 }
@@ -324,7 +330,29 @@ fn ask_judge(
 
 /// What the stick reported and what the judge says, side by side. `ask` gets the submissions of a
 /// person in a contest from the judge; `None` when no judge is set up.
-pub fn view(stored: &[StoredEvent], ask: Option<&Ask>, now: OffsetDateTime) -> SubmissionsView {
+#[cfg(test)]
+fn view(stored: &[StoredEvent], ask: Option<&Ask>, now: OffsetDateTime) -> SubmissionsView {
+    view_of(JudgeKind::Codeforces, stored, ask, now)
+}
+
+/// [`view`] for one judge. Contest numbers repeat between judges, so only the events of this judge
+/// are read.
+pub fn view_of(
+    kind: JudgeKind,
+    all: &[StoredEvent],
+    ask: Option<&Ask>,
+    now: OffsetDateTime,
+) -> SubmissionsView {
+    let mine: Vec<StoredEvent> = all
+        .iter()
+        .filter(|item| match item.event.kind {
+            // What the proxy carried is the pages of codeforces.com.
+            EventKind::Network => kind == JudgeKind::Codeforces,
+            _ => JudgeKind::of_payload(&item.event.payload) == Some(kind),
+        })
+        .cloned()
+        .collect();
+    let stored = &mine[..];
     let (mut handles, mut contests) = who_and_where(stored);
     // The latest few, newest people and contests first.
     handles.reverse();
@@ -338,7 +366,7 @@ pub fn view(stored: &[StoredEvent], ask: Option<&Ask>, now: OffsetDateTime) -> S
         .filter(|event| event.accepted)
         .filter_map(|event| event.submission_id)
         .collect();
-    let (mut judged, covered, note) = ask_judge(ask, &handles, &contests, &known_ids);
+    let (mut judged, covered, note) = ask_judge(kind.label(), ask, &handles, &contests, &known_ids);
     judged.sort_by_key(|s| (s.contest_id, s.submission_id));
     judged.dedup_by_key(|s| (s.contest_id, s.submission_id));
 
@@ -399,6 +427,8 @@ pub fn view(stored: &[StoredEvent], ask: Option<&Ask>, now: OffsetDateTime) -> S
     submissions.truncate(MAX_ROWS);
 
     SubmissionsView {
+        kind,
+        vjudge: None,
         submissions,
         judge: rows,
         suspect,
@@ -604,6 +634,58 @@ mod tests {
         let seen = view(&stored, Some(&ask), at(10_000));
         assert_eq!(seen.submissions[0].judge_id, Some(900));
         assert_eq!(seen.not_on_judge, 0);
+    }
+
+    #[test]
+    fn a_contest_number_on_two_judges_is_two_contests() {
+        let vjudge = |seq: u64, kind: EventKind, extra: Value| {
+            let mut payload = json!({"platform": "vjudge", "username": "ana"});
+            payload
+                .as_object_mut()
+                .expect("object")
+                .extend(extra.as_object().expect("object").clone());
+            stored(seq, 100, kind, payload)
+        };
+        let events = vec![
+            login(0),
+            submit(2, 100, "A", true),
+            vjudge(3, EventKind::Login, json!({})),
+            vjudge(
+                4,
+                EventKind::Submission,
+                json!({"contest_id": "2285", "problem": "C", "accepted": true,
+                       "submission_id": 77, "judge_time_ms": 1_800_000_100_000_i64}),
+            ),
+        ];
+        let asked = std::cell::RefCell::new(Vec::new());
+        let ask = |contest: u64, handle: &str| {
+            asked.borrow_mut().push((contest, handle.to_owned()));
+            Ok(vec![JudgeSubmission {
+                submission_id: 77,
+                contest_id: 2285,
+                handles: vec!["ana".to_owned()],
+                problem_index: "C".to_owned(),
+                submitted_at: at(100),
+            }])
+        };
+        let seen = view_of(JudgeKind::Vjudge, &events, Some(&ask), at(10_000));
+        assert_eq!(seen.kind, JudgeKind::Vjudge);
+        assert_eq!(
+            seen.submissions.len(),
+            1,
+            "the Codeforces submit is not VJudge's"
+        );
+        assert_eq!(seen.submissions[0].judge_id, Some(77));
+        assert_eq!(seen.suspect, 0);
+        assert!(
+            !seen.judge[0].time_off,
+            "the judge's own time agrees exactly"
+        );
+        assert_eq!(seen.judge[0].time_gap_s, Some(0));
+        // The Codeforces view of the same stick does not see the VJudge submit.
+        let codeforces = view(&events, Some(&ask), at(10_000));
+        assert_eq!(codeforces.submissions.len(), 1);
+        assert_eq!(codeforces.submissions[0].problem.as_deref(), Some("A"));
     }
 
     #[test]

@@ -6,7 +6,9 @@ use std::time::Duration;
 use time::OffsetDateTime;
 
 use crate::codeforces::{Client, CodeforcesError};
+use crate::judge::{JudgeKind, JudgeSubmission};
 use crate::store::{Store, StoreError};
+use crate::vjudge;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WatchError {
@@ -14,6 +16,42 @@ pub enum WatchError {
     Judge(#[from] CodeforcesError),
     #[error(transparent)]
     Store(#[from] StoreError),
+}
+
+/// A judge's list of a contest's submissions, newest first, read a page at a time.
+pub trait Pages {
+    /// `from` starts at 1.
+    ///
+    /// # Errors
+    /// The judge cannot be asked or does not answer as expected.
+    fn page(
+        &self,
+        contest_id: u64,
+        from: u64,
+        count: u64,
+    ) -> Result<Vec<JudgeSubmission>, CodeforcesError>;
+}
+
+impl Pages for Client {
+    fn page(
+        &self,
+        contest_id: u64,
+        from: u64,
+        count: u64,
+    ) -> Result<Vec<JudgeSubmission>, CodeforcesError> {
+        self.status(contest_id, from, count)
+    }
+}
+
+impl Pages for vjudge::Client {
+    fn page(
+        &self,
+        contest_id: u64,
+        from: u64,
+        count: u64,
+    ) -> Result<Vec<JudgeSubmission>, CodeforcesError> {
+        self.status(contest_id, from, count)
+    }
 }
 
 /// Reads pages from the newest submission backwards and keeps them, until a page has nothing the
@@ -26,9 +64,10 @@ pub enum WatchError {
 /// # Errors
 /// The judge or the store failing.
 pub fn poll_once(
-    client: &Client,
+    client: &dyn Pages,
     store: &dyn Store,
     organization: &str,
+    judge: JudgeKind,
     contest_id: u64,
     page_size: u64,
     pause: Duration,
@@ -36,10 +75,10 @@ pub fn poll_once(
     let mut total = 0;
     let mut from = 1;
     loop {
-        let page = client.status(contest_id, from, page_size)?;
+        let page = client.page(contest_id, from, page_size)?;
         let added = store.add_judge_submissions(
             organization,
-            "codeforces",
+            judge.key(),
             &page,
             OffsetDateTime::now_utc(),
         )?;
@@ -57,9 +96,10 @@ pub fn poll_once(
 /// goes back to `interval` after a success. A failure is logged without the request, which
 /// carries the API key.
 pub fn run(
-    client: &Client,
+    client: &dyn Pages,
     store: &dyn Store,
     organization: &str,
+    judge: JudgeKind,
     contest_id: u64,
     interval: Duration,
     max_wait: Duration,
@@ -70,16 +110,17 @@ pub fn run(
             client,
             store,
             organization,
+            judge,
             contest_id,
             100,
             Duration::from_secs(2),
         ) {
             Ok(new) => {
-                tracing::info!(contest_id, new, "polled codeforces");
+                tracing::info!(contest_id, new, judge = judge.key(), "polled the judge");
                 wait = interval;
             }
             Err(error) => {
-                tracing::warn!(contest_id, %error, "codeforces poll failed");
+                tracing::warn!(contest_id, %error, judge = judge.key(), "the judge poll failed");
                 wait = (wait * 2).min(max_wait);
             }
         }

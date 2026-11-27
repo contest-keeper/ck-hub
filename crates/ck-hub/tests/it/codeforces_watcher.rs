@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use ck_hub::{CodeforcesClient, MemoryStore, Store, poll_once};
+use ck_hub::{CodeforcesClient, JudgeKind, MemoryStore, Store, poll_once};
 
 /// Serves `pages[n]` for `from = n * count + 1` (an empty result after the last) and records
 /// every request line.
@@ -78,7 +78,16 @@ fn keeps_every_page_until_the_last_short_one() {
     let org = organization(&store);
     let client = CodeforcesClient::new(&base, None);
 
-    let new = poll_once(&client, &store, &org, 1900, 2, Duration::ZERO).expect("polled");
+    let new = poll_once(
+        &client,
+        &store,
+        &org,
+        JudgeKind::Codeforces,
+        1900,
+        2,
+        Duration::ZERO,
+    )
+    .expect("polled");
 
     assert_eq!(new, 4);
     let ids: Vec<u64> = store
@@ -96,10 +105,28 @@ fn a_second_poll_stops_at_what_it_already_has() {
     let store = MemoryStore::default();
     let org = organization(&store);
     let client = CodeforcesClient::new(&base, None);
-    poll_once(&client, &store, &org, 1900, 2, Duration::ZERO).expect("polled");
+    poll_once(
+        &client,
+        &store,
+        &org,
+        JudgeKind::Codeforces,
+        1900,
+        2,
+        Duration::ZERO,
+    )
+    .expect("polled");
     let before = seen.lock().expect("log").len();
 
-    let new = poll_once(&client, &store, &org, 1900, 2, Duration::ZERO).expect("polled");
+    let new = poll_once(
+        &client,
+        &store,
+        &org,
+        JudgeKind::Codeforces,
+        1900,
+        2,
+        Duration::ZERO,
+    )
+    .expect("polled");
 
     assert_eq!(new, 0);
     assert_eq!(seen.lock().expect("log").len(), before + 1, "one page only");
@@ -115,7 +142,16 @@ fn a_refusal_is_an_error_and_keeps_nothing() {
     let org = organization(&store);
     let client = CodeforcesClient::new(&base, None);
 
-    let error = poll_once(&client, &store, &org, 1900, 2, Duration::ZERO).expect_err("refused");
+    let error = poll_once(
+        &client,
+        &store,
+        &org,
+        JudgeKind::Codeforces,
+        1900,
+        2,
+        Duration::ZERO,
+    )
+    .expect_err("refused");
 
     assert!(error.to_string().contains("contestId: not found"));
     let kept = store
@@ -131,7 +167,16 @@ fn a_signed_client_sends_the_key_and_signature_but_not_the_secret() {
     let org = organization(&store);
     let client = CodeforcesClient::new(&base, Some(("KEY".to_owned(), "SECRET".to_owned())));
 
-    poll_once(&client, &store, &org, 1900, 2, Duration::ZERO).expect("polled");
+    poll_once(
+        &client,
+        &store,
+        &org,
+        JudgeKind::Codeforces,
+        1900,
+        2,
+        Duration::ZERO,
+    )
+    .expect("polled");
 
     let log = seen.lock().expect("log");
     assert!(log[0].contains("apiKey=KEY"), "{}", log[0]);
@@ -148,7 +193,16 @@ fn an_unreachable_judge_is_an_error_that_does_not_show_the_key() {
     let store = MemoryStore::default();
     let org = organization(&store);
 
-    let error = poll_once(&client, &store, &org, 1900, 2, Duration::ZERO).expect_err("down");
+    let error = poll_once(
+        &client,
+        &store,
+        &org,
+        JudgeKind::Codeforces,
+        1900,
+        2,
+        Duration::ZERO,
+    )
+    .expect_err("down");
 
     assert!(!error.to_string().contains("KEY"));
 }

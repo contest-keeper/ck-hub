@@ -939,6 +939,97 @@ async fn the_stick_list_marks_a_stick_whose_account_submitted_from_elsewhere() {
 }
 
 #[tokio::test]
+async fn a_vjudge_submit_is_matched_by_run_id_and_the_judges_own_time_apart_from_codeforces() {
+    let setup = setup();
+    let organization = setup
+        .store
+        .organization_by_slug("default")
+        .expect("read")
+        .expect("organization")
+        .id;
+    let at = |text: &str| {
+        text.parse::<ck_protocol::Timestamp>()
+            .expect("time")
+            .as_offset_date_time()
+    };
+    let row = |id, handle: &str, when: &str| ck_hub::JudgeSubmission {
+        submission_id: id,
+        contest_id: 871_412,
+        handles: vec![handle.to_owned()],
+        problem_index: "C".to_owned(),
+        submitted_at: at(when),
+    };
+    // What the watcher kept of VJudge: 74477117 is the stick's, 74477200 is another person's.
+    let kept = [
+        row(74_477_117, "robbertp", "2026-11-12T10:03:20Z"),
+        row(74_477_200, "other", "2026-11-12T10:20:00Z"),
+    ];
+    setup
+        .store
+        .add_judge_submissions(&organization, "vjudge", &kept, at("2026-11-12T10:30:00Z"))
+        .expect("kept");
+    // The stick's clock says 10:05:00 (the event's sent_at), VJudge's own time says 10:03:20: the
+    // judge's time is what is compared, so the stick's clock does not matter.
+    let judge_ms = at("2026-11-12T10:03:20Z").unix_timestamp() * 1000;
+    let submit = serde_json::json!({"platform": "vjudge", "username": "robbertp",
+        "contest_id": "871412", "problem": "C", "accepted": true,
+        "submission_id": 74_477_117, "judge_time_ms": judge_ms});
+    send_kind(&setup.app, 1, EventKind::Submission, submit).await;
+
+    let cookie = organizer_cookie(&setup.app).await;
+    let get = |path: &str| {
+        Request::get(path)
+            .header("cookie", cookie.clone())
+            .body(Body::empty())
+            .expect("request")
+    };
+    let (status, text) = call(
+        &setup.app,
+        get("/api/v1/orgs/default/contests/871412/submissions?judge=vjudge"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let seen: serde_json::Value = serde_json::from_str(&text).expect("json");
+    assert_eq!(seen["matched"], 1);
+    assert_eq!(seen["suspect"], 1);
+    let mine = seen["submissions"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .find(|r| r["submission_id"] == 74_477_117)
+        .expect("the stick's row");
+    assert_eq!(mine["matched_by"], "id");
+    assert_eq!(mine["time_gap_s"], 0);
+    assert_eq!(mine["time_off"], false);
+
+    // The same contest number as a Codeforces contest is another contest: nothing kept there.
+    let (_, text) = call(
+        &setup.app,
+        get("/api/v1/orgs/default/contests/871412/submissions"),
+    )
+    .await;
+    let other: serde_json::Value = serde_json::from_str(&text).expect("json");
+    assert_eq!(other["submissions"].as_array().expect("rows").len(), 0);
+    let (status, _) = call(
+        &setup.app,
+        get("/api/v1/orgs/default/contests/871412/submissions?judge=nope"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // The stick's page lists the VJudge submit under `vjudge`, apart from Codeforces.
+    let (_, text) = call(
+        &setup.app,
+        get("/api/v1/orgs/default/sticks/stick-a/submissions"),
+    )
+    .await;
+    let stick: serde_json::Value = serde_json::from_str(&text).expect("json");
+    assert_eq!(stick["submissions"].as_array().expect("rows").len(), 0);
+    assert_eq!(stick["vjudge"]["kind"], "vjudge");
+    assert_eq!(stick["vjudge"]["submissions"][0]["problem"], "C");
+}
+
+#[tokio::test]
 async fn a_submission_event_is_counted_and_its_problem_and_language_are_shown() {
     let setup = setup();
     assert_eq!(

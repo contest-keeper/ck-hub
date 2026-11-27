@@ -5,12 +5,12 @@ const suspectOnly = new Set();
 const contestRequests = new Map();
 
 // A contest of one organization: the maps above must not mix organizations.
-function contestKey(contest) {
-  return org + ":" + contest;
+function contestKey(contest, kind = "codeforces") {
+  return org + ":" + kind + ":" + contest;
 }
 
-async function fetchContest(contest) {
-  const key = contestKey(contest);
+async function fetchContest(contest, kind = "codeforces") {
+  const key = contestKey(contest, kind);
   const token = (contestRequests.get(key) || 0) + 1;
   contestRequests.set(key, token);
   const before = contestViews.get(key);
@@ -18,7 +18,7 @@ async function fetchContest(contest) {
   let data = before ? before.data : null;
   let failed = false;
   try {
-    const response = await fetch("/api/v1/orgs/" + encodeURIComponent(org) + "/contests/" + encodeURIComponent(contest) + "/submissions", { cache: "no-store" });
+    const response = await fetch("/api/v1/orgs/" + encodeURIComponent(org) + "/contests/" + encodeURIComponent(contest) + "/submissions" + (kind === "vjudge" ? "?judge=vjudge" : ""), { cache: "no-store" });
     if (!response.ok) throw new Error("HTTP " + response.status);
     data = await response.json();
   } catch (error) {
@@ -30,9 +30,9 @@ async function fetchContest(contest) {
   render();
 }
 
-function contestPanel(contest) {
+function contestPanel(contest, kind = "codeforces") {
   const box = el("div", "net");
-  const key = contestKey(contest);
+  const key = contestKey(contest, kind);
   const open = openContests.has(key);
   const toggle = el("button", "", (open ? "Hide" : "Show") + " all submissions of contest " + contest);
   toggle.type = "button";
@@ -44,14 +44,14 @@ function contestPanel(contest) {
   box.appendChild(toggle);
   if (!open) return box;
   const cached = contestViews.get(key);
-  if (!cached || Date.now() - cached.at > 30000) fetchContest(contest);
+  if (!cached || Date.now() - cached.at > 30000) fetchContest(contest, kind);
   if (!cached || !cached.data) {
     box.appendChild(el("p", "muted", cached && cached.failed ? "The contest could not be loaded." : "Loading…"));
     return box;
   }
   const data = cached.data;
   if (cached.failed) box.appendChild(el("p", "hint", "The last refresh failed. Showing older data."));
-  box.appendChild(el("p", data.suspect ? "bad" : "", data.submissions.length + " on Codeforces, " + data.matched + " reported by a stick, " + data.suspect + " suspect."));
+  box.appendChild(el("p", data.suspect ? "bad" : "", data.submissions.length + " on " + judgeName(kind) + ", " + data.matched + " reported by a stick, " + data.suspect + " suspect."));
   const label = el("label", "", " only the suspect ones");
   const check = el("input");
   check.type = "checkbox";
@@ -67,9 +67,9 @@ function contestPanel(contest) {
   box.appendChild(proofTable(["Time", "User", "Problem", "Submission", "Stick", "Matched by"],
     shown.map((s) => [[
       new Date(s.submitted_at).toLocaleTimeString(),
-      handleLink(s.handles[0]),
+      handleLink(s.handles[0], kind),
       s.problem,
-      submissionLink(data.contest_id, s.submission_id),
+      submissionLink(data.contest_id, s.submission_id, kind),
       s.stick_id || "SUSPECT: no stick reported it",
       s.matched_by ? (s.matched_by === "id" ? "id" : "time (" + s.time_gap_s + " s apart)") : "—",
     ], s.suspect ? "refused" : "ok"])));
@@ -241,19 +241,23 @@ function link(text, address) {
   return a;
 }
 
-// A handle is shown as a link only when it is made of what a Codeforces handle is made of.
-function handleLink(handle) {
+const VJUDGE = "https://vjudge.net";
+const judgeName = (kind) => (kind === "vjudge" ? "VJudge" : "Codeforces");
+
+// A handle is shown as a link only when it is made of what a judge's handle is made of.
+function handleLink(handle, kind = "codeforces") {
   if (!handle) return document.createTextNode("—");
   if (!/^[A-Za-z0-9_.-]{1,24}$/.test(handle)) return document.createTextNode(handle);
-  return link(handle, CODEFORCES + "/profile/" + handle);
+  return link(handle, kind === "vjudge" ? VJUDGE + "/user/" + handle : CODEFORCES + "/profile/" + handle);
 }
 
-function contestLink(contest) {
-  return contest ? link(String(contest), CODEFORCES + "/contest/" + contest) : document.createTextNode("—");
+function contestLink(contest, kind = "codeforces") {
+  if (!contest) return document.createTextNode("—");
+  return link(String(contest), (kind === "vjudge" ? VJUDGE : CODEFORCES) + "/contest/" + contest);
 }
 
-function submissionLink(contest, id) {
-  return link("#" + id, CODEFORCES + "/contest/" + contest + "/submission/" + id);
+function submissionLink(contest, id, kind = "codeforces") {
+  return link("#" + id, kind === "vjudge" ? VJUDGE + "/solution/" + id : CODEFORCES + "/contest/" + contest + "/submission/" + id);
 }
 
 function proofTable(head, rows) {
@@ -275,6 +279,47 @@ function proofTable(head, rows) {
   return scroll;
 }
 
+function proofSection(box, data) {
+  const kind = data.kind;
+  const name = judgeName(kind);
+  const who = data.handles.length ? " by " + data.handles.join(", ") : "";
+  const problems = data.suspect + data.not_on_judge;
+  const summary = el("p", problems ? "bad" : "", data.submissions.length + " reported by the stick" + who + ". " +
+    (problems ? [
+      data.suspect ? data.suspect + " on " + name + " not from this stick, or with a different time" : "",
+      data.not_on_judge ? data.not_on_judge + " reported by the stick but not on " + name : "",
+    ].filter(Boolean).join("; ") + ": CHECK." : "Every " + name + " submission seen was made from this stick."));
+  box.appendChild(summary);
+  if (data.judge_note) box.appendChild(el("p", "hint", data.judge_note));
+
+  if (data.submissions.length) {
+    box.appendChild(el("h4", "", "Reported by the stick"));
+    box.appendChild(proofTable(["Time", "User", "Contest", "Problem", "Language", "Source", "On " + name],
+      data.submissions.map((s) => [[
+        new Date(s.received_at).toLocaleTimeString(),
+        handleLink(s.handle, kind),
+        contestLink(s.contest_id, kind),
+        s.problem || "—",
+        s.language || "—",
+        s.source_sha256 ? s.source_sha256 + (s.source_bytes ? " (" + s.source_bytes + " B" + (s.source_cut ? ", cut" : "") + ")" : "") : "—",
+        !s.accepted ? "refused by the site" : s.judge_id ? submissionLink(s.contest_id, s.judge_id, kind) : s.not_on_judge ? "NOT on " + name : "not found yet",
+      ], !s.accepted ? "" : s.judge_id ? "ok" : s.not_on_judge ? "refused" : "unconfirmed"])));
+  }
+  if (data.judge.length) {
+    box.appendChild(el("h4", "", "Seen on " + name));
+    box.appendChild(proofTable(["Time", "User", "Contest", "Problem", "Submission", "From this stick"],
+      data.judge.map((j) => [[
+        new Date(j.submitted_at).toLocaleTimeString(),
+        handleLink(j.handles[0], kind),
+        contestLink(j.contest_id, kind),
+        j.problem,
+        submissionLink(j.contest_id, j.submission_id, kind),
+        j.from_stick ? (j.time_off ? "yes, but its time is " + Math.abs(j.time_gap_s) + " s off" : "yes") : "SUSPECT: the stick did not report it",
+      ], j.suspect ? "refused" : "ok"])));
+  }
+  for (const contest of data.contests) box.appendChild(contestPanel(contest, kind));
+}
+
 function proofPanel(stick) {
   const box = el("div", "net");
   box.appendChild(el("h3", "", "Submissions"));
@@ -286,42 +331,11 @@ function proofPanel(stick) {
     return box;
   }
   const data = cached.data;
-  const who = data.handles.length ? " by " + data.handles.join(", ") : "";
-  const problems = data.suspect + data.not_on_judge;
-  const summary = el("p", problems ? "bad" : "", data.submissions.length + " reported by the stick" + who + ". " +
-    (problems ? [
-      data.suspect ? data.suspect + " on Codeforces not from this stick, or with a different time" : "",
-      data.not_on_judge ? data.not_on_judge + " reported by the stick but not on Codeforces" : "",
-    ].filter(Boolean).join("; ") + ": CHECK." : "Every Codeforces submission seen was made from this stick."));
-  box.appendChild(summary);
-  if (data.judge_note) box.appendChild(el("p", "hint", data.judge_note));
-
-  if (data.submissions.length) {
-    box.appendChild(el("h4", "", "Reported by the stick"));
-    box.appendChild(proofTable(["Time", "User", "Contest", "Problem", "Language", "Source", "On Codeforces"],
-      data.submissions.map((s) => [[
-        new Date(s.received_at).toLocaleTimeString(),
-        handleLink(s.handle),
-        contestLink(s.contest_id),
-        s.problem || "—",
-        s.language || "—",
-        s.source_sha256 ? s.source_sha256 + (s.source_bytes ? " (" + s.source_bytes + " B" + (s.source_cut ? ", cut" : "") + ")" : "") : "—",
-        !s.accepted ? "refused by the site" : s.judge_id ? submissionLink(s.contest_id, s.judge_id) : s.not_on_judge ? "NOT on Codeforces" : "not found yet",
-      ], !s.accepted ? "" : s.judge_id ? "ok" : s.not_on_judge ? "refused" : "unconfirmed"])));
+  proofSection(box, data);
+  if (data.vjudge) {
+    box.appendChild(el("h3", "", "VJudge"));
+    proofSection(box, data.vjudge);
   }
-  if (data.judge.length) {
-    box.appendChild(el("h4", "", "Seen on Codeforces"));
-    box.appendChild(proofTable(["Time", "User", "Contest", "Problem", "Submission", "From this stick"],
-      data.judge.map((j) => [[
-        new Date(j.submitted_at).toLocaleTimeString(),
-        handleLink(j.handles[0]),
-        contestLink(j.contest_id),
-        j.problem,
-        submissionLink(j.contest_id, j.submission_id),
-        j.from_stick ? (j.time_off ? "yes, but its time is " + Math.abs(j.time_gap_s) + " s off" : "yes") : "SUSPECT: the stick did not report it",
-      ], j.suspect ? "refused" : "ok"])));
-  }
-  for (const contest of data.contests) box.appendChild(contestPanel(contest));
   return box;
 }
 
