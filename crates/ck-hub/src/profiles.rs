@@ -142,7 +142,8 @@ impl Hub {
             }
         };
         let mut settings = input.settings;
-        self.seal_wifi_password(organization, id, &mut settings);
+        self.seal_wifi_password(organization, id, &mut settings)
+            .map_err(|e| unavailable(&e))?;
         let profile = NewProfile {
             id: id.to_owned(),
             name: name.to_owned(),
@@ -179,9 +180,14 @@ impl Hub {
     /// Replaces a typed Wi-Fi password in `settings` by its encrypted form. Without a typed one the
     /// earlier password stays while the network is the same one. Without a key nothing is kept, so
     /// a password is never stored in the clear.
-    fn seal_wifi_password(&self, organization: &str, id: &str, settings: &mut serde_json::Value) {
+    fn seal_wifi_password(
+        &self,
+        organization: &str,
+        id: &str,
+        settings: &mut serde_json::Value,
+    ) -> Result<(), StoreError> {
         let Some(wifi) = wifi_of(settings) else {
-            return;
+            return Ok(());
         };
         wifi.remove(SEALED);
         let typed = wifi
@@ -189,17 +195,16 @@ impl Hub {
             .and_then(|v| v.as_str().map(str::to_owned))
             .filter(|p| !p.is_empty());
         let Some(key) = &self.secrets else {
-            return;
+            return Ok(());
         };
         let aad = aad(organization, id);
         let sealed = if let Some(plain) = typed {
             key.seal(&aad, &plain)
         } else {
             let ssid = wifi.get("ssid").cloned();
+            // A failed read stops the save: going on would lose the password kept so far.
             self.store
-                .profile(organization, id)
-                .ok()
-                .flatten()
+                .profile(organization, id)?
                 .and_then(|mut earlier| {
                     let old = wifi_of(&mut earlier.settings)?;
                     if old.get("ssid") != ssid.as_ref() {
@@ -211,6 +216,7 @@ impl Hub {
         if let Some(sealed) = sealed {
             wifi.insert(SEALED.to_owned(), sealed.into());
         }
+        Ok(())
     }
 
     pub fn profile_wallpaper(
