@@ -1436,6 +1436,7 @@ document.getElementById("org").addEventListener("change", (event) => {
   org = event.target.value;
   confirmingMember = null;
   peopleData = null;
+  navGen += 1;
   refresh();
 });
 
