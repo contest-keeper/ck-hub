@@ -10,8 +10,10 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+aes-gcm = "0.11.1"
 argon2 = "0.6.0"
 axum = "0.8.9"
+getrandom = "0.4.3"
 base64 = { version = "0.23.1", default-features = false, features = ["alloc", "std"] }
 time = { version = "0.3.47", default-features = false, features = ["std", "parsing", "formatting", "macros", "serde-well-known"] }
 ck-crypto = { git = "https://github.com/contest-keeper/ck-protocol", rev = "f4796fe7f0546076f1013fb842f85af30dbfb05d", version = "0.1.0" }

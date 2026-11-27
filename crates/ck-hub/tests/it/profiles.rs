@@ -21,7 +21,11 @@ struct Setup {
 }
 
 async fn setup() -> Setup {
-    let hub = Hub::new(
+    setup_with(None).await
+}
+
+async fn setup_with(key: Option<&str>) -> Setup {
+    let mut hub = Hub::new(
         Registry::empty(),
         Arc::new(MemoryStore::default()),
         None,
@@ -31,6 +35,9 @@ async fn setup() -> Setup {
         memory_kib: 8,
         passes: 1,
     });
+    if let Some(key) = key {
+        hub = hub.with_secret_key(ck_hub::SecretBox::from_base64(key).expect("key"));
+    }
     for who in ["ana", "bob", "vera"] {
         hub.create_user(&format!("{who}@example.org"), PASSWORD)
             .expect("user");
@@ -393,4 +400,58 @@ async fn a_stranger_is_refused_before_a_big_profile_is_read() {
     let body = json!({ "name": "x", "settings": { "t": huge }, "wallpaper": null });
     let answer = send(&s.app, "PUT", "/api/v1/profiles/p-9", None, Some(body)).await;
     assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
+}
+
+fn wifi_profile(ssid: &str, password: Option<&str>) -> Value {
+    let mut wifi = json!({ "ssid": ssid });
+    if let Some(password) = password {
+        wifi["password"] = json!(password);
+    }
+    json!({ "name": "W", "settings": { "wifi": wifi } })
+}
+
+async fn read_wifi(s: &Setup, cookie: &str) -> Value {
+    let one = send(&s.app, "GET", "/api/v1/profiles/w", Some(cookie), None).await;
+    one.json()["settings"]["wifi"].clone()
+}
+
+#[tokio::test]
+async fn the_wifi_password_is_kept_for_the_admins_forge_and_only_for_the_same_network() {
+    let s = setup_with(Some(&STANDARD.encode([9u8; 32]))).await;
+    put(
+        &s,
+        &s.ana,
+        "w",
+        wifi_profile("venue", Some("hunter2-hunter2")),
+    )
+    .await;
+    let wifi = read_wifi(&s, &s.ana).await;
+    assert_eq!(wifi["password"], "hunter2-hunter2");
+    assert!(wifi.get("password_enc").is_none());
+    // A save from a client that does not hold the password keeps it for the same network.
+    put(&s, &s.ana, "w", wifi_profile("venue", None)).await;
+    assert_eq!(read_wifi(&s, &s.ana).await["password"], "hunter2-hunter2");
+    // A client cannot plant an encrypted value.
+    let mut forged = wifi_profile("venue", None);
+    forged["settings"]["wifi"]["password_enc"] = json!("AAAA");
+    put(&s, &s.ana, "w", forged).await;
+    assert_eq!(read_wifi(&s, &s.ana).await["password"], "hunter2-hunter2");
+    // Another network never gets the old password.
+    put(&s, &s.ana, "w", wifi_profile("elsewhere", None)).await;
+    assert!(read_wifi(&s, &s.ana).await.get("password").is_none());
+}
+
+#[tokio::test]
+async fn without_a_key_the_hub_keeps_no_wifi_password() {
+    let s = setup().await;
+    put(
+        &s,
+        &s.ana,
+        "w",
+        wifi_profile("venue", Some("hunter2-hunter2")),
+    )
+    .await;
+    let wifi = read_wifi(&s, &s.ana).await;
+    assert_eq!(wifi["ssid"], "venue");
+    assert!(wifi.get("password").is_none() && wifi.get("password_enc").is_none());
 }

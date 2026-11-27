@@ -26,6 +26,7 @@ mod recordings;
 mod register;
 mod registry;
 mod routes;
+mod secrets;
 mod signing;
 mod signup;
 mod source;
@@ -80,6 +81,7 @@ pub use recordings::{
 pub use register::{NewStick, RegisterError, Registered, register_sticks};
 pub use registry::{Registry, RegistryError};
 pub use routes::router;
+pub use secrets::SecretBox;
 pub use signing::{MAX_SIGNATURES_PER_MINUTE, MAX_SIGNED_SETTINGS_BYTES, SignError};
 pub use signup::{
     RESET_LIFETIME_MINUTES, SignupError, TokenError, UNVERIFIED_LIFETIME_HOURS,
