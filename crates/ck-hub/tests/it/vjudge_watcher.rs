@@ -114,6 +114,35 @@ fn keeps_every_page_under_vjudge_and_asks_for_the_contest_newest_first() {
 }
 
 #[test]
+fn a_full_page_with_a_row_that_cannot_be_kept_is_not_the_last_page() {
+    let unusable =
+        r#"{"runId":9,"time":1800000000000,"userName":"a","contestId":null,"contestNum":null}"#;
+    let (base, _) = serve(
+        vec![
+            page(&[row(4, 30), unusable.to_owned()]),
+            page(&[row(3, 20)]),
+            page(&[]),
+        ],
+        2,
+        200,
+    );
+    let store = MemoryStore::default();
+    let org = organization(&store);
+    let client = VjudgeClient::new(&base);
+    let new = poll_once(
+        &client,
+        &store,
+        &org,
+        JudgeKind::Vjudge,
+        871_412,
+        2,
+        Duration::ZERO,
+    )
+    .expect("polled");
+    assert_eq!(new, 2, "the row after the unusable one is kept too");
+}
+
+#[test]
 fn a_challenge_page_keeps_nothing_and_is_an_error() {
     let (base, _) = serve(vec!["<html>Just a moment...</html>".to_owned()], 2, 403);
     let store = MemoryStore::default();

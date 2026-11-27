@@ -18,39 +18,34 @@ pub enum WatchError {
     Store(#[from] StoreError),
 }
 
+/// One page of a judge's list: the submissions it holds that can be kept, and how many rows the
+/// judge sent. A page is the last one when the judge sent fewer rows than were asked for, so a row
+/// that cannot be kept must not make a full page look short.
+pub struct Page {
+    pub rows: Vec<JudgeSubmission>,
+    pub raw: usize,
+}
+
 /// A judge's list of a contest's submissions, newest first, read a page at a time.
 pub trait Pages {
     /// `from` starts at 1.
     ///
     /// # Errors
     /// The judge cannot be asked or does not answer as expected.
-    fn page(
-        &self,
-        contest_id: u64,
-        from: u64,
-        count: u64,
-    ) -> Result<Vec<JudgeSubmission>, CodeforcesError>;
+    fn page(&self, contest_id: u64, from: u64, count: u64) -> Result<Page, CodeforcesError>;
 }
 
 impl Pages for Client {
-    fn page(
-        &self,
-        contest_id: u64,
-        from: u64,
-        count: u64,
-    ) -> Result<Vec<JudgeSubmission>, CodeforcesError> {
-        self.status(contest_id, from, count)
+    fn page(&self, contest_id: u64, from: u64, count: u64) -> Result<Page, CodeforcesError> {
+        let rows = self.status(contest_id, from, count)?;
+        let raw = rows.len();
+        Ok(Page { rows, raw })
     }
 }
 
 impl Pages for vjudge::Client {
-    fn page(
-        &self,
-        contest_id: u64,
-        from: u64,
-        count: u64,
-    ) -> Result<Vec<JudgeSubmission>, CodeforcesError> {
-        self.status(contest_id, from, count)
+    fn page(&self, contest_id: u64, from: u64, count: u64) -> Result<Page, CodeforcesError> {
+        self.list(contest_id, "", from, count)
     }
 }
 
@@ -79,11 +74,11 @@ pub fn poll_once(
         let added = store.add_judge_submissions(
             organization,
             judge.key(),
-            &page,
+            &page.rows,
             OffsetDateTime::now_utc(),
         )?;
         total += added;
-        let short = page.len() < usize::try_from(page_size).unwrap_or(usize::MAX);
+        let short = page.raw < usize::try_from(page_size).unwrap_or(usize::MAX);
         if added == 0 || short {
             return Ok(total);
         }

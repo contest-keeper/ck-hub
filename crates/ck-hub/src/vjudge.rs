@@ -8,6 +8,7 @@ use time::OffsetDateTime;
 
 use crate::codeforces::{CodeforcesError, Judge, STATUS_PAGE};
 use crate::judge::JudgeSubmission;
+use crate::watcher::Page;
 
 #[derive(Deserialize)]
 struct Answer {
@@ -32,10 +33,20 @@ struct Row {
 ///
 /// # Errors
 /// [`CodeforcesError::Malformed`] when the body is not the expected JSON.
+#[cfg(test)]
 pub fn parse_status(body: &str) -> Result<Vec<JudgeSubmission>, CodeforcesError> {
+    parse_page(body).map(|page| page.rows)
+}
+
+/// [`parse_status`] that also tells how many rows the judge sent, for paging.
+///
+/// # Errors
+/// [`CodeforcesError::Malformed`] when the body is not the expected JSON.
+pub fn parse_page(body: &str) -> Result<Page, CodeforcesError> {
     let answer: Answer = serde_json::from_str(body)
         .map_err(|error| CodeforcesError::Malformed(error.to_string()))?;
-    Ok(answer
+    let raw = answer.data.len();
+    let rows = answer
         .data
         .into_iter()
         .filter_map(|row| {
@@ -47,7 +58,8 @@ pub fn parse_status(body: &str) -> Result<Vec<JudgeSubmission>, CodeforcesError>
                 submitted_at: OffsetDateTime::from_unix_timestamp(row.time / 1000).ok()?,
             })
         })
-        .collect())
+        .collect();
+    Ok(Page { rows, raw })
 }
 
 /// Handles are put in a query as they are only when they are plain; anything else is encoded.
@@ -94,7 +106,7 @@ impl Client {
         from: u64,
         count: u64,
     ) -> Result<Vec<JudgeSubmission>, CodeforcesError> {
-        self.list(contest_id, "", from, count)
+        self.list(contest_id, "", from, count).map(|page| page.rows)
     }
 
     /// The newest `count` submissions of one person in a contest, newest first.
@@ -108,15 +120,16 @@ impl Client {
         count: u64,
     ) -> Result<Vec<JudgeSubmission>, CodeforcesError> {
         self.list(contest_id, handle, 1, count)
+            .map(|page| page.rows)
     }
 
-    fn list(
+    pub(crate) fn list(
         &self,
         contest_id: u64,
         handle: &str,
         from: u64,
         count: u64,
-    ) -> Result<Vec<JudgeSubmission>, CodeforcesError> {
+    ) -> Result<Page, CodeforcesError> {
         let url = format!(
             "{}/status/data?draw=1&start={}&length={count}&un={}&OJId=All&probNum=&res=0\
              &language=&onlyFollowee=false&orderBy=run_id&contestId={contest_id}",
@@ -139,7 +152,7 @@ impl Client {
                 "VJudge answered {status}"
             )));
         }
-        parse_status(&body)
+        parse_page(&body)
     }
 }
 
