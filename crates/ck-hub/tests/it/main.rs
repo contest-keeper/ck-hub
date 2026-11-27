@@ -6,6 +6,7 @@ mod codeforces_watcher;
 mod commands;
 mod csrf;
 mod enrol;
+mod follow;
 mod forge_connect;
 mod hostile;
 mod invitation_routes;
