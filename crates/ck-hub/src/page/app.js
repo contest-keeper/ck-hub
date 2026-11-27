@@ -1300,9 +1300,11 @@ async function loadPeople() {
   document.getElementById("people").hidden = !admin;
   document.getElementById("people-denied").hidden = admin;
   if (!admin || !org) { peopleData = null; return; }
+  const requestedOrg = org;
   const roles = rolesBelow(myRole).reverse();
   const base = "/api/v1/orgs/" + encodeURIComponent(org);
   const [members, invitations] = await Promise.all([call("GET", base + "/members"), call("GET", base + "/invitations")]);
+  if (org !== requestedOrg) return;
   if (!members.ok || !invitations.ok) {
     say2("people-msg", "The people list could not be loaded. It will try again.", false);
     return;
@@ -1329,12 +1331,18 @@ async function loadStaff(isStaff) {
   document.getElementById("orgs-summary").textContent = result.data.length + (result.data.length === 1 ? " existing organization" : " existing organizations");
 }
 
+let navGen = 0;
+let refreshFailed = false;
+
 async function refresh() {
   const problem = document.getElementById("problem");
+  const myGen = navGen;
   const page = currentPage();
   try {
     let me = await fetch("/api/v1/me", { cache: "no-store" });
+    if (myGen !== navGen) return;
     if (me.status === 401) {
+      refreshFailed = false;
       downloadsLoaded = false;
       peopleData = null;
       confirmingMember = null;
@@ -1353,9 +1361,11 @@ async function refresh() {
         notice((result.data && result.data.error) || "That invitation did not work.", false);
       }
       me = await fetch("/api/v1/me", { cache: "no-store" });
+      if (myGen !== navGen) return;
     }
     if (!me.ok) throw new Error("HTTP " + me.status);
     const account = await me.json();
+    if (myGen !== navGen) return;
     const orgs = account.organizations;
     const select = document.getElementById("org");
     if (!orgs.some((o) => o.slug === org)) org = orgs.length ? orgs[0].slug : null;
@@ -1373,36 +1383,50 @@ async function refresh() {
     document.getElementById("nav-people").hidden = !(myRole === "owner" || myRole === "admin" || account.staff === true);
     show(page);
     if (page === "forge") {
+      refreshFailed = false;
       problem.style.display = "none";
       showForge(account.email, orgs);
       return;
     }
     if (page === "downloads") {
+      refreshFailed = false;
       problem.style.display = "none";
       if (!downloadsLoaded) await loadImageDownloads();
       return;
     }
-    if (page === "people") await loadStaff(account.staff === true);
+    if (page === "people") {
+      await loadStaff(account.staff === true);
+      if (myGen !== navGen) return;
+    }
     if (!org) {
+      refreshFailed = false;
       sticks = [];
       if (page === "sticks") render();
       if (page === "people") await loadPeople();
+      if (myGen !== navGen) return;
       problem.textContent = "You are not a member of any organization yet. Ask an owner to add you.";
       problem.style.display = "flex";
       return;
     }
     if (page === "people") {
       await loadPeople();
+      if (myGen !== navGen) return;
+      refreshFailed = false;
       problem.style.display = "none";
       return;
     }
     const response = await fetch("/api/v1/orgs/" + encodeURIComponent(org) + "/sticks", { cache: "no-store" });
+    if (myGen !== navGen) return;
     if (!response.ok) throw new Error("HTTP " + response.status);
     sticks = await response.json();
+    if (myGen !== navGen) return;
+    refreshFailed = false;
     render();
     document.getElementById("live-text").textContent = "Live · updated " + new Date().toLocaleTimeString();
     problem.style.display = "none";
   } catch (error) {
+    if (myGen !== navGen) return;
+    refreshFailed = true;
     problem.textContent = page === "sticks" ? "The Hub cannot be reached. The list below is the last one received." : "The Hub cannot be reached. Check the connection; this page tries again by itself.";
     problem.style.display = "flex";
   }
@@ -1573,13 +1597,18 @@ async function openedFromMail() {
   } catch (error) { say("Could not reach the Hub.", false); }
 }
 
-function navigate(path) {
-  if (location.pathname !== path) history.pushState(null, "", path);
+function resetRouteState(guardLogin) {
+  navGen += 1;
   confirmingMember = null;
   peopleData = null;
   say2("people-msg", "", true);
-  show(currentPage());
+  if (!guardLogin || (view && view !== "login")) show(currentPage());
   refresh();
+}
+
+function navigate(path) {
+  if (location.pathname !== path) history.pushState(null, "", path);
+  resetRouteState(false);
 }
 
 const SPA_ROUTES = new Set(["/", "/people", "/download/image"]);
@@ -1595,13 +1624,7 @@ for (const root of [document.getElementById("side"), document.getElementById("ma
   });
 }
 
-window.addEventListener("popstate", () => {
-  confirmingMember = null;
-  peopleData = null;
-  say2("people-msg", "", true);
-  if (view && view !== "login") show(currentPage());
-  refresh();
-});
+window.addEventListener("popstate", () => resetRouteState(true));
 
 setMode("login");
 document.getElementById("search").addEventListener("input", (event) => {
@@ -1623,5 +1646,5 @@ for (const chip of document.querySelectorAll(".chip")) {
 openedFromMail().then(refresh);
 window.addEventListener("hashchange", () => openedFromMail());
 setInterval(() => {
-  if (view === "sticks" || view === "people") refresh();
+  if (view === "sticks" || view === "people" || refreshFailed) refresh();
 }, REFRESH_MS);
