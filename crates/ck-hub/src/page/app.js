@@ -34,7 +34,7 @@ function contestPanel(contest, kind = "codeforces") {
   const box = el("div", "net");
   const key = contestKey(contest, kind);
   const open = openContests.has(key);
-  const toggle = el("button", "", (open ? "Hide" : "Show") + " all submissions of contest " + contest);
+  const toggle = el("button", "btn sm", (open ? "Hide" : "Show") + " contest " + contest);
   toggle.type = "button";
   toggle.dataset.key = "contest-toggle:" + key;
   toggle.addEventListener("click", () => {
@@ -52,7 +52,7 @@ function contestPanel(contest, kind = "codeforces") {
   const data = cached.data;
   if (cached.failed) box.appendChild(el("p", "hint", "The last refresh failed. Showing older data."));
   box.appendChild(el("p", data.suspect ? "bad" : "", data.submissions.length + " on " + judgeName(kind) + ", " + data.matched + " reported by a stick, " + data.suspect + " suspect."));
-  const label = el("label", "", " only the suspect ones");
+  const label = el("label", "check", " Only suspect");
   const check = el("input");
   check.type = "checkbox";
   check.checked = suspectOnly.has(key);
@@ -84,6 +84,7 @@ let filter = "all";
 let query = "";
 let org = null;
 let selected = null;
+let detailTab = "overview";
 
 function ago(seconds) {
   if (seconds < 5) return "just now";
@@ -112,9 +113,14 @@ function cell(row, text, className) {
 }
 
 const isArchived = (stick) => !!stick.archived_at;
-const neverSeen = (stick) => !stick.last;
-const isOffline = (stick) => !stick.online && !!stick.last;
-const needsLook = (stick) => !isArchived(stick) && (stick.warnings.length > 0 || isOffline(stick));
+// A retired key belongs to a stick that was written again: it is out of the way like an archived one.
+const isRetired = (stick) => !!stick.retired_at;
+const isInactive = (stick) => isArchived(stick) || isRetired(stick);
+// Created in Forge, not booted online yet.
+const neverSeen = (stick) => (!stick.activated || !stick.last) && !isInactive(stick);
+const isOffline = (stick) => !stick.online && !!stick.last && !isInactive(stick);
+// Only real warnings. A stick that is just offline has its own chip and pill.
+const needsLook = (stick) => !isInactive(stick) && stick.warnings.length > 0;
 
 // What each warning means in plain words and what to do about it. The Hub's warnings are free text,
 // so a warning it does not know gets a general pointer.
@@ -128,7 +134,7 @@ function fixFor(warning) {
 }
 
 function issuesOf(stick) {
-  if (isArchived(stick)) return [];
+  if (isInactive(stick)) return [];
   const list = [];
   if (isOffline(stick)) {
     list.push({ text: "Offline for " + span(stick.last.seconds_ago), bad: true,
@@ -149,9 +155,9 @@ function rank(stick) {
 }
 
 function matches(stick) {
-  // Archived sticks have a place of their own; everywhere else they are out of the way.
-  if (filter === "archived") return isArchived(stick) && matchesQuery(stick);
-  if (isArchived(stick)) return false;
+  // Archived and retired sticks have a place of their own; everywhere else they are out of the way.
+  if (filter === "archived") return isInactive(stick) && matchesQuery(stick);
+  if (isInactive(stick)) return false;
   return matchesFilter(stick) && matchesQuery(stick);
 }
 
@@ -281,11 +287,10 @@ function proofSection(box, data) {
   const name = judgeName(kind);
   const who = data.handles.length ? " by " + data.handles.join(", ") : "";
   const problems = data.suspect + data.not_on_judge;
-  const summary = el("p", problems ? "bad" : "", data.submissions.length + " reported by the stick" + who + ". " +
-    (problems ? [
-      data.suspect ? data.suspect + " on " + name + " not from this stick, or with a different time" : "",
-      data.not_on_judge ? data.not_on_judge + " reported by the stick but not on " + name : "",
-    ].filter(Boolean).join("; ") + ": CHECK." : "Every " + name + " submission seen was made from this stick."));
+  const summary = el("p", problems ? "bad" : "", data.submissions.length + " from stick" + who + (problems ? " · " + [
+    data.suspect ? data.suspect + " suspect" : "",
+    data.not_on_judge ? data.not_on_judge + " missing on " + name : "",
+  ].filter(Boolean).join(", ") : " · all matched."));
   box.appendChild(summary);
   if (data.judge_note) box.appendChild(el("p", "hint", data.judge_note));
 
@@ -319,7 +324,6 @@ function proofSection(box, data) {
 
 function proofPanel(stick) {
   const box = el("div", "net");
-  box.appendChild(el("h3", "", "Submissions"));
   const cached = proofs.get(stick.stick_id);
   const version = stick.submissions + ":" + stick.network_requests;
   if (!cached || cached.version !== version || Date.now() - cached.at > 30000) fetchProof(stick);
@@ -338,9 +342,8 @@ function proofPanel(stick) {
 
 function networkPanel(stick) {
   const box = el("div", "net");
-  box.appendChild(el("h3", "", "Network history"));
   if (!stick.network_requests) {
-    box.appendChild(el("p", "muted", "Nothing reported yet. The stick sends what its proxy carried or refused every few seconds."));
+    box.appendChild(el("p", "muted", "Nothing reported yet."));
     return box;
   }
   const cached = histories.get(stick.stick_id);
@@ -462,20 +465,9 @@ function act(label, key, onClick, className) {
   return button;
 }
 
-function actionRow(title, hint, button) {
-  const item = el("li");
-  const text = el("div");
-  text.appendChild(el("b", "", title));
-  text.appendChild(el("div", "hint", hint));
-  item.appendChild(text);
-  item.appendChild(button);
-  return item;
-}
-
 // Actions on one stick. Commands need the stick online; the reason is said, not only shown by a grey button.
 function commandPanel(stick) {
   const box = el("div", "stack");
-  box.appendChild(el("h3", "", "Actions"));
   const name = teamName(stick) + " " + (stick.machine_number ?? "");
   const admin = myRole === "owner" || myRole === "admin";
   const draft = draftOf(stick);
@@ -505,19 +497,13 @@ function commandPanel(stick) {
     return box;
   }
   if (!admin) {
-    box.appendChild(el("p", "muted", "Only an admin or an owner can send commands or archive a stick."));
+    box.appendChild(el("p", "muted", "Only an admin or owner can do this."));
     return box;
   }
   const supportsUnlock = stick.last?.screen_unlock === true;
   if (!supportsUnlock && draft.action === "unlock_screen") draft.action = null;
-  const list = el("ul", "list");
-  const rows = [
-    ["lock_screen", "Lock screen", "Shows a lock screen to the contestant until you unlock.", "Lock…"],
-    ["unlock_screen", "Unlock screen", "Lets the contestant use the computer again.", "Unlock…"],
-    ["message", "Message", "Shows a short message on the contestant's screen.", "Send message…"],
-    ["shutdown", "Shut down", "Turns the computer off. Unsaved work is lost, and someone must switch it on again.", "Shut down…"],
-  ];
-  for (const [action, title, hint, label] of rows) {
+  const bar = el("div", "cmd-bar");
+  for (const [action, label] of [["lock_screen", "Lock"], ["unlock_screen", "Unlock"], ["message", "Message"], ["shutdown", "Shut down"]]) {
     if (action === "unlock_screen" && !supportsUnlock) continue;
     const button = act(label, action, () => {
       draft.action = action;
@@ -527,12 +513,13 @@ function commandPanel(stick) {
     });
     button.disabled = draft.busy || !stick.online;
     if (!stick.online) button.setAttribute("aria-describedby", "cmd-off");
-    list.appendChild(actionRow(title, hint, button));
+    bar.appendChild(button);
   }
-  list.appendChild(actionRow("Archive", "Takes it out of the list. It is deleted with its data when the time is up, and you can restore it before then.",
-    act("Archive…", "archive", () => { draft.archiving = true; draft.action = null; render("act:archive-no"); }, "btn sm danger")));
-  box.appendChild(list);
-  if (!stick.online) box.appendChild(el("p", "hint", "Lock, Unlock, Message and Shut down work when the stick is online. This one is not.")).id = "cmd-off";
+  bar.appendChild(act("Archive", "archive", () => { draft.archiving = true; draft.action = null; render("act:archive-no"); }, "btn sm danger"));
+  box.appendChild(bar);
+  if (!stick.online) {
+    box.appendChild(el("p", "hint", isRetired(stick) ? "Key retired. You can still archive it." : "Commands need the stick online.")).id = "cmd-off";
+  }
 
   if (draft.action) {
     const ask = el("div", "cmd-confirm");
@@ -572,7 +559,7 @@ function commandPanel(stick) {
   }
   if (draft.archiving) {
     const ask = el("div", "cmd-confirm");
-    const question = el("p", "", "Archive " + name + "? It stops reporting and is deleted with all its data when the time is up.");
+    const question = el("p", "", "Archive " + name + "? It is deleted with its data when the time is up.");
     question.id = "archive-question";
     ask.appendChild(question);
     const buttons = el("div", "cmd-bar");
@@ -596,7 +583,6 @@ function commandPanel(stick) {
 // What was sent to this stick, and what became of it.
 function commandHistory(stick) {
   const box = el("div", "net");
-  box.appendChild(el("h3", "", "Commands sent"));
   const cached = commandLists.get(stick.stick_id);
   const open = cached && cached.data && cached.data.some((c) => c.state === "queued" || c.state === "delivered");
   if (!cached || Date.now() - cached.at > (open ? 4000 : 30000)) fetchCommands(stick);
@@ -605,7 +591,7 @@ function commandHistory(stick) {
     return box;
   }
   if (!cached.data.length) {
-    box.appendChild(el("p", "muted", "No command has been sent to this stick."));
+    box.appendChild(el("p", "muted", "No commands sent."));
     return box;
   }
   box.appendChild(table(["Time", "Command", "By", "State"],
@@ -641,7 +627,6 @@ async function fetchRecordings(stick) {
 
 function recordingPanel(stick) {
   const box = el("div", "net");
-  box.appendChild(el("h3", "", "Recordings"));
   const cached = recordingLists.get(stick.stick_id);
   if (!cached || Date.now() - cached.at > 30000) fetchRecordings(stick);
   if (!cached || !cached.data) {
@@ -649,7 +634,7 @@ function recordingPanel(stick) {
     return box;
   }
   if (!cached.data.length) {
-    box.appendChild(el("p", "muted", "No recording has been uploaded from this stick. Recordings stay on the stick unless the profile says to upload them."));
+    box.appendChild(el("p", "muted", "No recordings."));
     return box;
   }
   const watch = (r) => {
@@ -738,8 +723,10 @@ function icon(path) {
 
 function statusPill(stick) {
   if (isArchived(stick)) return el("span", "pill new", "Archived");
+  if (isRetired(stick)) return el("span", "pill new", "Key retired");
   if (stick.online) return el("span", "pill on", "Online");
-  return stick.last ? el("span", "pill off", "Offline") : el("span", "pill new", "Not seen yet");
+  if (!stick.activated || !stick.last) return el("span", "pill new", "Not activated");
+  return el("span", "pill off", "Offline");
 }
 
 function selectStick(id, scroll) {
@@ -748,11 +735,19 @@ function selectStick(id, scroll) {
   if (scroll) document.getElementById("detail").scrollIntoView({ block: "nearest" });
 }
 
+const DETAIL_TABS = [
+  ["overview", "Overview"],
+  ["submissions", "Submissions"],
+  ["network", "Network"],
+  ["recordings", "Recordings"],
+  ["commands", "Commands"],
+];
+
 function detailPanel(stick) {
   const box = document.getElementById("detail");
   box.replaceChildren();
   if (!stick) {
-    box.appendChild(el("p", "muted", "Select a stick in the list to see its details and actions."));
+    box.appendChild(el("p", "muted", "Select a stick to see details."));
     return;
   }
   const head = el("div", "row");
@@ -760,6 +755,40 @@ function detailPanel(stick) {
   head.appendChild(el("span", "grow"));
   head.appendChild(statusPill(stick));
   box.appendChild(head);
+
+  const tabs = el("div", "tabs");
+  tabs.setAttribute("role", "tablist");
+  for (const [id, label] of DETAIL_TABS) {
+    const tab = el("button", "", label);
+    tab.type = "button";
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", String(detailTab === id));
+    tab.dataset.key = "tab:" + id;
+    tab.addEventListener("click", () => {
+      detailTab = id;
+      render("tab:" + id);
+    });
+    tabs.appendChild(tab);
+  }
+  box.appendChild(tabs);
+
+  if (detailTab === "submissions") {
+    box.appendChild(proofPanel(stick));
+    return;
+  }
+  if (detailTab === "network") {
+    box.appendChild(networkPanel(stick));
+    return;
+  }
+  if (detailTab === "recordings") {
+    box.appendChild(recordingPanel(stick));
+    return;
+  }
+  if (detailTab === "commands") {
+    box.appendChild(commandHistory(stick));
+    return;
+  }
+
   for (const issue of issuesOf(stick)) {
     const note = el("div", "attn" + (issue.bad ? " bad" : ""));
     const why = el("div", "why");
@@ -768,28 +797,16 @@ function detailPanel(stick) {
     note.appendChild(why);
     box.appendChild(note);
   }
-  if (!isArchived(stick) && neverSeen(stick)) {
+  if (neverSeen(stick)) {
     const note = el("div", "attn");
     const why = el("div", "why");
-    why.appendChild(el("b", "", "Not seen yet"));
-    why.appendChild(el("span", "", "Plug the stick in and start the computer once. It appears here by itself."));
+    why.appendChild(el("b", "", "Not activated"));
+    why.appendChild(el("span", "", "Boot this stick online once to activate it."));
     note.appendChild(why);
     box.appendChild(note);
   }
   box.appendChild(facts(stick));
   box.appendChild(commandPanel(stick));
-}
-
-function morePanel(stick) {
-  const box = document.getElementById("more");
-  box.hidden = !stick;
-  box.replaceChildren();
-  if (!stick) return;
-  box.appendChild(el("h2", "", "More about " + teamName(stick)));
-  box.appendChild(commandHistory(stick));
-  box.appendChild(proofPanel(stick));
-  box.appendChild(networkPanel(stick));
-  box.appendChild(recordingPanel(stick));
 }
 
 // The list is drawn again at every refresh: give the focus back to what had it, and keep the cursor
@@ -832,7 +849,7 @@ function drawSticks() {
   body.replaceChildren();
   const counts = { all: 0, online: 0, offline: 0, attn: 0, new: 0, archived: 0 };
   for (const stick of sticks) {
-    if (isArchived(stick)) { counts.archived += 1; continue; }
+    if (isInactive(stick)) { counts.archived += 1; continue; }
     counts.all += 1;
     if (stick.online) counts.online += 1;
     if (isOffline(stick)) counts.offline += 1;
@@ -842,9 +859,12 @@ function drawSticks() {
   document.getElementById("n-online").textContent = counts.online;
   document.getElementById("n-of").textContent = "of " + counts.all + " online";
   document.getElementById("hero-note").textContent = counts.all === 0
-    ? "No sticks yet. Make one with Keeper Forge and it appears here."
-    : (counts.attn ? counts.attn + (counts.attn === 1 ? " stick needs" : " sticks need") + " a look." : "Nothing needs a look.") +
-      (counts.new ? " " + counts.new + " not seen yet." : "");
+    ? "No sticks yet."
+    : [
+      counts.attn ? counts.attn + (counts.attn === 1 ? " warning" : " warnings") : "No warnings",
+      counts.offline ? counts.offline + " offline" : "",
+      counts.new ? counts.new + " not activated" : "",
+    ].filter(Boolean).join(" · ");
   for (const name of ["all", "attn", "offline", "new", "archived"]) {
     document.getElementById("c-" + name).textContent = counts[name];
   }
@@ -891,16 +911,11 @@ function drawSticks() {
   }
   const empty = document.getElementById("empty");
   empty.hidden = shown.length > 0;
-  empty.textContent = sticks.length
-    ? "No stick matches. Clear the search or pick All."
-    : "No sticks yet. Make one with Keeper Forge and it appears here.";
-  document.getElementById("list-hint").textContent = "Showing " + shown.length + " of " +
-    (filter === "archived" ? counts.archived : counts.all) + " sticks. Problems are listed first.";
+  empty.textContent = sticks.length ? "No matching sticks." : "No sticks yet.";
 
   if (page !== "sticks") return;
   const current = sticks.find((s) => s.stick_id === selected);
   detailPanel(current);
-  morePanel(current);
 }
 
 // Keeper Forge opens /forge/connect?port=..&state=.. . The port and the state are only passed on:

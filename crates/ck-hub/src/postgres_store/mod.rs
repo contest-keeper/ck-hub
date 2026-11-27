@@ -168,9 +168,25 @@ fn mark_retired(
     id: &StickId,
     now: OffsetDateTime,
 ) -> Result<bool, postgres::Error> {
+    // Retiring a pre-registered stick that never activated (such as a cancelled Forge write)
+    // tombstones it right away so no ghost stick stays on the dashboard.
+    let unwritten = transaction.execute(
+        "UPDATE sticks SET credential_scope = NULL, team = '', site = '', contest = '',
+             machine_number = NULL, retired_at = COALESCE(retired_at, $3),
+             archived_at = NULL, delete_after = NULL, deleted_at = $3
+         WHERE organization_id = $1 AND stick_id = $2 AND token = '' AND deleted_at IS NULL",
+        &[&organization, &id.as_str(), &now],
+    )?;
+    if unwritten == 1 {
+        transaction.execute(
+            "DELETE FROM expected_configs WHERE organization_id = $1 AND stick_id = $2",
+            &[&organization, &id.as_str()],
+        )?;
+        return Ok(true);
+    }
     let found = transaction.execute(
         "UPDATE sticks SET retired_at = COALESCE(retired_at, $3)
-         WHERE organization_id = $1 AND stick_id = $2",
+         WHERE organization_id = $1 AND stick_id = $2 AND deleted_at IS NULL",
         &[&organization, &id.as_str(), &now],
     )?;
     Ok(found == 1)
@@ -203,7 +219,8 @@ fn recover_enrolment_claim(
          FROM enrolment_codes c
          JOIN sticks s ON s.stick_id = c.claimed_stick_id AND s.organization_id = c.organization_id
          WHERE c.code_hash = $1 AND c.claimed_stick_id = $2
-           AND c.used_at > $3 AND s.retired_at IS NULL",
+           AND c.used_at > $3 AND s.token <> ''
+           AND s.retired_at IS NULL AND s.archived_at IS NULL AND s.deleted_at IS NULL",
         &[&code_hash, &stick.as_str(), &(now - CLAIM_RECOVERY)],
     )?;
     Ok(match row {
@@ -407,7 +424,7 @@ impl PostgresStore {
                 "UPDATE enrolment_codes SET used_at = $2, claimed_stick_id = $3
                  WHERE code_hash = $1 AND used_at IS NULL AND expires_at > $2
                  RETURNING organization_id, team, site, contest, machine_number, credential_scope,
-                           hardware_fingerprint, hardware_serial_hint",
+                           hardware_fingerprint, hardware_serial_hint, stick_id",
                 &[&code_hash, &now, &claimed],
             )?;
             let Some(row) = used else {
@@ -424,28 +441,48 @@ impl PostgresStore {
             let scope: Option<serde_json::Value> = row.get(5);
             let fingerprint: Option<String> = row.get(6);
             let serial_hint: Option<String> = row.get(7);
+            let pre_registered: Option<String> = row.get(8);
             transaction.execute(
                 "SELECT set_config('ck.org_id', $1, true)",
                 &[&enrolled.organization],
             )?;
-            let added = transaction.execute(
-                "INSERT INTO sticks
-                     (organization_id, stick_id, token, team, site, contest, machine_number, credential_scope)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (stick_id) DO NOTHING",
-                &[
-                    &enrolled.organization,
-                    &stick.as_str(),
-                    &token.expose(),
-                    &enrolled.team,
-                    &enrolled.site,
-                    &enrolled.contest,
-                    &machine,
-                    &scope,
-                ],
-            )?;
-            if added == 0 {
-                transaction.rollback()?;
-                return Ok(Redemption::IdTaken);
+            if let Some(expected) = pre_registered {
+                // A pre-registered stick may only activate its own empty secret via `/enrol/claim`.
+                if !recoverable || stick.as_str() != expected {
+                    transaction.rollback()?;
+                    return Ok(Redemption::Invalid);
+                }
+                let activated = transaction.execute(
+                    "UPDATE sticks SET token = $3
+                     WHERE organization_id = $1 AND stick_id = $2
+                       AND token = '' AND retired_at IS NULL
+                       AND archived_at IS NULL AND deleted_at IS NULL",
+                    &[&enrolled.organization, &stick.as_str(), &token.expose()],
+                )?;
+                if activated == 0 {
+                    transaction.rollback()?;
+                    return Ok(Redemption::Invalid);
+                }
+            } else {
+                let added = transaction.execute(
+                    "INSERT INTO sticks
+                         (organization_id, stick_id, token, team, site, contest, machine_number, credential_scope)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (stick_id) DO NOTHING",
+                    &[
+                        &enrolled.organization,
+                        &stick.as_str(),
+                        &token.expose(),
+                        &enrolled.team,
+                        &enrolled.site,
+                        &enrolled.contest,
+                        &machine,
+                        &scope,
+                    ],
+                )?;
+                if added == 0 {
+                    transaction.rollback()?;
+                    return Ok(Redemption::IdTaken);
+                }
             }
             if let Some(fingerprint) = fingerprint {
                 // The write counts now, when the stick that was written trades its code.

@@ -18,7 +18,7 @@ use crate::store::StoreError;
 /// A code that is not used by then is worthless.
 pub const DEFAULT_LIFETIME_MINUTES: i64 = 60;
 pub const MIN_LIFETIME_MINUTES: i64 = 5;
-pub const MAX_LIFETIME_MINUTES: i64 = 24 * 60;
+pub const MAX_LIFETIME_MINUTES: i64 = 30 * 24 * 60;
 
 /// Codes one person may mint in a minute.
 pub const MAX_MINTS_PER_MINUTE: u32 = 30;
@@ -27,8 +27,9 @@ pub const MAX_MINTS_PER_MINUTE: u32 = 30;
 /// guess, so this only keeps a flood of guesses from costing database work.
 pub const MAX_FAILED_PER_MINUTE: u32 = 30;
 
-/// Codes made and used long ago are removed when a new one is made.
-const KEEP_DAYS: i64 = 1;
+/// Codes made and used long ago are removed when a new one is made. Kept past [`MAX_LIFETIME_MINUTES`]
+/// so a live code is never pruned early.
+const KEEP_DAYS: i64 = 31;
 
 /// Time after the first claim in which the same proof recovers a lost acknowledgement.
 pub(crate) const CLAIM_RECOVERY: Duration = Duration::hours(1);
@@ -53,6 +54,8 @@ pub struct NewEnrolmentCode {
     pub credential_scope: Option<CredentialScope>,
     /// The disk the stick is written to, when Forge says so.
     pub hardware: Option<crate::store::Hardware>,
+    /// The stick id Forge already chose, when the stick should appear as not activated right away.
+    pub stick_id: Option<StickId>,
 }
 
 /// What the Hub knows about the stick a code was made for.
@@ -97,6 +100,7 @@ pub struct Enrolment {
 /// What an admin decides about the stick when minting.
 #[derive(Debug, Default)]
 pub struct EnrolmentSpec {
+    pub stick_id: Option<StickId>,
     pub team: String,
     pub site: String,
     pub contest: String,
@@ -110,6 +114,8 @@ pub struct EnrolmentSpec {
 pub enum EnrolError {
     #[error("{0}")]
     BadRequest(String),
+    #[error("{0}")]
+    Conflict(String),
     #[error("too many requests in a minute")]
     RateLimited,
     /// The code is not valid. The reason is not told.
@@ -273,9 +279,18 @@ impl Hub {
         if let Some(hardware) = &spec.hardware {
             check_hardware(hardware)?;
         }
+        if let Some(stick_id) = &spec.stick_id {
+            let mut registry = self.registry.lock().expect("registry lock");
+            registry.refresh();
+            if registry.find(stick_id).is_some() {
+                return Err(EnrolError::Conflict(
+                    "that stick id is already taken".to_owned(),
+                ));
+            }
+        }
         let (shown, plain) = new_code();
         let expires_at = now + Duration::minutes(minutes);
-        self.store.add_enrolment_code(
+        let added = self.store.add_enrolment_code(
             organization,
             NewEnrolmentCode {
                 code_hash: hash_of(&plain),
@@ -288,8 +303,14 @@ impl Hub {
                 expires_at,
                 credential_scope: spec.credential_scope,
                 hardware: spec.hardware,
+                stick_id: spec.stick_id,
             },
         )?;
+        if !added {
+            return Err(EnrolError::Conflict(
+                "that stick id is already taken".to_owned(),
+            ));
+        }
         self.store
             .delete_enrolment_codes_before(organization, now - Duration::days(KEEP_DAYS))?;
         Ok(MintedCode {

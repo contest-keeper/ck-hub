@@ -125,7 +125,10 @@ impl MemoryStore {
                     .get(stick)
                     .is_some_and(|(owner, stored)| {
                         owner == &kept.organization
+                            && !stored.token.expose().is_empty()
                             && stored.retired_at.is_none()
+                            && stored.archived_at.is_none()
+                            && stored.deleted_at.is_none()
                             && &stored.token == token
                     })
             {
@@ -137,25 +140,44 @@ impl MemoryStore {
             return Redemption::Invalid;
         }
         let mut sticks = self.sticks.lock().expect("sticks lock");
-        if sticks.contains_key(stick) {
-            return Redemption::IdTaken;
+        if let Some(expected) = &kept.code.stick_id {
+            // A pre-registered stick may only activate its own empty secret via `/enrol/claim`.
+            if !recoverable || stick != expected {
+                return Redemption::Invalid;
+            }
+            let Some((owner, stored)) = sticks.get_mut(stick) else {
+                return Redemption::Invalid;
+            };
+            if owner != &kept.organization
+                || !stored.token.expose().is_empty()
+                || stored.retired_at.is_some()
+                || stored.archived_at.is_some()
+                || stored.deleted_at.is_some()
+            {
+                return Redemption::Invalid;
+            }
+            stored.token = token.clone();
+        } else {
+            if sticks.contains_key(stick) {
+                return Redemption::IdTaken;
+            }
+            let made = Stick {
+                stick_id: stick.clone(),
+                token: token.clone(),
+                credential_scope: kept.code.credential_scope.clone(),
+                retired_at: None,
+                archived_at: None,
+                delete_after: None,
+                deleted_at: None,
+                team: kept.code.team.clone(),
+                site: kept.code.site.clone(),
+                contest: kept.code.contest.clone(),
+                machine_number: kept.code.machine_number,
+            };
+            sticks.insert(stick.clone(), (kept.organization.clone(), made));
         }
         kept.used_at = Some(now);
         kept.claimed_stick_id = recoverable.then(|| stick.clone());
-        let made = Stick {
-            stick_id: stick.clone(),
-            token: token.clone(),
-            credential_scope: kept.code.credential_scope.clone(),
-            retired_at: None,
-            archived_at: None,
-            delete_after: None,
-            deleted_at: None,
-            team: kept.code.team.clone(),
-            site: kept.code.site.clone(),
-            contest: kept.code.contest.clone(),
-            machine_number: kept.code.machine_number,
-        };
-        sticks.insert(stick.clone(), (kept.organization.clone(), made));
         if let Some(hardware) = &kept.code.hardware {
             // The write counts now, when the stick that was written trades its code.
             let mut rows = self.hardware.lock().expect("hardware lock");
@@ -768,8 +790,31 @@ impl Store for MemoryStore {
         let Some((owner, stick)) = sticks.get_mut(id) else {
             return Ok(false);
         };
-        if owner != organization {
+        if owner != organization || stick.deleted_at.is_some() {
             return Ok(false);
+        }
+        // Retiring a pre-registered stick that never activated (such as a cancelled Forge write)
+        // tombstones it right away so no ghost stick stays on the dashboard.
+        if stick.token.expose().is_empty() {
+            *stick = Stick {
+                stick_id: id.clone(),
+                token: Token::new(String::new()),
+                credential_scope: None,
+                retired_at: Some(now),
+                archived_at: None,
+                delete_after: None,
+                deleted_at: Some(now),
+                team: String::new(),
+                site: String::new(),
+                contest: String::new(),
+                machine_number: None,
+            };
+            drop(sticks);
+            self.expected_configs
+                .lock()
+                .expect("expected configs lock")
+                .remove(&(organization.to_owned(), id.clone()));
+            return Ok(true);
         }
         stick.retired_at.get_or_insert(now);
         Ok(true)
@@ -953,8 +998,13 @@ impl Store for MemoryStore {
             .expect("codes lock")
             .values_mut()
         {
-            if kept.organization == organization && kept.claimed_stick_id.as_ref() == Some(id) {
-                kept.claimed_stick_id = None;
+            if kept.organization == organization {
+                if kept.claimed_stick_id.as_ref() == Some(id) {
+                    kept.claimed_stick_id = None;
+                }
+                if kept.code.stick_id.as_ref() == Some(id) {
+                    kept.code.stick_id = None;
+                }
             }
         }
         Ok(true)
@@ -1162,8 +1212,34 @@ impl Store for MemoryStore {
         &self,
         organization: &str,
         code: NewEnrolmentCode,
-    ) -> Result<(), StoreError> {
-        self.enrolment_codes.lock().expect("codes lock").insert(
+    ) -> Result<bool, StoreError> {
+        let mut codes = self.enrolment_codes.lock().expect("codes lock");
+        if let Some(stick_id) = &code.stick_id {
+            let mut sticks = self.sticks.lock().expect("sticks lock");
+            if sticks.contains_key(stick_id) {
+                return Ok(false);
+            }
+            sticks.insert(
+                stick_id.clone(),
+                (
+                    organization.to_owned(),
+                    Stick {
+                        stick_id: stick_id.clone(),
+                        token: Token::new(String::new()),
+                        credential_scope: code.credential_scope.clone(),
+                        retired_at: None,
+                        archived_at: None,
+                        delete_after: None,
+                        deleted_at: None,
+                        team: code.team.clone(),
+                        site: code.site.clone(),
+                        contest: code.contest.clone(),
+                        machine_number: code.machine_number,
+                    },
+                ),
+            );
+        }
+        codes.insert(
             code.code_hash.clone(),
             KeptCode {
                 organization: organization.to_owned(),
@@ -1172,7 +1248,7 @@ impl Store for MemoryStore {
                 claimed_stick_id: None,
             },
         );
-        Ok(())
+        Ok(true)
     }
 
     fn redeem_enrolment_code(

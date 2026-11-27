@@ -4,7 +4,7 @@ use super::{Client, StoreError, failed};
 
 /// The schema, in the order it is applied. A migration that was applied is never run again and
 /// never edited: a change is a new file.
-pub(super) const MIGRATIONS: [(&str, &str); 23] = [
+pub(super) const MIGRATIONS: [(&str, &str); 24] = [
     (
         "0001_heartbeats_and_events",
         include_str!("../../migrations/0001_heartbeats_and_events.sql"),
@@ -96,6 +96,10 @@ pub(super) const MIGRATIONS: [(&str, &str); 23] = [
     (
         "0023_events_once",
         include_str!("../../migrations/0023_events_once.sql"),
+    ),
+    (
+        "0024_enrolment_stick_id",
+        include_str!("../../migrations/0024_enrolment_stick_id.sql"),
     ),
 ];
 
