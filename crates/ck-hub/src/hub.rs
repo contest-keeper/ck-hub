@@ -765,7 +765,9 @@ impl Hub {
             .into_iter()
             .filter(|event| event.judge == kind && event.contest_id == contest_id && event.accepted)
             .collect();
-        Ok(contest::view(contest_id, &judged, &events))
+        let mut view = contest::view(contest_id, &judged, &events);
+        view.site = kind.site();
+        Ok(view)
     }
 
     /// Every stick of the organization, with its last heartbeat when it has sent one.

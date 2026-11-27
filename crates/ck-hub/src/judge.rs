@@ -45,6 +45,16 @@ impl JudgeKind {
         }
     }
 
+    /// Where the judge's pages are. The Hub page builds its links from this, so no address is
+    /// written in the page itself.
+    #[must_use]
+    pub const fn site(self) -> &'static str {
+        match self {
+            Self::Codeforces => "https://codeforces.com",
+            Self::Vjudge => "https://vjudge.net",
+        }
+    }
+
     #[must_use]
     pub fn from_key(key: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.key() == key)

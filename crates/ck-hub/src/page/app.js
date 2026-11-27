@@ -67,9 +67,9 @@ function contestPanel(contest, kind = "codeforces") {
   box.appendChild(proofTable(["Time", "User", "Problem", "Submission", "Stick", "Matched by"],
     shown.map((s) => [[
       new Date(s.submitted_at).toLocaleTimeString(),
-      handleLink(s.handles[0], kind),
+      handleLink(s.handles[0], kind, data.site),
       s.problem,
-      submissionLink(data.contest_id, s.submission_id, kind),
+      submissionLink(data.contest_id, s.submission_id, kind, data.site),
       s.stick_id || "SUSPECT: no stick reported it",
       s.matched_by ? (s.matched_by === "id" ? "id" : "time (" + s.time_gap_s + " s apart)") : "—",
     ], s.suspect ? "refused" : "ok"])));
@@ -230,9 +230,6 @@ async function fetchProof(stick) {
   render();
 }
 
-// Written in two parts: the page must hold no outside address as text; these are only links people click.
-const CODEFORCES = "https" + "://codeforces.com";
-
 function link(text, address) {
   const a = el("a", "", text);
   a.href = address;
@@ -241,23 +238,23 @@ function link(text, address) {
   return a;
 }
 
-const VJUDGE = "https://vjudge.net";
 const judgeName = (kind) => (kind === "vjudge" ? "VJudge" : "Codeforces");
 
 // A handle is shown as a link only when it is made of what a judge's handle is made of.
-function handleLink(handle, kind = "codeforces") {
+// `site` is where the judge's pages are; the Hub sends it with the data, so no address is written here.
+function handleLink(handle, kind, site) {
   if (!handle) return document.createTextNode("—");
   if (!/^[A-Za-z0-9_.-]{1,24}$/.test(handle)) return document.createTextNode(handle);
-  return link(handle, kind === "vjudge" ? VJUDGE + "/user/" + handle : CODEFORCES + "/profile/" + handle);
+  return link(handle, site + (kind === "vjudge" ? "/user/" : "/profile/") + handle);
 }
 
-function contestLink(contest, kind = "codeforces") {
+function contestLink(contest, site) {
   if (!contest) return document.createTextNode("—");
-  return link(String(contest), (kind === "vjudge" ? VJUDGE : CODEFORCES) + "/contest/" + contest);
+  return link(String(contest), site + "/contest/" + contest);
 }
 
-function submissionLink(contest, id, kind = "codeforces") {
-  return link("#" + id, kind === "vjudge" ? VJUDGE + "/solution/" + id : CODEFORCES + "/contest/" + contest + "/submission/" + id);
+function submissionLink(contest, id, kind, site) {
+  return link("#" + id, site + (kind === "vjudge" ? "/solution/" + id : "/contest/" + contest + "/submission/" + id));
 }
 
 function proofTable(head, rows) {
@@ -297,12 +294,12 @@ function proofSection(box, data) {
     box.appendChild(proofTable(["Time", "User", "Contest", "Problem", "Language", "Source", "On " + name],
       data.submissions.map((s) => [[
         new Date(s.received_at).toLocaleTimeString(),
-        handleLink(s.handle, kind),
-        contestLink(s.contest_id, kind),
+        handleLink(s.handle, kind, data.site),
+        contestLink(s.contest_id, data.site),
         s.problem || "—",
         s.language || "—",
         s.source_sha256 ? s.source_sha256 + (s.source_bytes ? " (" + s.source_bytes + " B" + (s.source_cut ? ", cut" : "") + ")" : "") : "—",
-        !s.accepted ? "refused by the site" : s.judge_id ? submissionLink(s.contest_id, s.judge_id, kind) : s.not_on_judge ? "NOT on " + name : "not found yet",
+        !s.accepted ? "refused by the site" : s.judge_id ? submissionLink(s.contest_id, s.judge_id, kind, data.site) : s.not_on_judge ? "NOT on " + name : "not found yet",
       ], !s.accepted ? "" : s.judge_id ? "ok" : s.not_on_judge ? "refused" : "unconfirmed"])));
   }
   if (data.judge.length) {
@@ -310,10 +307,10 @@ function proofSection(box, data) {
     box.appendChild(proofTable(["Time", "User", "Contest", "Problem", "Submission", "From this stick"],
       data.judge.map((j) => [[
         new Date(j.submitted_at).toLocaleTimeString(),
-        handleLink(j.handles[0], kind),
-        contestLink(j.contest_id, kind),
+        handleLink(j.handles[0], kind, data.site),
+        contestLink(j.contest_id, data.site),
         j.problem,
-        submissionLink(j.contest_id, j.submission_id, kind),
+        submissionLink(j.contest_id, j.submission_id, kind, data.site),
         j.from_stick ? (j.time_off ? "yes, but its time is " + Math.abs(j.time_gap_s) + " s off" : "yes") : "SUSPECT: the stick did not report it",
       ], j.suspect ? "refused" : "ok"])));
   }

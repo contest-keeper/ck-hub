@@ -31,8 +31,9 @@ const MAX_ROWS: usize = 200;
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct SubmissionsView {
-    /// The judge these are about.
+    /// The judge these are about, and where its pages are.
     pub kind: JudgeKind,
+    pub site: &'static str,
     /// What the stick reported, newest first.
     pub submissions: Vec<StickSubmission>,
     /// What the judge says these people submitted since they logged in on the stick, newest first.
@@ -428,6 +429,7 @@ pub fn view_of(
 
     SubmissionsView {
         kind,
+        site: kind.site(),
         vjudge: None,
         submissions,
         judge: rows,

@@ -1026,6 +1026,9 @@ async fn a_vjudge_submit_is_matched_by_run_id_and_the_judges_own_time_apart_from
     let stick: serde_json::Value = serde_json::from_str(&text).expect("json");
     assert_eq!(stick["submissions"].as_array().expect("rows").len(), 0);
     assert_eq!(stick["vjudge"]["kind"], "vjudge");
+    // The page builds its links from the address the Hub sends, so none is written in the page.
+    assert_eq!(stick["vjudge"]["site"], "https://vjudge.net");
+    assert_eq!(stick["site"], "https://codeforces.com");
     assert_eq!(stick["vjudge"]["submissions"][0]["problem"], "C");
 }
 
