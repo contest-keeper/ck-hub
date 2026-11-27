@@ -63,6 +63,9 @@ struct ServeArgs {
     /// `cargo run -p ck-crypto --example config_key` prints. Without it Forge cannot get settings signed
     #[arg(long, env = "CK_CONFIG_SIGNING_KEY", hide_env_values = true)]
     config_signing_key: Option<String>,
+    /// Base64 of 32 bytes: encrypts the Wi-Fi passwords kept in profiles. Without it none is kept.
+    #[arg(long, env = "CK_SECRET_KEY", hide_env_values = true)]
+    secret_key: Option<String>,
     /// A file to add one line to for every heartbeat, accepted or not. No secrets go in it
     #[arg(long)]
     log: Option<PathBuf>,
@@ -570,6 +573,17 @@ async fn run(args: ServeArgs) -> Result<(), String> {
     }
     if let Some(key) = settings_signing_key(args.config_signing_key.as_deref())? {
         hub = hub.with_config_signing_key(key);
+    }
+    let secret_key = args
+        .secret_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty());
+    if let Some(text) = secret_key {
+        hub = hub.with_secret_key(ck_hub::SecretBox::from_base64(text)?);
+        tracing::info!("profile Wi-Fi passwords are kept encrypted");
+    } else {
+        tracing::info!("no CK_SECRET_KEY: profile Wi-Fi passwords are not kept");
     }
     // Public contests need no key, so this is always possible; the key and secret are not used.
     hub = hub.with_judge(Arc::new(CodeforcesClient::new(

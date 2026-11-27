@@ -190,6 +190,8 @@ pub struct Hub {
     pub(crate) sign_rates: Mutex<HashMap<String, (OffsetDateTime, u32)>>,
     /// The key stick settings are signed with, when the Hub has one.
     pub(crate) config_key: Option<ck_crypto::ConfigSigningKey>,
+    /// Keeps the Wi-Fi password of a profile encrypted, when the Hub has a key.
+    pub(crate) secrets: Option<crate::secrets::SecretBox>,
     /// Per user: enrolment codes made in the current minute.
     pub(crate) enrol_mints: Mutex<HashMap<String, (OffsetDateTime, u32)>>,
     /// Failed enrolments of everyone together: when the current minute started and how many.
@@ -259,7 +261,15 @@ impl Hub {
             judged: Mutex::new(HashMap::new()),
             sign_rates: Mutex::new(HashMap::new()),
             config_key: None,
+            secrets: None,
         }
+    }
+
+    /// Lets the Hub keep the Wi-Fi password of a profile, encrypted with this key.
+    #[must_use]
+    pub fn with_secret_key(mut self, key: crate::secrets::SecretBox) -> Self {
+        self.secrets = Some(key);
+        self
     }
 
     /// Lets the Hub ask the judge what people submitted, to compare with what sticks reported.

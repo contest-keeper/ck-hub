@@ -141,10 +141,12 @@ impl Hub {
                 })
             }
         };
+        let mut settings = input.settings;
+        self.seal_wifi_password(organization, id, &mut settings);
         let profile = NewProfile {
             id: id.to_owned(),
             name: name.to_owned(),
-            settings: input.settings,
+            settings,
             wallpaper,
         };
         self.store
@@ -156,8 +158,59 @@ impl Hub {
         self.store.profiles(organization)
     }
 
+    /// The profile as an admin's Forge needs it: the Wi-Fi password is decrypted, and only here.
     pub fn profile(&self, organization: &str, id: &str) -> Result<Option<Profile>, StoreError> {
-        self.store.profile(organization, id)
+        let mut profile = self.store.profile(organization, id)?;
+        if let Some(profile) = &mut profile
+            && let Some(wifi) = wifi_of(&mut profile.settings)
+            && let Some(sealed) = wifi.remove(SEALED)
+        {
+            let plain = sealed
+                .as_str()
+                .zip(self.secrets.as_ref())
+                .and_then(|(sealed, key)| key.open(&aad(organization, id), sealed));
+            if let Some(plain) = plain {
+                wifi.insert("password".to_owned(), plain.into());
+            }
+        }
+        Ok(profile)
+    }
+
+    /// Replaces a typed Wi-Fi password in `settings` by its encrypted form. Without a typed one the
+    /// earlier password stays while the network is the same one. Without a key nothing is kept, so
+    /// a password is never stored in the clear.
+    fn seal_wifi_password(&self, organization: &str, id: &str, settings: &mut serde_json::Value) {
+        let Some(wifi) = wifi_of(settings) else {
+            return;
+        };
+        wifi.remove(SEALED);
+        let typed = wifi
+            .remove("password")
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .filter(|p| !p.is_empty());
+        let Some(key) = &self.secrets else {
+            return;
+        };
+        let aad = aad(organization, id);
+        let sealed = if let Some(plain) = typed {
+            key.seal(&aad, &plain)
+        } else {
+            let ssid = wifi.get("ssid").cloned();
+            self.store
+                .profile(organization, id)
+                .ok()
+                .flatten()
+                .and_then(|mut earlier| {
+                    let old = wifi_of(&mut earlier.settings)?;
+                    if old.get("ssid") != ssid.as_ref() {
+                        return None;
+                    }
+                    old.get(SEALED)?.as_str().map(str::to_owned)
+                })
+        };
+        if let Some(sealed) = sealed {
+            wifi.insert(SEALED.to_owned(), sealed.into());
+        }
     }
 
     pub fn profile_wallpaper(
@@ -171,6 +224,18 @@ impl Hub {
     pub fn delete_profile(&self, organization: &str, id: &str) -> Result<bool, StoreError> {
         self.store.delete_profile(organization, id)
     }
+}
+
+const SEALED: &str = "password_enc";
+
+fn aad(organization: &str, id: &str) -> String {
+    format!("{organization}/{id}")
+}
+
+fn wifi_of(
+    settings: &mut serde_json::Value,
+) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
+    settings.get_mut("wifi")?.as_object_mut()
 }
 
 fn wallpaper_too_large() -> String {
