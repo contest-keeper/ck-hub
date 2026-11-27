@@ -901,10 +901,13 @@ impl Store for PostgresStore {
                 "DELETE FROM commands WHERE organization_id = $1 AND stick_id = $2",
                 "DELETE FROM recordings WHERE organization_id = $1 AND stick_id = $2",
                 "DELETE FROM expected_configs WHERE organization_id = $1 AND stick_id = $2",
+                "DELETE FROM enrolment_codes
+                 WHERE organization_id = $1 AND stick_id = $2 AND used_at IS NULL",
                 "UPDATE enrolment_codes SET
                      claimed_stick_id = CASE WHEN claimed_stick_id = $2 THEN NULL ELSE claimed_stick_id END,
                      stick_id = CASE WHEN stick_id = $2 THEN NULL ELSE stick_id END
-                 WHERE organization_id = $1 AND (claimed_stick_id = $2 OR stick_id = $2)",
+                 WHERE organization_id = $1 AND used_at IS NOT NULL
+                   AND (claimed_stick_id = $2 OR stick_id = $2)",
             ] {
                 transaction.execute(table, &args)?;
             }

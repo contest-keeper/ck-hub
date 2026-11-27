@@ -287,10 +287,13 @@ function proofSection(box, data) {
   const name = judgeName(kind);
   const who = data.handles.length ? " by " + data.handles.join(", ") : "";
   const problems = data.suspect + data.not_on_judge;
-  const summary = el("p", problems ? "bad" : "", data.submissions.length + " from stick" + who + (problems ? " · " + [
+  const pending = data.submissions.filter((s) => s.accepted && !s.judge_id && !s.not_on_judge).length;
+  const details = [
     data.suspect ? data.suspect + " suspect" : "",
     data.not_on_judge ? data.not_on_judge + " missing on " + name : "",
-  ].filter(Boolean).join(", ") : " · all matched."));
+    pending ? pending + " waiting for " + name : "",
+  ].filter(Boolean);
+  const summary = el("p", problems ? "bad" : "", data.submissions.length + " from stick" + who + (details.length ? " · " + details.join(", ") : " · all matched."));
   box.appendChild(summary);
   if (data.judge_note) box.appendChild(el("p", "hint", data.judge_note));
 
@@ -756,13 +759,16 @@ function detailPanel(stick) {
   head.appendChild(statusPill(stick));
   box.appendChild(head);
 
+  const activeTab = DETAIL_TABS.some(([id]) => id === detailTab) ? detailTab : "overview";
   const tabs = el("div", "tabs");
   tabs.setAttribute("role", "tablist");
   for (const [id, label] of DETAIL_TABS) {
     const tab = el("button", "", label);
     tab.type = "button";
+    tab.id = "detail-tab-" + id;
     tab.setAttribute("role", "tab");
-    tab.setAttribute("aria-selected", String(detailTab === id));
+    tab.setAttribute("aria-selected", String(activeTab === id));
+    tab.setAttribute("aria-controls", "detail-panel");
     tab.dataset.key = "tab:" + id;
     tab.addEventListener("click", () => {
       detailTab = id;
@@ -772,41 +778,40 @@ function detailPanel(stick) {
   }
   box.appendChild(tabs);
 
-  if (detailTab === "submissions") {
-    box.appendChild(proofPanel(stick));
-    return;
+  let panel;
+  if (activeTab === "submissions") {
+    panel = proofPanel(stick);
+  } else if (activeTab === "network") {
+    panel = networkPanel(stick);
+  } else if (activeTab === "recordings") {
+    panel = recordingPanel(stick);
+  } else if (activeTab === "commands") {
+    panel = commandHistory(stick);
+  } else {
+    panel = el("div", "stack");
+    for (const issue of issuesOf(stick)) {
+      const note = el("div", "attn" + (issue.bad ? " bad" : ""));
+      const why = el("div", "why");
+      why.appendChild(el("b", "", issue.text));
+      why.appendChild(el("span", "", issue.fix));
+      note.appendChild(why);
+      panel.appendChild(note);
+    }
+    if (neverSeen(stick)) {
+      const note = el("div", "attn");
+      const why = el("div", "why");
+      why.appendChild(el("b", "", "Not activated"));
+      why.appendChild(el("span", "", "Boot this stick online once to activate it."));
+      note.appendChild(why);
+      panel.appendChild(note);
+    }
+    panel.appendChild(facts(stick));
+    panel.appendChild(commandPanel(stick));
   }
-  if (detailTab === "network") {
-    box.appendChild(networkPanel(stick));
-    return;
-  }
-  if (detailTab === "recordings") {
-    box.appendChild(recordingPanel(stick));
-    return;
-  }
-  if (detailTab === "commands") {
-    box.appendChild(commandHistory(stick));
-    return;
-  }
-
-  for (const issue of issuesOf(stick)) {
-    const note = el("div", "attn" + (issue.bad ? " bad" : ""));
-    const why = el("div", "why");
-    why.appendChild(el("b", "", issue.text));
-    why.appendChild(el("span", "", issue.fix));
-    note.appendChild(why);
-    box.appendChild(note);
-  }
-  if (neverSeen(stick)) {
-    const note = el("div", "attn");
-    const why = el("div", "why");
-    why.appendChild(el("b", "", "Not activated"));
-    why.appendChild(el("span", "", "Boot this stick online once to activate it."));
-    note.appendChild(why);
-    box.appendChild(note);
-  }
-  box.appendChild(facts(stick));
-  box.appendChild(commandPanel(stick));
+  panel.id = "detail-panel";
+  panel.setAttribute("role", "tabpanel");
+  panel.setAttribute("aria-labelledby", "detail-tab-" + activeTab);
+  box.appendChild(panel);
 }
 
 // The list is drawn again at every refresh: give the focus back to what had it, and keep the cursor

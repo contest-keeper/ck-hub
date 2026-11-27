@@ -938,6 +938,8 @@ impl Store for MemoryStore {
         id: &StickId,
         now: OffsetDateTime,
     ) -> Result<bool, StoreError> {
+        // Lock `enrolment_codes` before `sticks`, matching `add_enrolment_code` and `use_enrolment_code`.
+        let mut codes = self.enrolment_codes.lock().expect("codes lock");
         let mut sticks = self.sticks.lock().expect("sticks lock");
         let Some((owner, stick)) = sticks.get_mut(id) else {
             return Ok(false);
@@ -958,6 +960,22 @@ impl Store for MemoryStore {
             contest: String::new(),
             machine_number: None,
         };
+        codes.retain(|_, kept| {
+            !(kept.organization == organization
+                && kept.code.stick_id.as_ref() == Some(id)
+                && kept.used_at.is_none())
+        });
+        for kept in codes.values_mut() {
+            if kept.organization == organization {
+                if kept.claimed_stick_id.as_ref() == Some(id) {
+                    kept.claimed_stick_id = None;
+                }
+                if kept.code.stick_id.as_ref() == Some(id) {
+                    kept.code.stick_id = None;
+                }
+            }
+        }
+        drop(codes);
         let key = (organization.to_owned(), id.clone());
         self.heartbeats
             .lock()
@@ -992,21 +1010,6 @@ impl Store for MemoryStore {
             .lock()
             .expect("recordings lock")
             .retain(|(org, recording)| !(org == organization && recording.stick_id == id.as_str()));
-        for kept in self
-            .enrolment_codes
-            .lock()
-            .expect("codes lock")
-            .values_mut()
-        {
-            if kept.organization == organization {
-                if kept.claimed_stick_id.as_ref() == Some(id) {
-                    kept.claimed_stick_id = None;
-                }
-                if kept.code.stick_id.as_ref() == Some(id) {
-                    kept.code.stick_id = None;
-                }
-            }
-        }
         Ok(true)
     }
 

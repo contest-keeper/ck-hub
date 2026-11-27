@@ -1483,6 +1483,111 @@ fn preregistered_enrolment_contract(store: &dyn Store) {
     );
     let (_, tomb) = store.stick(&ghost).expect("read").expect("tombstone");
     assert!(tomb.deleted_at.is_some());
+
+    preregistered_deletion_contract(store);
+}
+
+fn preregistered_deletion_contract(store: &dyn Store) {
+    use ck_hub::{NewEnrolmentCode, Redemption};
+
+    let code = unique();
+    let org = store
+        .create_organization(&code, "Pre-registered deletion")
+        .expect("write")
+        .expect("organization");
+    let token = Token::new("claimed-client-token-for-preregistered");
+    let make_code = |hash: &str, stick_id: Option<StickId>| NewEnrolmentCode {
+        code_hash: hash.to_owned(),
+        created_by_user_id: "u-1".to_owned(),
+        team: "Team Pre".to_owned(),
+        site: "Hall 1".to_owned(),
+        contest: "Final".to_owned(),
+        machine_number: Some(8),
+        created_at: time(0),
+        expires_at: time(600),
+        credential_scope: None,
+        hardware: None,
+        stick_id,
+    };
+
+    // Deleting an unactivated pre-registered stick invalidates its unused reserved code so it
+    // cannot be reclaimed with the original stick ID or a fresh unrestricted stick ID.
+    let unactivated = StickId::parse(&format!("{code}-unactivated")).expect("unactivated");
+    let unactivated_code = format!("{code}-u");
+    assert!(
+        store
+            .add_enrolment_code(
+                &org.id,
+                make_code(&unactivated_code, Some(unactivated.clone()))
+            )
+            .expect("mint")
+    );
+    assert!(
+        store
+            .archive_stick(&org.id, &unactivated, None, time(21), time(100))
+            .expect("archive unactivated")
+    );
+    assert!(
+        store
+            .delete_stick(&org.id, &unactivated, time(22))
+            .expect("delete unactivated")
+    );
+    assert_eq!(
+        store
+            .claim_enrolment_code(&unactivated_code, time(23), &unactivated, &token)
+            .expect("claim original"),
+        Redemption::Invalid
+    );
+    let fresh = StickId::parse(&format!("{code}-fresh")).expect("fresh");
+    assert_eq!(
+        store
+            .claim_enrolment_code(&unactivated_code, time(23), &fresh, &token)
+            .expect("claim fresh"),
+        Redemption::Invalid
+    );
+    assert_eq!(
+        store
+            .redeem_enrolment_code(&unactivated_code, time(23), &fresh, &token)
+            .expect("redeem fresh"),
+        Redemption::Invalid
+    );
+
+    // Deleting an activated pre-registered stick keeps its already-used code refused as well.
+    let activated = StickId::parse(&format!("{code}-activated")).expect("activated");
+    let activated_code = format!("{code}-a");
+    assert!(
+        store
+            .add_enrolment_code(&org.id, make_code(&activated_code, Some(activated.clone())))
+            .expect("mint activated")
+    );
+    assert!(matches!(
+        store
+            .claim_enrolment_code(&activated_code, time(23), &activated, &token)
+            .expect("claim activated"),
+        Redemption::Done(_)
+    ));
+    assert!(
+        store
+            .archive_stick(&org.id, &activated, None, time(24), time(100))
+            .expect("archive activated")
+    );
+    assert!(
+        store
+            .delete_stick(&org.id, &activated, time(25))
+            .expect("delete activated")
+    );
+    assert_eq!(
+        store
+            .claim_enrolment_code(&activated_code, time(26), &activated, &token)
+            .expect("reclaim activated"),
+        Redemption::Invalid
+    );
+    assert_eq!(
+        store
+            .claim_enrolment_code(&activated_code, time(26), &fresh, &token)
+            .expect("reclaim activated as fresh"),
+        Redemption::Invalid
+    );
 }
 
 fn recoverable_enrolment_contract(store: &dyn Store) {
