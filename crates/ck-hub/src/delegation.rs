@@ -137,31 +137,13 @@ impl Delegation {
     }
 
     fn token(&self) -> Result<String, String> {
-        let mut url = format!(
-            "{}?api-version=2019-08-01&resource=https%3A%2F%2Fstorage.azure.com%2F",
-            self.endpoints.identity
-        );
-        if let Some(client_id) = &self.client_id {
-            url.push_str("&client_id=");
-            url.push_str(&crate::download::encode(client_id));
-        }
-        let mut response = self
-            .agent
-            .get(&url)
-            .header("X-IDENTITY-HEADER", &self.endpoints.identity_header)
-            .call()
-            .map_err(|_| "the identity endpoint cannot be reached".to_owned())?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "the identity endpoint answered {}",
-                response.status().as_u16()
-            ));
-        }
-        let text = response
-            .body_mut()
-            .read_to_string()
-            .map_err(|_| "the identity answer cannot be read".to_owned())?;
-        parse_token(&text)
+        identity_token(
+            &self.agent,
+            &self.endpoints.identity,
+            &self.endpoints.identity_header,
+            self.client_id.as_deref(),
+            "https://storage.azure.com/",
+        )
     }
 
     fn fetch_key(&self, token: &str, now: OffsetDateTime) -> Result<DelegationKey, String> {
@@ -192,6 +174,41 @@ impl Delegation {
             .map_err(|_| "the storage answer cannot be read".to_owned())?;
         parse_key(&text)
     }
+}
+
+/// A token of the managed identity for `resource`, from the endpoint Container Apps provides.
+/// The error never holds a token.
+pub(crate) fn identity_token(
+    agent: &ureq::Agent,
+    identity: &str,
+    identity_header: &str,
+    client_id: Option<&str>,
+    resource: &str,
+) -> Result<String, String> {
+    let mut url = format!(
+        "{identity}?api-version=2019-08-01&resource={}",
+        crate::download::encode(resource)
+    );
+    if let Some(client_id) = client_id {
+        url.push_str("&client_id=");
+        url.push_str(&crate::download::encode(client_id));
+    }
+    let mut response = agent
+        .get(&url)
+        .header("X-IDENTITY-HEADER", identity_header)
+        .call()
+        .map_err(|_| "the identity endpoint cannot be reached".to_owned())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "the identity endpoint answered {}",
+            response.status().as_u16()
+        ));
+    }
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|_| "the identity answer cannot be read".to_owned())?;
+    parse_token(&text)
 }
 
 fn format_time(at: OffsetDateTime) -> String {
