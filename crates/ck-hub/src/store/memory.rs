@@ -230,7 +230,11 @@ impl Store for MemoryStore {
             .lock()
             .expect("boot times lock")
             .entry(boot)
-            .and_modify(|(_, last)| *last = received_at)
+            // Queued heartbeats do not come in the order of their times.
+            .and_modify(|(first, last)| {
+                *first = (*first).min(received_at);
+                *last = (*last).max(received_at);
+            })
             .or_insert((received_at, received_at));
         let key = (organization.to_owned(), heartbeat.stick_id.clone());
         let mut heartbeats = self.heartbeats.lock().expect("heartbeats lock");

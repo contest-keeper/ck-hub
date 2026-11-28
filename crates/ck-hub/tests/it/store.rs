@@ -2129,6 +2129,18 @@ fn late_arrival_contract(store: &dyn Store) {
     assert_eq!(seen.received_at, time(20));
     assert_eq!(seen.count, 2);
 
+    // A newer heartbeat with an earlier time widens the span and never turns it round.
+    store
+        .record_heartbeat(&org, heartbeat(&id, "second", 2), time(15))
+        .expect("recorded");
+    let span = store
+        .boot_spans(&org, &stick, time(0))
+        .expect("spans")
+        .into_iter()
+        .find(|span| span.boot_id == "second")
+        .expect("the boot");
+    assert_eq!((span.first_seen, span.last_seen), (time(15), time(20)));
+
     for at in [5, 30] {
         store
             .saw_boot(&org, &stick, "second", time(at))

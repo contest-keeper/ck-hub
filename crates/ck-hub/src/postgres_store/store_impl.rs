@@ -44,8 +44,10 @@ impl Store for PostgresStore {
                          (organization_id, stick_id, boot_id, seq, first_seen, last_seen)
                      VALUES ($1, $2, $3, $4, $5, $5)
                      ON CONFLICT (stick_id, boot_id) DO UPDATE SET
-                         seq = EXCLUDED.seq, last_seen = EXCLUDED.last_seen,
-                         first_seen = COALESCE(heartbeat_boots.first_seen, EXCLUDED.first_seen)
+                         seq = EXCLUDED.seq,
+                         -- Queued heartbeats do not come in the order of their times.
+                         last_seen = GREATEST(heartbeat_boots.last_seen, EXCLUDED.last_seen),
+                         first_seen = LEAST(heartbeat_boots.first_seen, EXCLUDED.first_seen)
                      WHERE heartbeat_boots.organization_id = EXCLUDED.organization_id
                        AND heartbeat_boots.seq < EXCLUDED.seq
                      RETURNING organization_id, stick_id, boot_id, seq

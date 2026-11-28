@@ -201,6 +201,12 @@ fn write(url: &str, identity: &Inbox, body: &[u8]) -> Result<(), String> {
 
 /// Whether the Hub answers, asked at most once in [`PROBE_REUSED`].
 async fn hub_up(ingress: Arc<Ingress>) -> bool {
+    // A task of its own: a viewer who leaves must not free the lock while the question is still out,
+    // or each one after them would ask again.
+    tokio::spawn(ask_hub(ingress)).await.unwrap_or(false)
+}
+
+async fn ask_hub(ingress: Arc<Ingress>) -> bool {
     // Held while asking, so many viewers at once cause one request.
     let mut probe = ingress.status.probe.lock().await;
     if let Some((at, up)) = *probe
