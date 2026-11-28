@@ -1,7 +1,7 @@
 //! What the Hub knows about the sticks, and the rules for accepting a heartbeat.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::Write;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -49,6 +49,9 @@ pub const MAX_EVENTS_PER_BOOT: u64 = 50_000;
 /// secret, cannot fill the database. The Hub counts them per stick in memory (read once from the
 /// store), so the check is exact for every event and costs no query.
 pub const MAX_EVENTS_PER_STICK: u64 = 200_000;
+
+/// Kept with an event that came through the queue, in the place of a chain problem.
+const QUEUED: &str = "queued while the Hub was down";
 
 /// How many locks the sticks share to keep their own messages in order.
 const WRITE_LOCKS: usize = 64;
@@ -128,6 +131,8 @@ pub struct StickView {
     pub submission_problems: usize,
     /// Things an organizer should look at: a chain problem, two users on one stick.
     pub warnings: Vec<String>,
+    /// Things worth knowing that ask nothing of anyone, like reports that waited out an outage.
+    pub notes: Vec<String>,
 }
 
 /// What the Hub knows about the physical disk of a stick.
@@ -213,6 +218,8 @@ pub struct Hub {
     pub(crate) clock: Box<dyn Fn() -> OffsetDateTime + Send + Sync>,
     /// Where the submissions of a person in a contest are asked, once set up.
     pub(crate) judges: HashMap<JudgeKind, Arc<dyn Judge>>,
+    /// What the proxy in front of the Hub proves itself with, when there is one.
+    pub(crate) ingress_secret: Option<String>,
     /// The people the Hub keeps asking the judges about.
     pub(crate) follows: Follows,
     /// What the judge answered lately, so a page that refreshes does not ask again each time.
@@ -224,6 +231,13 @@ impl Hub {
     #[must_use]
     pub fn with_download(mut self, download: Download) -> Self {
         self.download = Some(download);
+        self
+    }
+
+    /// Trusts the client address and host name a proxy sends along with this secret.
+    #[must_use]
+    pub fn with_ingress_secret(mut self, secret: String) -> Self {
+        self.ingress_secret = Some(secret);
         self
     }
 
@@ -262,6 +276,7 @@ impl Hub {
             clock,
             judges: HashMap::new(),
             follows: Follows::default(),
+            ingress_secret: None,
             judged: Mutex::new(HashMap::new()),
             sign_rates: Mutex::new(HashMap::new()),
             config_key: None,
@@ -334,7 +349,7 @@ impl Hub {
         signature: Option<&str>,
         body: &[u8],
     ) -> Result<(u64, Vec<SignedCommand>), Rejection> {
-        let result = self.check(stick_header, signature, body);
+        let result = self.check(stick_header, signature, body, None);
         let logged = result
             .as_ref()
             .map(|(seq, _, _, _)| *seq)
@@ -349,15 +364,40 @@ impl Hub {
         Ok((seq, commands))
     }
 
+    /// Takes in a heartbeat that waited in the queue because the Hub could not be reached. It counts
+    /// as received at `received_at`, so a stick is not shown online for an old heartbeat and a
+    /// message sent inside its contest window is not refused after the window closed. The per-minute
+    /// limit is for live sticks, not for a backlog. No commands are handed out: nobody reads a reply.
+    ///
+    /// Only the queue may name the time: a stick that could would get around its window.
+    pub fn replay_heartbeat(
+        &self,
+        stick_header: Option<&str>,
+        signature: Option<&str>,
+        body: &[u8],
+        received_at: OffsetDateTime,
+    ) -> Result<u64, Rejection> {
+        let result = self
+            .check(stick_header, signature, body, Some(received_at))
+            .map(|(seq, _, _, _)| seq);
+        self.record(&result, "accepted", "sequence not newer", stick_header);
+        result
+    }
+
+    /// `queued_at` is set for a message from the queue: when it was received.
     fn check(
         &self,
         stick_header: Option<&str>,
         signature: Option<&str>,
         body: &[u8],
+        queued_at: Option<OffsetDateTime>,
     ) -> Result<(u64, String, StickId, bool), Rejection> {
+        let received_at = queued_at.unwrap_or_else(|| (self.clock)());
         let (organization, id, _) =
-            self.authenticate(stick_header, signature, body, Duration::ZERO)?;
-        self.rate_limit(&id)?;
+            self.authenticate_at(stick_header, signature, body, received_at, Duration::ZERO)?;
+        if queued_at.is_none() {
+            self.rate_limit(&id)?;
+        }
         let heartbeat: Heartbeat = serde_json::from_slice(body)
             .map_err(|_| Rejection::BadRequest("the heartbeat cannot be read"))?;
         if heartbeat.stick_id != id {
@@ -368,10 +408,17 @@ impl Hub {
         let _one_at_a_time = self.write_lock(&id);
         let seq = heartbeat.seq;
         let screen_unlock = heartbeat.screen_unlock;
+        let boot = heartbeat.boot_id.clone();
         if let Some(top) = self
             .store
-            .record_heartbeat(&organization, heartbeat, (self.clock)())?
+            .record_heartbeat(&organization, heartbeat, received_at)?
         {
+            // Not newer, but from the queue it still says the boot was alive then, which is what
+            // shows one stick running in two places.
+            if queued_at.is_some() {
+                self.store
+                    .saw_boot(&organization, &id, &boot, received_at)?;
+            }
             return Err(Rejection::Conflict(format!(
                 "sequence {seq} is not newer than {top}"
             )));
@@ -412,12 +459,23 @@ impl Hub {
         body: &[u8],
         grace: Duration,
     ) -> Result<(String, StickId, Option<CredentialScope>), Rejection> {
+        self.authenticate_at(stick_header, signature, body, (self.clock)(), grace)
+    }
+
+    /// [`authenticate`](Self::authenticate) for a message received at `received_at`.
+    fn authenticate_at(
+        &self,
+        stick_header: Option<&str>,
+        signature: Option<&str>,
+        body: &[u8],
+        received_at: OffsetDateTime,
+        grace: Duration,
+    ) -> Result<(String, StickId, Option<CredentialScope>), Rejection> {
         let (Some(stick_header), Some(signature)) = (stick_header, signature) else {
             return Err(Rejection::BadRequest("a header is missing"));
         };
         let id = StickId::parse(stick_header)
             .map_err(|_| Rejection::BadRequest("the stick header is not a stick id"))?;
-        let received_at = (self.clock)();
         let Some((organization, token, scope)) = self.stick_secret(&id)? else {
             return Err(Rejection::Unauthorized);
         };
@@ -584,7 +642,28 @@ impl Hub {
         signature: Option<&str>,
         body: &[u8],
     ) -> Result<u64, Rejection> {
-        let result = self.check_event(stick_header, signature, body);
+        let result = self.check_event(stick_header, signature, body, None);
+        self.record(
+            &result,
+            "event accepted",
+            "event already received",
+            stick_header,
+        );
+        result
+    }
+
+    /// Takes in an event that waited in the queue, as [`replay_heartbeat`](Self::replay_heartbeat)
+    /// does. A newer event may have reached the Hub directly in the meantime, and the stick has
+    /// already dropped its copy of this one, so an older event is kept (with a note) unless the Hub
+    /// has that very one.
+    pub fn replay_event(
+        &self,
+        stick_header: Option<&str>,
+        signature: Option<&str>,
+        body: &[u8],
+        received_at: OffsetDateTime,
+    ) -> Result<u64, Rejection> {
+        let result = self.check_event(stick_header, signature, body, Some(received_at));
         self.record(
             &result,
             "event accepted",
@@ -599,10 +678,14 @@ impl Hub {
         stick_header: Option<&str>,
         signature: Option<&str>,
         body: &[u8],
+        queued_at: Option<OffsetDateTime>,
     ) -> Result<u64, Rejection> {
+        let received_at = queued_at.unwrap_or_else(|| (self.clock)());
         let (organization, id, scope) =
-            self.authenticate(stick_header, signature, body, Duration::ZERO)?;
-        self.rate_limit(&id)?;
+            self.authenticate_at(stick_header, signature, body, received_at, Duration::ZERO)?;
+        if queued_at.is_none() {
+            self.rate_limit(&id)?;
+        }
         let event: Event = serde_json::from_slice(body)
             .map_err(|_| Rejection::BadRequest("the event cannot be read"))?;
         if event.stick_id != id {
@@ -620,7 +703,8 @@ impl Hub {
         let last_of_boot = last_of_boot.as_ref();
         // A repeat is answered as a conflict whatever the budgets say: the stick counts that as sent,
         // while a 429 would keep it queued.
-        if last_of_boot.is_some_and(|last| event.seq <= last.event.seq) {
+        let older = last_of_boot.is_some_and(|last| event.seq <= last.event.seq);
+        if older && queued_at.is_none() {
             return Err(Rejection::Conflict(format!(
                 "event {} was already received",
                 event.seq
@@ -631,32 +715,23 @@ impl Hub {
         {
             return Err(Rejection::TooManyRequests);
         }
-        let integrity = match last_of_boot {
-            Some(last) if event.seq > last.event.seq + 1 => {
-                Some("an event is missing before this one")
-            }
-            Some(last)
-                if event.prev_hash != ck_crypto::sha256_hex(&last.event.canonical_bytes()) =>
-            {
-                Some("this event does not follow the one before it")
-            }
-            // The first event of a boot, or the first the Hub has seen after it restarted.
-            None if event.seq == 1 && event.prev_hash == FIRST_PREV_HASH => None,
-            None if event.seq == 1 => Some("the first event of a boot names a previous one"),
-            None => Some("the Hub has no earlier events of this boot"),
-            Some(_) => None,
+        // A queued event is only marked: what it follows may still be on the way.
+        let integrity = if queued_at.is_some() {
+            Some(QUEUED)
+        } else {
+            chain_problem(&event, last_of_boot.map(|last| &last.event))
         };
         let seq = event.seq;
         let ack_event = (event.kind == EventKind::CommandAck).then(|| event.clone());
         let follow = StoredEvent {
-            received_at: (self.clock)(),
+            received_at,
             event: event.clone(),
             integrity: None,
         };
         let stored = match self.store.append_event(
             &organization,
             event,
-            (self.clock)(),
+            received_at,
             integrity.map(str::to_owned),
         ) {
             Ok(stored) => stored,
@@ -673,7 +748,7 @@ impl Hub {
             }
             self.follow_event(&organization, &follow);
             if let Some(event) = ack_event {
-                self.apply_ack(&organization, &id, &event);
+                self.apply_ack(&organization, &id, &event, received_at);
             }
         }
         Ok(seq)
@@ -897,6 +972,7 @@ impl Hub {
                 submissions: stored.iter().filter(|s| taken(s)).count(),
                 last_submission: last_submission(&stored),
                 submission_problems,
+                notes: outage_note(&stored).into_iter().collect(),
                 warnings: {
                     let mut found = warnings(&stored, boot.as_deref());
                     found.extend(problem_warning(submission_problems));
@@ -1146,16 +1222,77 @@ fn warnings(stored: &[StoredEvent], boot: Option<&str>) -> Vec<String> {
             distinct.join(", ")
         ));
     }
-    for item in stored {
-        if let Some(problem) = &item.integrity {
-            let text = format!(
-                "event {} of boot {}: {problem}",
-                item.event.seq, item.event.boot_id
-            );
-            if !found.contains(&text) {
-                found.push(text);
-            }
+    found.extend(chain_warnings(stored));
+    found
+}
+
+/// What is wrong with `event` when `previous` is the closest earlier event kept of its boot.
+fn chain_problem(event: &Event, previous: Option<&Event>) -> Option<&'static str> {
+    match previous {
+        Some(last) if event.seq > last.seq + 1 => Some("an event is missing before this one"),
+        Some(last) if event.prev_hash != ck_crypto::sha256_hex(&last.canonical_bytes()) => {
+            Some("this event does not follow the one before it")
+        }
+        // The first event of a boot, or the first the Hub has seen after it restarted.
+        None if event.seq == 1 && event.prev_hash == FIRST_PREV_HASH => None,
+        None if event.seq == 1 => Some("the first event of a boot names a previous one"),
+        None => Some("the Hub has no earlier events of this boot"),
+        Some(_) => None,
+    }
+}
+
+/// The chain problems that are still there. The note kept with an event says what was true when it
+/// arrived, and an event from the queue can fill a gap later, so every noted event is judged again
+/// against what is kept now. An event out of order is always a noted one.
+///
+/// shortcut: hashes every noted event at each list; keep the outcome when long outages make the
+/// list slow.
+fn chain_warnings(stored: &[StoredEvent]) -> Vec<String> {
+    if stored.iter().all(|item| item.integrity.is_none()) {
+        return Vec::new();
+    }
+    let kept: BTreeMap<(&str, u64), &Event> = stored
+        .iter()
+        .map(|item| ((item.event.boot_id.as_str(), item.event.seq), &item.event))
+        .collect();
+    let mut found = Vec::new();
+    for item in stored.iter().filter(|item| item.integrity.is_some()) {
+        let event = &item.event;
+        let boot = event.boot_id.as_str();
+        let previous = kept
+            .range((boot, 0)..(boot, event.seq))
+            .next_back()
+            .map(|(_, event)| *event);
+        if let Some(problem) = chain_problem(event, previous) {
+            found.push(format!("event {} of boot {boot}: {problem}", event.seq));
         }
     }
     found
+}
+
+/// Says that the Hub was down, when reports of the stick waited in the queue.
+fn outage_note(stored: &[StoredEvent]) -> Option<String> {
+    let mut queued: Vec<OffsetDateTime> = stored
+        .iter()
+        .filter(|item| item.integrity.as_deref() == Some(QUEUED))
+        .map(|item| item.received_at)
+        .collect();
+    queued.sort();
+    // A quiet stretch separates two outages; the latest is the one said.
+    let start = queued
+        .windows(2)
+        .rposition(|pair| pair[1] - pair[0] > Duration::minutes(10))
+        .map_or(0, |at| at + 1);
+    let queued = &queued[start..];
+    let (first, last) = (queued.first()?, queued.last()?);
+    let clock = |at: &OffsetDateTime| {
+        let at = at.to_offset(time::UtcOffset::UTC);
+        format!("{} {:02}:{:02}", at.date(), at.hour(), at.minute())
+    };
+    Some(format!(
+        "Keeper Hub was down: {} reports from this stick, sent between {} and {} UTC, arrived afterwards",
+        queued.len(),
+        clock(first),
+        clock(last)
+    ))
 }

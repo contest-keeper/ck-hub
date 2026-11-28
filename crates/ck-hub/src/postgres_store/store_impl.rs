@@ -11,6 +11,24 @@ use super::{
 };
 
 impl Store for PostgresStore {
+    fn saw_boot(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        boot: &str,
+        at: OffsetDateTime,
+    ) -> Result<(), StoreError> {
+        self.in_org(organization, |transaction| {
+            transaction.execute(
+                "UPDATE heartbeat_boots
+                 SET first_seen = LEAST(first_seen, $4), last_seen = GREATEST(last_seen, $4)
+                 WHERE organization_id = $1 AND stick_id = $2 AND boot_id = $3",
+                &[&organization, &stick.as_str(), &boot, &at],
+            )
+        })
+        .map(|_| ())
+    }
+
     fn record_heartbeat(
         &self,
         organization: &str,
@@ -26,8 +44,10 @@ impl Store for PostgresStore {
                          (organization_id, stick_id, boot_id, seq, first_seen, last_seen)
                      VALUES ($1, $2, $3, $4, $5, $5)
                      ON CONFLICT (stick_id, boot_id) DO UPDATE SET
-                         seq = EXCLUDED.seq, last_seen = EXCLUDED.last_seen,
-                         first_seen = COALESCE(heartbeat_boots.first_seen, EXCLUDED.first_seen)
+                         seq = EXCLUDED.seq,
+                         -- Queued heartbeats do not come in the order of their times.
+                         last_seen = GREATEST(heartbeat_boots.last_seen, EXCLUDED.last_seen),
+                         first_seen = LEAST(heartbeat_boots.first_seen, EXCLUDED.first_seen)
                      WHERE heartbeat_boots.organization_id = EXCLUDED.organization_id
                        AND heartbeat_boots.seq < EXCLUDED.seq
                      RETURNING organization_id, stick_id, boot_id, seq
@@ -36,8 +56,15 @@ impl Store for PostgresStore {
                      (organization_id, stick_id, boot_id, seq, received_at, count, heartbeat)
                  SELECT organization_id, stick_id, boot_id, seq, $5, 1, $6 FROM newer_boot
                  ON CONFLICT (stick_id) DO UPDATE SET
-                     boot_id = EXCLUDED.boot_id, seq = EXCLUDED.seq,
-                     received_at = EXCLUDED.received_at, heartbeat = EXCLUDED.heartbeat,
+                     -- A queued heartbeat of an earlier boot is counted but does not replace a
+                     -- later one.
+                     boot_id = CASE WHEN heartbeats.received_at > EXCLUDED.received_at
+                         THEN heartbeats.boot_id ELSE EXCLUDED.boot_id END,
+                     seq = CASE WHEN heartbeats.received_at > EXCLUDED.received_at
+                         THEN heartbeats.seq ELSE EXCLUDED.seq END,
+                     heartbeat = CASE WHEN heartbeats.received_at > EXCLUDED.received_at
+                         THEN heartbeats.heartbeat ELSE EXCLUDED.heartbeat END,
+                     received_at = GREATEST(heartbeats.received_at, EXCLUDED.received_at),
                      count = heartbeats.count + 1
                  WHERE heartbeats.organization_id = EXCLUDED.organization_id",
                 &[
@@ -139,7 +166,7 @@ impl Store for PostgresStore {
             transaction.query_opt(
                 "SELECT event, received_at, integrity FROM events
                  WHERE organization_id = $1 AND stick_id = $2 AND boot_id = $3
-                 ORDER BY id DESC LIMIT 1",
+                 ORDER BY seq DESC LIMIT 1",
                 &[&organization, &stick.as_str(), &boot],
             )
         })?;
@@ -195,7 +222,7 @@ impl Store for PostgresStore {
         let rows = self.in_org(organization, |transaction| {
             transaction.query(
                 "SELECT event, received_at, integrity FROM events
-                 WHERE organization_id = $1 AND stick_id = $2 ORDER BY id",
+                 WHERE organization_id = $1 AND stick_id = $2 ORDER BY received_at, id",
                 &[&organization, &stick.as_str()],
             )
         })?;
@@ -284,7 +311,7 @@ impl Store for PostgresStore {
         let rows = self.in_org(organization, |transaction| {
             transaction.query(
                 "SELECT event, received_at, integrity FROM events
-                 WHERE organization_id = $1 AND event->>'kind' = 'submission' ORDER BY id",
+                 WHERE organization_id = $1 AND event->>'kind' = 'submission' ORDER BY received_at, id",
                 &[&organization],
             )
         })?;

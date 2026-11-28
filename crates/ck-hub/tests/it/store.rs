@@ -2087,8 +2087,77 @@ fn repeat_event_contract(store: &dyn Store) {
     assert_eq!(store.event_count(&org, &stick).expect("count"), 1);
 }
 
+/// What waited in the queue is stored after newer messages, but belongs where it was received.
+fn late_arrival_contract(store: &dyn Store) {
+    let org = store
+        .ensure_organization(&unique(), "Late")
+        .expect("organization")
+        .id;
+    let id = unique();
+    let stick = StickId::parse(&id).expect("id");
+    for (seq, received) in [(2, 20), (1, 10)] {
+        store
+            .append_event(&org, event(&id, seq, "ana"), time(received), None)
+            .expect("kept");
+    }
+    let order: Vec<u64> = store
+        .events(&org, &stick)
+        .expect("read")
+        .iter()
+        .map(|stored| stored.event.seq)
+        .collect();
+    assert_eq!(order, [1, 2]);
+    let last = store
+        .last_event_of_boot(&org, &stick, "boot-1")
+        .expect("read")
+        .expect("an event");
+    assert_eq!(last.event.seq, 2);
+
+    // A later boot reports first, then the queue brings the earlier boot.
+    for (boot, received) in [("second", 20), ("first", 10)] {
+        let heartbeat = heartbeat(&id, boot, 1);
+        let refused = store
+            .record_heartbeat(&org, heartbeat, time(received))
+            .expect("recorded");
+        assert_eq!(refused, None);
+    }
+    let seen = store
+        .last_heartbeat(&org, &stick)
+        .expect("read")
+        .expect("a heartbeat");
+    assert_eq!(seen.heartbeat.boot_id, "second");
+    assert_eq!(seen.received_at, time(20));
+    assert_eq!(seen.count, 2);
+
+    // A newer heartbeat with an earlier time widens the span and never turns it round.
+    store
+        .record_heartbeat(&org, heartbeat(&id, "second", 2), time(15))
+        .expect("recorded");
+    let span = store
+        .boot_spans(&org, &stick, time(0))
+        .expect("spans")
+        .into_iter()
+        .find(|span| span.boot_id == "second")
+        .expect("the boot");
+    assert_eq!((span.first_seen, span.last_seen), (time(15), time(20)));
+
+    for at in [5, 30] {
+        store
+            .saw_boot(&org, &stick, "second", time(at))
+            .expect("seen");
+    }
+    let span = store
+        .boot_spans(&org, &stick, time(0))
+        .expect("spans")
+        .into_iter()
+        .find(|span| span.boot_id == "second")
+        .expect("the boot");
+    assert_eq!((span.first_seen, span.last_seen), (time(5), time(30)));
+}
+
 #[test]
 fn the_memory_store_keeps_its_contract() {
+    late_arrival_contract(&MemoryStore::default());
     repeat_event_contract(&MemoryStore::default());
     last_owner_contract(Arc::new(MemoryStore::default()));
     enrolment_contract(&MemoryStore::default());
@@ -2111,6 +2180,7 @@ fn the_memory_store_keeps_its_contract() {
 fn the_postgres_store_keeps_its_contract() {
     let Some(url) = database_url() else { return };
     let store = PostgresStore::connect(&url).expect("connect");
+    late_arrival_contract(&store);
     last_owner_contract(Arc::new(PostgresStore::connect(&url).expect("connect")));
     repeat_event_contract(&store);
     enrolment_contract(&store);
