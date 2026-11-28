@@ -9,8 +9,8 @@ Generated with cargo-about from Cargo.lock. Do not edit by hand: run
 
 Licences used
 -------------
-Apache License 2.0  (172 crates)
-MIT License  (32 crates)
+Apache License 2.0  (179 crates)
+MIT License  (35 crates)
 ISC License  (23 crates)
 BSD 3-Clause "New" or "Revised" License  (4 crates)
 Unicode License v3  (3 crates)
@@ -453,6 +453,7 @@ Used by:
   - tinyvec 1.13.3  https://github.com/Lokathor/tinyvec
   - ureq-proto 0.7.1  https://github.com/algesten/ureq-proto
   - zeroize 1.9.1  https://github.com/RustCrypto/utils
+  - zeroize_derive 1.5.0  https://github.com/RustCrypto/utils
 
 
                                  Apache License
@@ -1827,6 +1828,7 @@ Used by:
   - anstyle-wincon 3.0.11  https://github.com/rust-cli/anstyle.git
   - anstyle 1.0.14  https://github.com/rust-cli/anstyle.git
   - colorchoice 1.0.5  https://github.com/rust-cli/anstyle.git
+  - crc32fast 1.5.6  https://github.com/srijs/rust-crc32fast
   - fallible-iterator 0.2.0  https://github.com/sfackler/rust-fallible-iterator
   - hex 0.4.3  https://github.com/KokaKiwi/rust-hex
   - is_terminal_polyfill 1.70.2  https://github.com/polyfill-rs/is_terminal_polyfill
@@ -3313,10 +3315,13 @@ Used by:
   - bumpalo 3.20.3  https://github.com/fitzgen/bumpalo
   - cfg-if 1.0.5  https://github.com/rust-lang/cfg-if
   - curve25519-dalek-derive 0.1.1  https://github.com/dalek-cryptography/curve25519-dalek
+  - equivalent 1.0.3  https://github.com/indexmap-rs/equivalent
   - errno 0.3.15  https://github.com/lambda-fairy/rust-errno
   - form_urlencoded 1.2.2  https://github.com/servo/rust-url
+  - hashbrown 0.17.2  https://github.com/rust-lang/hashbrown
   - heck 0.5.0  https://github.com/withoutboats/heck
   - httparse 1.10.1  https://github.com/seanmonstar/httparse
+  - indexmap 2.14.2  https://github.com/indexmap-rs/indexmap
   - js-sys 0.3.107  https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys
   - lazy_static 1.5.1  https://github.com/rust-lang-nursery/lazy-static.rs
   - lock_api 0.4.14  https://github.com/Amanieu/parking_lot
@@ -4634,6 +4639,7 @@ Used by:
   - ck-crypto 0.1.0  https://github.com/contest-keeper/ck-protocol
   - ck-hub 0.1.0  https://github.com/contest-keeper/ck-hub
   - async-trait 0.1.92  https://github.com/dtolnay/async-trait
+  - constant_time_eq 0.6.2  https://codeberg.org/cesarb/constant_time_eq
   - fiat-crypto 0.2.9  https://github.com/mit-plv/fiat-crypto
   - itoa 1.0.19  https://github.com/dtolnay/itoa
   - libc 0.2.191  https://github.com/rust-lang/libc
@@ -4662,6 +4668,7 @@ Used by:
   - time-core 0.1.9  https://github.com/time-rs/time
   - time-macros 0.2.32  https://github.com/time-rs/time
   - time 0.3.55  https://github.com/time-rs/time
+  - typed-path 0.13.0  https://github.com/chipsenkbeil/typed-path
   - unicode-ident 1.0.27  https://github.com/dtolnay/unicode-ident
   - utf8-zero 0.8.1  https://github.com/algesten/utf8-zero
   - utf8parse 0.2.2  https://github.com/alacritty/vte
@@ -6232,6 +6239,7 @@ MIT License
 ================================================================================
 
 Used by:
+  - tokio-stream 0.1.19  https://github.com/tokio-rs/tokio
   - tokio-util 0.7.20  https://github.com/tokio-rs/tokio
   - tokio 1.54.1  https://github.com/tokio-rs/tokio
 
@@ -6296,6 +6304,7 @@ MIT License
 
 Used by:
   - tracing-core 0.1.36  https://github.com/tokio-rs/tracing
+  - zip 9.9.0  https://github.com/zip-rs/zip2
 
 The MIT License (MIT)
 
@@ -6361,6 +6370,36 @@ Used by:
 The MIT License (MIT)
 
 Copyright (c) 2015 Andrew Gallant
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+
+================================================================================
+MIT License
+================================================================================
+
+Used by:
+  - nix 0.32.0  https://github.com/nix-rust/nix
+
+The MIT License (MIT)
+
+Copyright (c) 2015 Carl Lerche + nix-rust Authors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
