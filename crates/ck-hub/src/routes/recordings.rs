@@ -1,9 +1,16 @@
 //! Recordings: the upload protocol sticks use and the links organizers watch them from.
 
+use std::io::Write as _;
+
+use axum::body::Body;
+use axum::extract::Query;
+use axum::http::header::{CONTENT_DISPOSITION, CONTENT_SECURITY_POLICY, CONTENT_TYPE};
+use serde::Deserialize;
+
 use super::{
-    Access, Arc, Bytes, CACHE_CONTROL, CHUNK_BYTES, HeaderMap, Hub, IntoResponse, Json, LOCATION,
-    Path, RecordingError, Response, Role, State, StatusCode, UploadStatus, auth_headers, denied,
-    json, require_in, unavailable,
+    Access, Arc, Bytes, CACHE_CONTROL, CHUNK_BYTES, HeaderMap, Hub, IntoResponse, Json, Path,
+    RecordingError, Response, Role, State, StatusCode, UploadStatus, auth_headers, denied, json,
+    require_in, unavailable,
 };
 
 /// Chunks of recordings in flight at once, in the whole Hub. Each one is held in memory while it is
@@ -165,32 +172,146 @@ pub(super) async fn show_recordings(hub: Arc<Hub>, access: Access, id: String) -
     }
 }
 
-/// Sends a member of the organization to a read-only link to a complete recording. The link works
-/// for a couple of hours and shows the file as the type the Hub chose, so the file's own claims
-/// about itself never matter. A browser follows it in its own tab, so the Hub page needs no more
-/// permission than it has.
+/// What a browser needs to be handed bytes: how many bytes go to the browser before the sender
+/// waits for it to catch up.
+const STREAM_BUFFER_CHUNKS: usize = 4;
+const STREAM_CHUNK_BYTES: usize = 64 * 1024;
+
+/// A body filled by `fill` on a blocking thread, a piece at a time, so a big recording never sits
+/// in memory. When the person closes the page the next write fails and `fill` stops.
+fn streamed(fill: impl FnOnce(&mut ChannelWriter) -> std::io::Result<()> + Send + 'static) -> Body {
+    let (sender, receiver) = tokio::sync::mpsc::channel(STREAM_BUFFER_CHUNKS);
+    tokio::task::spawn_blocking(move || {
+        let mut writer = ChannelWriter {
+            sender,
+            buffer: Vec::with_capacity(STREAM_CHUNK_BYTES),
+        };
+        let done = fill(&mut writer).and_then(|()| writer.flush());
+        if let Err(error) = done {
+            // The body ends in an error, which makes the browser drop the file instead of
+            // keeping half of it as if it were whole.
+            let _ = writer.sender.blocking_send(Err(error));
+        }
+    });
+    Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(receiver))
+}
+
+struct ChannelWriter {
+    sender: tokio::sync::mpsc::Sender<std::io::Result<Bytes>>,
+    buffer: Vec<u8>,
+}
+
+impl std::io::Write for ChannelWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.buffer.extend_from_slice(data);
+        if self.buffer.len() >= STREAM_CHUNK_BYTES {
+            self.flush()?;
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let chunk = Bytes::from(std::mem::take(&mut self.buffer));
+        self.sender
+            .blocking_send(Ok(chunk))
+            .map_err(|_| std::io::Error::other("the person left"))
+    }
+}
+
+#[derive(Deserialize)]
+pub(super) struct ViewQuery {
+    /// `?download=1` saves the file instead of showing it.
+    download: Option<String>,
+}
+
+/// Serves a complete recording of the organization through the Hub, so the storage address never
+/// reaches the browser. The file is shown as the type the Hub chose, so the file's own claims
+/// about itself never matter, and the page is locked down so a file cannot run anything.
 pub(super) async fn view_recording(
     State(hub): State<Arc<Hub>>,
     Path((slug, recording_id)): Path<(String, String)>,
+    Query(query): Query<ViewQuery>,
     headers: HeaderMap,
 ) -> Response {
     let access = match require_in(&hub, &headers, slug, Role::Viewer).await {
         Ok(access) => access,
         Err(reason) => return denied(reason),
     };
-    match tokio::task::spawn_blocking(move || {
-        hub.recording_link(&access.organization.id, &recording_id)
+    let opened = tokio::task::spawn_blocking(move || {
+        hub.open_recording(&access.organization.id, &recording_id)
     })
-    .await
-    {
-        Ok(Ok(Some(link))) => (
-            StatusCode::FOUND,
-            [(LOCATION, link), (CACHE_CONTROL, "no-store".to_owned())],
-        )
-            .into_response(),
+    .await;
+    match opened {
+        Ok(Ok(Some((recording, mut reader)))) => {
+            let disposition = if query.download.is_some() {
+                "attachment"
+            } else {
+                "inline"
+            };
+            let body = streamed(move |out| std::io::copy(&mut reader, out).map(|_| ()));
+            (
+                [
+                    (CONTENT_TYPE, recording.kind.content_type().to_owned()),
+                    (
+                        CONTENT_DISPOSITION,
+                        format!("{disposition}; filename=\"{}\"", recording.file),
+                    ),
+                    (CACHE_CONTROL, "private, no-store".to_owned()),
+                    (CONTENT_SECURITY_POLICY, MEDIA_POLICY.to_owned()),
+                ],
+                body,
+            )
+                .into_response()
+        }
         Ok(Ok(None)) => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "no such recording" })),
+        )
+            .into_response(),
+        Ok(Err(error)) => {
+            tracing::error!("{error}");
+            unavailable()
+        }
+        Err(_) => unavailable(),
+    }
+}
+
+/// A file opened on its own may show itself and nothing else: no script, no outside address.
+const MEDIA_POLICY: &str = "default-src 'none'; img-src 'self'; media-src 'self'; sandbox";
+
+/// All the complete recordings of a stick in one zip, written as it is sent.
+pub(super) async fn download_recordings(
+    State(hub): State<Arc<Hub>>,
+    Path((slug, stick)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let access = match require_in(&hub, &headers, slug, Role::Viewer).await {
+        Ok(access) => access,
+        Err(reason) => return denied(reason),
+    };
+    let archive = tokio::task::spawn_blocking(move || {
+        hub.recordings_archive(&access.organization.id, &stick)
+    })
+    .await;
+    match archive {
+        Ok(Ok(Some(archive))) if !archive.is_empty() => (
+            [
+                (CONTENT_TYPE, "application/zip".to_owned()),
+                (
+                    CONTENT_DISPOSITION,
+                    "attachment; filename=\"recordings.zip\"".to_owned(),
+                ),
+                (CACHE_CONTROL, "private, no-store".to_owned()),
+            ],
+            streamed(move |out| archive.write_zip(out)),
+        )
+            .into_response(),
+        Ok(Ok(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "this stick has no recordings to download" })),
         )
             .into_response(),
         Ok(Err(error)) => {

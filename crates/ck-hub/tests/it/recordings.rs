@@ -475,23 +475,61 @@ async fn upload_calls_have_a_budget_of_their_own_that_resets_each_minute() {
     assert_eq!(code, StatusCode::OK);
 }
 
+/// The whole answer of a request: status, headers and bytes.
+async fn fetch(
+    app: &Router,
+    request: Request<Body>,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let response = app.clone().oneshot(request).await.expect("response");
+    let (parts, body) = response.into_parts();
+    let bytes = body.collect().await.expect("body").to_bytes();
+    (parts.status, parts.headers, bytes.to_vec())
+}
+
 #[tokio::test]
-async fn organizers_watch_through_a_link_and_only_their_own() {
+async fn organizers_watch_through_the_hub_and_only_their_own() {
     let s = setup(true);
-    let (id, _) = upload_whole(&s, "watch.mkv").await;
+    let (id, data) = upload_whole(&s, "watch.mkv").await;
     let viewer = cookie(&s.app, "viewer@example.org").await;
 
     let request = Request::get(format!("/api/v1/orgs/default/recordings/{id}/view"))
         .header("cookie", &viewer)
         .body(Body::empty())
         .expect("request");
-    let (code, _, location) = call(&s.app, request).await;
-    assert_eq!(code, StatusCode::FOUND);
-    let location = location.expect("a link");
-    assert!(location.contains(&format!("/stick-a/{id}")), "{location}");
-    assert!(location.contains("video%2Fx-matroska"), "{location}");
+    let (code, headers, body) = fetch(&s.app, request).await;
+    assert_eq!(code, StatusCode::OK);
+    // The bytes come from the Hub itself: no redirect, no storage address anywhere.
+    assert!(headers.get("location").is_none());
+    assert_eq!(body, data);
+    assert_eq!(headers["content-type"], "video/x-matroska");
+    assert!(
+        headers["content-disposition"]
+            .to_str()
+            .expect("text")
+            .starts_with("inline")
+    );
+    assert!(
+        headers["content-security-policy"]
+            .to_str()
+            .expect("text")
+            .contains("sandbox")
+    );
 
-    // No login, no link; and an unknown or incomplete recording has none.
+    let request = Request::get(format!(
+        "/api/v1/orgs/default/recordings/{id}/view?download=1"
+    ))
+    .header("cookie", &viewer)
+    .body(Body::empty())
+    .expect("request");
+    let (_, headers, _) = fetch(&s.app, request).await;
+    assert!(
+        headers["content-disposition"]
+            .to_str()
+            .expect("text")
+            .starts_with("attachment")
+    );
+
+    // No login, no file; and an unknown or incomplete recording has none.
     let request = Request::get(format!("/api/v1/orgs/default/recordings/{id}/view"))
         .body(Body::empty())
         .expect("request");
@@ -686,4 +724,44 @@ async fn a_chunk_body_that_never_arrives_times_out_and_frees_its_slot() {
     )
     .await;
     assert_eq!(code, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_stick_s_recordings_come_as_one_zip_for_members_only() {
+    let s = setup(true);
+    let (_, data) = upload_whole(&s, "one.mkv").await;
+    upload_whole(&s, "two.mkv").await;
+    let viewer = cookie(&s.app, "viewer@example.org").await;
+    let path = "/api/v1/orgs/default/sticks/stick-a/recordings/archive";
+
+    let request = Request::get(path)
+        .header("cookie", &viewer)
+        .body(Body::empty())
+        .expect("request");
+    let (code, headers, body) = fetch(&s.app, request).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(headers["content-type"], "application/zip");
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(body)).expect("a zip");
+    assert_eq!(zip.len(), 2);
+    let mut names: Vec<String> = zip
+        .file_names()
+        .map(|name| name.expect("a name").into_owned())
+        .collect();
+    names.sort();
+    assert!(
+        names[0].ends_with("one.mkv") && names[1].ends_with("two.mkv"),
+        "{names:?}"
+    );
+    let mut inside = Vec::new();
+    std::io::Read::read_to_end(&mut zip.by_name(&names[0]).expect("file"), &mut inside)
+        .expect("read");
+    assert_eq!(inside, data);
+
+    let request = Request::get(path).body(Body::empty()).expect("request");
+    assert_eq!(call(&s.app, request).await.0, StatusCode::UNAUTHORIZED);
+    let request = Request::get("/api/v1/orgs/default/sticks/stick-b/recordings/archive")
+        .header("cookie", &viewer)
+        .body(Body::empty())
+        .expect("request");
+    assert_eq!(call(&s.app, request).await.0, StatusCode::NOT_FOUND);
 }

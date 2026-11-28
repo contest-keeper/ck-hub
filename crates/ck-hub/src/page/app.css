@@ -579,3 +579,35 @@ td .sub { display: block; }
 #detail-dialog::backdrop { background: rgba(0, 0, 0, .45); }
 #detail-close { align-self: flex-end; }
 #who-name { overflow-wrap: anywhere; }
+
+/* The foot of the sidebar: the organization, the account, and two buttons on one row. */
+.side-foot { gap: 8px; }
+.who { padding: 6px 10px; gap: 0; min-width: 0; }
+.who b, .who span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.foot-actions { display: flex; gap: 8px; }
+.foot-actions #logout { flex: 1 1 auto; }
+.side-foot .set-btn { width: auto; }
+.side-foot .set-label { display: none; }
+.actions { display: inline-flex; gap: 12px; }
+
+/* Network tab: totals, search, and one row per site with its addresses and requests inside. */
+.tiles { display: flex; flex-wrap: wrap; gap: 10px; }
+.tile { display: flex; flex-direction: column; padding: 8px 14px; background: var(--soft); border-radius: var(--r); min-width: 96px; }
+.tile b { font-size: 20px; }
+.tile.bad b { color: var(--bad, #b3261e); }
+.net .tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.net .tools .input { flex: 1 1 220px; }
+.sites { display: flex; flex-direction: column; gap: 6px; }
+.site { border-radius: var(--r); background: var(--soft); }
+.site.refused { box-shadow: inset 3px 0 0 var(--bad, #b3261e); }
+.site-head { display: grid; grid-template-columns: 32px minmax(120px, 1.2fr) minmax(80px, 1fr) auto; gap: 12px; align-items: center; padding: 8px 12px; cursor: pointer; list-style: none; }
+.site-head::-webkit-details-marker { display: none; }
+.badge { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 8px; color: #fff; font-weight: 700; }
+.site-name { display: flex; flex-direction: column; min-width: 0; }
+.site-name > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar { display: flex; height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
+.bar .ok { background: var(--acc); }
+.bar .no { background: var(--bad, #b3261e); }
+.site-num { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+.site > .scroll, .site > .hint { margin: 0 12px 10px; }
+@media (max-width: 640px) { .site-head { grid-template-columns: 32px 1fr; } .bar, .site-num { grid-column: 2; } }

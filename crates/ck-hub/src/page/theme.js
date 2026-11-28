@@ -60,7 +60,7 @@
     gear.setAttribute("d", "M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1");
     var hub = document.createElementNS(SVG_NS, "circle");
     hub.setAttribute("cx", "12"); hub.setAttribute("cy", "12"); hub.setAttribute("r", "3");
-    icon.appendChild(hub); icon.appendChild(gear); button.appendChild(icon); button.appendChild(document.createTextNode("Settings"));
+    icon.appendChild(hub); icon.appendChild(gear); button.appendChild(icon); var label = make("span", "set-label"); label.textContent = "Settings"; button.appendChild(label); button.setAttribute("aria-label", "Settings"); button.title = "Settings";
     button.type = "button";
     button.setAttribute("aria-haspopup", "dialog");
     button.setAttribute("aria-expanded", "false");

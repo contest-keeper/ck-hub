@@ -4,6 +4,7 @@
 //! them. See `docs/superpowers/specs/2026-11-18-recordings-design.md`.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 
@@ -37,10 +38,6 @@ pub const DEFAULT_RETENTION_DAYS: i64 = 30;
 
 /// The longest retention a Hub may be set to.
 pub const MAX_RETENTION_DAYS: i64 = 365;
-
-/// How long a link to watch a recording works. Separate from the download links: a player asks for
-/// ranges while the viewer seeks, so a few minutes would break it.
-pub const VIEW_LINK_HOURS: i64 = 2;
 
 /// An upload that was started and never completed is removed after this long.
 pub const ABANDONED_DAYS: i64 = 3;
@@ -257,14 +254,12 @@ pub trait Blobs: Send + Sync {
     /// [`BlobError`] when the store did not do it.
     fn delete(&self, blob: &str) -> Result<(), BlobError>;
 
-    /// A link a browser can play `blob` from until `lifetime` has passed, shown as `content_type`.
-    fn view_link(
-        &self,
-        blob: &str,
-        content_type: &str,
-        lifetime: Duration,
-        now: OffsetDateTime,
-    ) -> Result<String, BlobError>;
+    /// The bytes of `blob`, read as they are sent on: the Hub serves recordings itself, so no
+    /// storage address ever reaches a browser.
+    ///
+    /// # Errors
+    /// [`BlobError`] when the store has no such blob or cannot be reached.
+    fn open(&self, blob: &str) -> Result<Box<dyn Read + Send>, BlobError>;
 }
 
 /// The id of block `index`: all ids of a blob must have the same length.
@@ -374,16 +369,18 @@ impl Blobs for AzureBlobs {
             .ok_or(BlobError)
     }
 
-    fn view_link(
-        &self,
-        blob: &str,
-        content_type: &str,
-        lifetime: Duration,
-        now: OffsetDateTime,
-    ) -> Result<String, BlobError> {
-        self.download
-            .sas(blob, "r", lifetime, Some(content_type), now)
-            .map_err(|_| BlobError)
+    fn open(&self, blob: &str) -> Result<Box<dyn Read + Send>, BlobError> {
+        let link = self.call_link(blob, "r")?;
+        let response = self
+            .agent
+            .get(&link)
+            .header("x-ms-version", STORAGE_VERSION)
+            .call()
+            .map_err(|_| BlobError)?;
+        if !response.status().is_success() {
+            return Err(BlobError);
+        }
+        Ok(Box::new(response.into_body().into_reader()))
     }
 }
 
@@ -460,17 +457,9 @@ impl Blobs for MemoryBlobs {
         Ok(())
     }
 
-    fn view_link(
-        &self,
-        blob: &str,
-        content_type: &str,
-        _lifetime: Duration,
-        _now: OffsetDateTime,
-    ) -> Result<String, BlobError> {
-        Ok(format!(
-            "https://blobs.invalid/{blob}?type={}",
-            encode(content_type)
-        ))
+    fn open(&self, blob: &str) -> Result<Box<dyn Read + Send>, BlobError> {
+        let bytes = self.get(blob).ok_or(BlobError)?;
+        Ok(Box::new(std::io::Cursor::new(bytes)))
     }
 }
 
@@ -795,16 +784,16 @@ impl Hub {
         Ok(Some(list.iter().map(RecordingView::from).collect()))
     }
 
-    /// A link to watch a complete recording of the organization, or `None` when there is no such
-    /// complete recording.
+    /// A complete recording of the organization, ready to be read, or `None` when there is no
+    /// such complete recording.
     ///
     /// # Errors
-    /// [`StoreError`] when the recording cannot be read.
-    pub fn recording_link(
+    /// [`StoreError`] when the recording cannot be read or its bytes cannot be opened.
+    pub fn open_recording(
         &self,
         organization: &str,
         id: &str,
-    ) -> Result<Option<String>, StoreError> {
+    ) -> Result<Option<OpenedRecording>, StoreError> {
         let Some((blobs, _)) = self.recordings.as_ref() else {
             return Ok(None);
         };
@@ -815,15 +804,39 @@ impl Hub {
         else {
             return Ok(None);
         };
-        blobs
-            .view_link(
-                &recording.blob(organization),
-                recording.kind.content_type(),
-                Duration::hours(VIEW_LINK_HOURS),
-                (self.clock)(),
-            )
-            .map(Some)
-            .map_err(|_| StoreError("no storage signing key right now".to_owned()))
+        let reader = blobs
+            .open(&recording.blob(organization))
+            .map_err(|_| StoreError("the recording cannot be read from storage".to_owned()))?;
+        Ok(Some((recording, reader)))
+    }
+
+    /// Everything needed to write all the complete recordings of a stick into one zip, or `None`
+    /// for an id that is not a stick id or a Hub with no recordings. The zip is written by
+    /// [`Archive::write_zip`], which the caller runs on a blocking thread.
+    ///
+    /// # Errors
+    /// [`StoreError`] when the list cannot be read.
+    pub fn recordings_archive(
+        &self,
+        organization: &str,
+        stick: &str,
+    ) -> Result<Option<Archive>, StoreError> {
+        let (Some((blobs, _)), Ok(id)) = (self.recordings.as_ref(), StickId::parse(stick)) else {
+            return Ok(None);
+        };
+        let list = self.store.recordings_of(organization, &id, LIST_LIMIT)?;
+        let files = list
+            .iter()
+            .filter(|r| r.is_complete())
+            .map(|r| ArchiveFile {
+                name: archive_name(r),
+                blob: r.blob(organization),
+            })
+            .collect();
+        Ok(Some(Archive {
+            blobs: Arc::clone(blobs),
+            files,
+        }))
     }
 
     /// Removes the recordings that have expired and the uploads that were never finished: the blob
@@ -855,6 +868,73 @@ impl Hub {
         }
         Ok(removed)
     }
+}
+
+/// A complete recording and its bytes, ready to be read.
+pub type OpenedRecording = (Recording, Box<dyn Read + Send>);
+
+/// One file of a stick's zip.
+struct ArchiveFile {
+    name: String,
+    blob: String,
+}
+
+/// The recordings of one stick, to be written as one zip.
+pub struct Archive {
+    blobs: Arc<dyn Blobs>,
+    files: Vec<ArchiveFile>,
+}
+
+impl Archive {
+    /// How many files the zip holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    /// Writes the zip to `out` as it reads the files, one at a time, so memory stays small and the
+    /// zip needs no seeking. Video and pictures are already compressed, so files are only stored.
+    ///
+    /// # Errors
+    /// An error when `out` stops taking bytes (the person left) or a file cannot be read.
+    pub fn write_zip(&self, out: impl std::io::Write) -> std::io::Result<()> {
+        let mut zip = zip::ZipWriter::new_stream(out);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .large_file(true);
+        for file in &self.files {
+            let mut reader = self
+                .blobs
+                .open(&file.blob)
+                .map_err(|_| std::io::Error::other("a recording could not be read"))?;
+            zip.start_file(file.name.as_str(), options)
+                .map_err(std::io::Error::other)?;
+            std::io::copy(&mut reader, &mut zip)?;
+        }
+        zip.finish().map_err(std::io::Error::other)?;
+        Ok(())
+    }
+}
+
+/// The name of a recording inside the zip: when it was made, then the file name the stick gave
+/// (which is plain letters, digits, dots, dashes and underscores), so two files never clash.
+fn archive_name(recording: &Recording) -> String {
+    let when = recording.started_at.unwrap_or(recording.created_at);
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}-{}",
+        when.year(),
+        u8::from(when.month()),
+        when.day(),
+        when.hour(),
+        when.minute(),
+        when.second(),
+        recording.file
+    )
 }
 
 #[cfg(test)]
