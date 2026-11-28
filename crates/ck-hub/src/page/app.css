@@ -575,6 +575,7 @@ td .sub { display: block; }
   #rows tr.flag { background: var(--warn-bg); }
 }
 #detail-dialog { width: min(920px, 94vw); max-height: 90vh; overflow: auto; border: 0; color: inherit; }
+#detail-dialog:not([open]) { display: none; }
 #detail-dialog::backdrop { background: rgba(0, 0, 0, .45); }
 #detail-close { align-self: flex-end; }
 #who-name { overflow-wrap: anywhere; }
