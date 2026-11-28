@@ -184,7 +184,6 @@ function bytesText(n) {
 // What each stick's proxy carried and refused, fetched when its details are open and again when
 // the stick reports more.
 const histories = new Map();
-const onlyRefused = new Set();
 
 async function fetchHistory(stick) {
   const before = histories.get(stick.stick_id);
@@ -343,6 +342,47 @@ function proofPanel(stick) {
   return box;
 }
 
+// What the admin typed and chose in a stick's Network tab, kept because the tab is drawn again at every refresh.
+const netViews = new Map();
+
+function netViewOf(stick) {
+  let view = netViews.get(stick.stick_id);
+  if (!view) {
+    view = { q: "", filter: "all", open: new Set() };
+    netViews.set(stick.stick_id, view);
+  }
+  return view;
+}
+
+// shortcut: the site of a host is its last two labels, which is wrong for names like example.co.uk (they
+// show as "co.uk"); upgrade with a public suffix list if that matters.
+function siteOf(host) {
+  const labels = (host || "").split(".");
+  return labels.length > 2 ? labels.slice(-2).join(".") : host || "—";
+}
+
+// A badge in place of the site's icon: fetching icons would tell a third party which sites the contest uses,
+// and the page may not load outside images.
+function siteBadge(site) {
+  let hash = 0;
+  for (const ch of site) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+  const badge = el("span", "badge", (site[0] || "?").toUpperCase());
+  badge.style.background = "hsl(" + (hash % 360) + " 50% 40%)";
+  badge.setAttribute("aria-hidden", "true");
+  return badge;
+}
+
+function plural(n, one, many) {
+  return n + " " + (n === 1 ? one : many);
+}
+
+function netTile(value, label, bad) {
+  const tile = el("div", "tile" + (bad ? " bad" : ""));
+  tile.appendChild(el("b", "", value));
+  tile.appendChild(el("span", "muted", label));
+  return tile;
+}
+
 function networkPanel(stick) {
   const box = el("div", "net");
   if (!stick.network_requests) {
@@ -356,35 +396,102 @@ function networkPanel(stick) {
     return box;
   }
   const data = cached.data;
-  box.appendChild(el("p", "", data.requests + " requests, " + data.blocked + " refused, " + bytesText(data.bytes) + " carried. " + data.hidden + " background requests (files a page loads, tunnels, browser traffic) are not listed."));
+  const view = netViewOf(stick);
 
-  box.appendChild(table(["Site", "Requests", "Refused", "Data"],
-    data.hosts.map((h) => [[h.host || "—", String(h.requests), String(h.blocked), bytesText(h.bytes)], h.blocked ? "refused" : ""])));
+  const tiles = el("div", "tiles");
+  tiles.appendChild(netTile(String(data.requests), "requests"));
+  tiles.appendChild(netTile(String(data.blocked), "refused", data.blocked > 0));
+  tiles.appendChild(netTile(bytesText(data.bytes), "carried"));
+  box.appendChild(tiles);
 
-  const tools = el("label", "tools");
-  const check = el("input");
-  check.type = "checkbox";
-  check.checked = onlyRefused.has(stick.stick_id);
-  check.addEventListener("change", () => {
-    if (check.checked) onlyRefused.add(stick.stick_id); else onlyRefused.delete(stick.stick_id);
-    render();
-  });
-  tools.appendChild(check);
-  tools.appendChild(el("span", "", "Only refused requests"));
-  box.appendChild(tools);
-  const shown = data.entries.filter((e) => !check.checked || e.blocked);
-  box.appendChild(table(["Time", "Address", "Method", "Answer", "Data", "Took"],
-    shown.map((e) => [[
-      new Date(e.t * 1000).toLocaleTimeString(),
-      e.host + e.path + (e.count > 1 ? "  x" + e.count : ""),
-      e.method,
-      e.blocked ? "refused" : String(e.status),
-      bytesText(e.bytes),
-      e.ms + " ms",
-    ], e.blocked ? "refused" : ""])));
-  if (data.requests > data.entries.length) {
-    box.appendChild(el("p", "hint", "The newest " + data.entries.length + " requests are listed. The totals count all of them."));
+  // Sites: every host under the site it belongs to, with the stick's requests to it.
+  const sites = new Map();
+  for (const h of data.hosts) {
+    const name = siteOf(h.host);
+    let site = sites.get(name);
+    if (!site) { site = { name, requests: 0, blocked: 0, bytes: 0, hosts: [], entries: [] }; sites.set(name, site); }
+    site.requests += h.requests; site.blocked += h.blocked; site.bytes += h.bytes; site.hosts.push(h);
   }
+  for (const e of data.entries) {
+    const site = sites.get(siteOf(e.host));
+    if (site) site.entries.push(e);
+  }
+
+  const tools = el("div", "tools");
+  const search = el("input", "input");
+  search.type = "search";
+  search.placeholder = "Search a site or an address";
+  search.value = view.q;
+  search.dataset.key = "net:q";
+  search.setAttribute("aria-label", "Search sites and addresses");
+  search.addEventListener("input", () => { view.q = search.value; render(); });
+  tools.appendChild(search);
+  for (const [id, label] of [["all", "All"], ["refused", "Refused (" + data.blocked + ")"]]) {
+    const chip = el("button", "chip", label);
+    chip.type = "button";
+    chip.setAttribute("aria-pressed", String(view.filter === id));
+    chip.dataset.key = "net:" + id;
+    chip.addEventListener("click", () => { view.filter = id; render("net:" + id); });
+    tools.appendChild(chip);
+  }
+  box.appendChild(tools);
+
+  const q = view.q.trim().toLowerCase();
+  const refusedOnly = view.filter === "refused";
+  const shown = [...sites.values()]
+    .map((site) => {
+      const siteHit = !q || site.name.includes(q) || site.hosts.some((h) => (h.host || "").includes(q));
+      const entries = site.entries.filter((e) =>
+        (!refusedOnly || e.blocked) && (siteHit || (e.host + e.path).toLowerCase().includes(q)));
+      return { site, entries, hit: (siteHit || entries.length > 0) && (!refusedOnly || site.blocked > 0) };
+    })
+    .filter((x) => x.hit)
+    .sort((a, b) => b.site.blocked - a.site.blocked || b.site.requests - a.site.requests);
+
+  const list = el("div", "sites");
+  for (const { site, entries } of shown) {
+    const open = view.open.has(site.name) || (q !== "" && entries.length > 0);
+    const group = el("details", "site" + (site.blocked ? " refused" : ""));
+    group.open = open;
+    group.addEventListener("toggle", () => { if (group.open) view.open.add(site.name); else view.open.delete(site.name); });
+    const head = el("summary", "site-head");
+    head.appendChild(siteBadge(site.name));
+    const title = el("span", "site-name");
+    title.appendChild(el("b", "", site.name));
+    title.appendChild(el("span", "muted", site.hosts.length > 1 ? plural(site.hosts.length, "address", "addresses") : (site.hosts[0].host || "")));
+    head.appendChild(title);
+    const bar = el("span", "bar");
+    const ok = el("i", "ok");
+    ok.style.width = Math.max(2, Math.round(100 * (site.requests - site.blocked) / Math.max(1, data.requests))) + "%";
+    bar.appendChild(ok);
+    if (site.blocked) {
+      const no = el("i", "no");
+      no.style.width = Math.max(2, Math.round(100 * site.blocked / Math.max(1, data.requests))) + "%";
+      bar.appendChild(no);
+    }
+    head.appendChild(bar);
+    head.appendChild(el("span", "site-num", plural(site.requests, "request", "requests") + (site.blocked ? ", " + site.blocked + " refused" : "") + " · " + bytesText(site.bytes)));
+    group.appendChild(head);
+    if (entries.length) {
+      group.appendChild(table(["Time", "Address", "Answer", "Data"],
+        entries.map((e) => [[
+          new Date(e.t * 1000).toLocaleTimeString(),
+          e.host + e.path + (e.count > 1 ? "  x" + e.count : ""),
+          e.blocked ? "Refused" : "Allowed (" + e.status + ")",
+          bytesText(e.bytes),
+        ], e.blocked ? "refused" : ""])));
+    } else {
+      group.appendChild(el("p", "hint", refusedOnly ? "Nothing refused in the newest requests." : "No recent request is listed for this site."));
+    }
+    list.appendChild(group);
+  }
+  if (!shown.length) list.appendChild(el("p", "muted", "No site matches."));
+  box.appendChild(list);
+
+  const notes = [];
+  if (data.hidden) notes.push(plural(data.hidden, "background request", "background requests") + " (files a page loads, tunnels, browser traffic) are not listed.");
+  if (data.requests > data.entries.length) notes.push("Only the newest " + data.entries.length + " requests are listed; the totals count all of them.");
+  if (notes.length) box.appendChild(el("p", "hint", notes.join(" ")));
   return box;
 }
 
@@ -640,10 +747,26 @@ function recordingPanel(stick) {
     box.appendChild(el("p", "muted", "No recordings."));
     return box;
   }
+  const recordingUrl = (r) => "/api/v1/orgs/" + encodeURIComponent(org) + "/recordings/" + encodeURIComponent(r.id) + "/view";
   const watch = (r) => {
     if (!r.complete) return document.createTextNode("uploading " + r.chunks_received + " of " + r.chunks_total);
-    return link("Watch", "/api/v1/orgs/" + encodeURIComponent(org) + "/recordings/" + encodeURIComponent(r.id) + "/view");
+    const cell = el("span", "actions");
+    cell.appendChild(link("Watch", recordingUrl(r)));
+    // Saved by the browser, not opened in a tab: the Hub sends it with a download name.
+    const save = link("Save", recordingUrl(r) + "?download=1");
+    save.removeAttribute("target");
+    save.download = r.file;
+    cell.appendChild(save);
+    return cell;
   };
+  const ready = cached.data.filter((r) => r.complete);
+  if (ready.length) {
+    const all = link("Download all (" + ready.length + " files, .zip)", "/api/v1/orgs/" + encodeURIComponent(org) + "/sticks/" + encodeURIComponent(stick.stick_id) + "/recordings/archive");
+    all.removeAttribute("target");
+    all.className = "btn sm";
+    all.download = "recordings.zip";
+    box.appendChild(all);
+  }
   box.appendChild(proofTable(["Time", "File", "Kind", "Length", "Size", "Kept until", ""],
     cached.data.map((r) => [[
       new Date(r.started_at || r.created_at).toLocaleString(),
@@ -1386,7 +1509,9 @@ async function refresh() {
     myEmail = account.email;
     document.getElementById("org-name").textContent = current ? current.name : "No organization yet";
     document.getElementById("org-name").hidden = orgs.length > 1;
-    document.getElementById("who-name").textContent = account.email + (current ? " · " + capital(current.role) : "");
+    const who = account.email + (current ? " · " + capital(current.role) : "");
+    document.getElementById("who-name").textContent = who;
+    document.getElementById("who-name").title = who;
     document.getElementById("nav-people").hidden = !(myRole === "owner" || myRole === "admin" || account.staff === true);
     show(page);
     if (page === "forge") {

@@ -62,7 +62,8 @@ use organizations::{
 };
 use profiles::{list_profiles, profile_wallpaper, read_profile, remove_profile, save_profile};
 use recordings::{
-    complete_upload, put_chunk, recordings_of, start_upload, upload_status, view_recording,
+    complete_upload, download_recordings, put_chunk, recordings_of, start_upload, upload_status,
+    view_recording,
 };
 use reports::{event, heartbeat};
 use sticks::{
@@ -152,6 +153,10 @@ pub fn router(hub: Arc<Hub>) -> Router {
             get(recordings_of),
         )
         .route(
+            "/api/v1/orgs/{slug}/sticks/{id}/recordings/archive",
+            get(download_recordings),
+        )
+        .route(
             "/api/v1/orgs/{slug}/recordings/{recording_id}/view",
             get(view_recording),
         )
@@ -223,13 +228,16 @@ pub fn router(hub: Arc<Hub>) -> Router {
 /// may load (no inline script or style either), and no other site may put it in a frame.
 async fn security_headers(mut response: Response) -> Response {
     let headers = response.headers_mut();
-    headers.insert(
-        "content-security-policy",
-        "default-src 'none'; script-src 'self'; style-src 'self'; \
-         connect-src 'self'; frame-ancestors 'none'"
-            .parse()
-            .expect("a valid header"),
-    );
+    // A route that serves a file on its own sets a policy for it; every other answer gets the page's.
+    if !headers.contains_key("content-security-policy") {
+        headers.insert(
+            "content-security-policy",
+            "default-src 'none'; script-src 'self'; style-src 'self'; \
+             connect-src 'self'; frame-ancestors 'none'"
+                .parse()
+                .expect("a valid header"),
+        );
+    }
     headers.insert("x-content-type-options", "nosniff".parse().expect("valid"));
     headers.insert("x-frame-options", "DENY".parse().expect("valid"));
     response

@@ -81,7 +81,7 @@ pub use profiles::{
 pub use recordings::{
     ABANDONED_DAYS, AzureBlobs, BlobError, Blobs, CHUNK_BYTES, DEFAULT_RETENTION_DAYS, Kind,
     MAX_CHUNKS_PER_MINUTE, MAX_FILE_BYTES, MAX_RETENTION_DAYS, MAX_STICK_BYTES, MemoryBlobs,
-    Recording, RecordingError, RecordingView, UploadStatus, VIEW_LINK_HOURS, block_id,
+    Recording, RecordingError, RecordingView, UploadStatus, block_id,
 };
 pub use register::{NewStick, RegisterError, Registered, register_sticks};
 pub use registry::{Registry, RegistryError};
