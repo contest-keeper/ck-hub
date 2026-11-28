@@ -17,6 +17,7 @@ use axum::routing::get;
 use ck_protocol::{HEARTBEAT_PATH, SIGNATURE_HEADER, STICK_HEADER, StickId};
 use time::OffsetDateTime;
 use tokio::sync::Semaphore;
+use tokio::time::timeout;
 
 use crate::inbox::Inbox;
 use crate::routes::{EVENTS_PATH, MAX_BODY_BYTES};
@@ -35,6 +36,13 @@ const HUB_WAIT_FOR_STATUS: Duration = Duration::from_secs(20);
 /// The largest body the Hub takes is a profile with its wallpaper, under 8 MiB.
 const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 const MAX_ANSWER_BYTES: u64 = 64 * 1024 * 1024;
+/// How long a request may wait for room for its body, and then take to send it. A client that sends
+/// slowly holds that room, so neither is endless. A report's are inside the stick's 5 seconds.
+const REPORT_BODY_WAIT: Duration = Duration::from_secs(2);
+const ROOM_WAIT: Duration = Duration::from_secs(30);
+const BODY_WAIT: Duration = Duration::from_secs(300);
+/// Room of their own for reports, so large uploads cannot keep them out, in KiB.
+const REPORT_BUDGET_KIB: u32 = 16 * 1024;
 /// How much of the memory request bodies may use at once, in KiB.
 const BODY_BUDGET_KIB: u32 = 64 * 1024;
 /// Messages one address may have queued in a minute: 500 sticks behind one venue's address send
@@ -60,6 +68,7 @@ pub struct Ingress {
     secret: String,
     agent: ureq::Agent,
     bodies: Semaphore,
+    report_bodies: Semaphore,
     /// Per client address: when the current minute started and what it queued in it.
     queued: Mutex<HashMap<String, (Instant, u32)>>,
     pub(crate) status: Status,
@@ -85,6 +94,7 @@ impl Ingress {
             secret,
             agent,
             bodies: Semaphore::new(BODY_BUDGET_KIB as usize),
+            report_bodies: Semaphore::new(REPORT_BUDGET_KIB as usize),
             queued: Mutex::new(HashMap::new()),
             status: Status::new(status_url),
         });
@@ -281,10 +291,11 @@ async fn forward(State(ingress): State<Arc<Ingress>>, request: Request) -> Respo
     }
 
     // A report is small; anything else says its size, or is counted as the largest.
-    let limit = if path == HEARTBEAT_PATH || path == EVENTS_PATH {
-        MAX_BODY_BYTES
+    let (budget, limit, room_wait, body_wait) = if path == HEARTBEAT_PATH || path == EVENTS_PATH {
+        let wait = REPORT_BODY_WAIT;
+        (&ingress.report_bodies, MAX_BODY_BYTES, wait, wait)
     } else {
-        MAX_REQUEST_BYTES
+        (&ingress.bodies, MAX_REQUEST_BYTES, ROOM_WAIT, BODY_WAIT)
     };
     let announced = axum::body::HttpBody::size_hint(&body)
         .upper()
@@ -294,11 +305,13 @@ async fn forward(State(ingress): State<Arc<Ingress>>, request: Request) -> Respo
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
     let kib = u32::try_from(announced.div_ceil(1024)).unwrap_or(BODY_BUDGET_KIB);
-    let Ok(_room) = ingress.bodies.acquire_many(kib).await else {
+    let Ok(Ok(_room)) = timeout(room_wait, budget.acquire_many(kib)).await else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let Ok(body): Result<Bytes, _> = axum::body::to_bytes(body, limit).await else {
-        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    let body: Bytes = match timeout(body_wait, axum::body::to_bytes(body, limit)).await {
+        Ok(Ok(body)) => body,
+        Ok(Err(_)) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+        Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
     };
     let worker = Arc::clone(&ingress);
     let method = parts.method;

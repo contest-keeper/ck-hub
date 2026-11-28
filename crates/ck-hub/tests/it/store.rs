@@ -2128,6 +2128,19 @@ fn late_arrival_contract(store: &dyn Store) {
     assert_eq!(seen.heartbeat.boot_id, "second");
     assert_eq!(seen.received_at, time(20));
     assert_eq!(seen.count, 2);
+
+    for at in [5, 30] {
+        store
+            .saw_boot(&org, &stick, "second", time(at))
+            .expect("seen");
+    }
+    let span = store
+        .boot_spans(&org, &stick, time(0))
+        .expect("spans")
+        .into_iter()
+        .find(|span| span.boot_id == "second")
+        .expect("the boot");
+    assert_eq!((span.first_seen, span.last_seen), (time(5), time(30)));
 }
 
 #[test]

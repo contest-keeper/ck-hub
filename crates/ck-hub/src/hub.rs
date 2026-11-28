@@ -408,10 +408,17 @@ impl Hub {
         let _one_at_a_time = self.write_lock(&id);
         let seq = heartbeat.seq;
         let screen_unlock = heartbeat.screen_unlock;
+        let boot = heartbeat.boot_id.clone();
         if let Some(top) = self
             .store
             .record_heartbeat(&organization, heartbeat, received_at)?
         {
+            // Not newer, but from the queue it still says the boot was alive then, which is what
+            // shows one stick running in two places.
+            if queued_at.is_some() {
+                self.store
+                    .saw_boot(&organization, &id, &boot, received_at)?;
+            }
             return Err(Rejection::Conflict(format!(
                 "sequence {seq} is not newer than {top}"
             )));

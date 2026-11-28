@@ -61,7 +61,8 @@ pub(crate) struct Status {
     hours: Mutex<(BTreeMap<i64, Hour>, bool)>,
     /// The blob the history is kept in.
     url: Option<String>,
-    probe: Mutex<Option<(Instant, bool)>>,
+    /// An async lock: viewers waiting for one answer hold no thread, which reports need.
+    probe: tokio::sync::Mutex<Option<(Instant, bool)>>,
     /// A history that could not be read is not overwritten.
     unread: Mutex<bool>,
 }
@@ -75,7 +76,7 @@ impl Status {
         Self {
             hours: Mutex::new((BTreeMap::new(), false)),
             url,
-            probe: Mutex::new(None),
+            probe: tokio::sync::Mutex::new(None),
             unread: Mutex::new(false),
         }
     }
@@ -200,25 +201,24 @@ fn write(url: &str, identity: &Inbox, body: &[u8]) -> Result<(), String> {
 
 /// Whether the Hub answers, asked at most once in [`PROBE_REUSED`].
 async fn hub_up(ingress: Arc<Ingress>) -> bool {
-    tokio::task::spawn_blocking(move || {
-        // Held while asking, so many viewers at once cause one request.
-        let mut probe = ingress.status.probe.lock().expect("probe lock");
-        if let Some((at, up)) = *probe
-            && at.elapsed() < PROBE_REUSED
-        {
-            return up;
-        }
-        let up = ingress.hub_answers();
-        *probe = Some((Instant::now(), up));
-        if !up {
-            ingress
-                .status
-                .count(OffsetDateTime::now_utc(), Outcome::Queued);
-        }
-        up
-    })
-    .await
-    .unwrap_or(false)
+    // Held while asking, so many viewers at once cause one request.
+    let mut probe = ingress.status.probe.lock().await;
+    if let Some((at, up)) = *probe
+        && at.elapsed() < PROBE_REUSED
+    {
+        return up;
+    }
+    let asked = Arc::clone(&ingress);
+    let up = tokio::task::spawn_blocking(move || asked.hub_answers())
+        .await
+        .unwrap_or(false);
+    *probe = Some((Instant::now(), up));
+    if !up {
+        ingress
+            .status
+            .count(OffsetDateTime::now_utc(), Outcome::Queued);
+    }
+    up
 }
 
 fn rfc3339(at: OffsetDateTime) -> String {

@@ -11,6 +11,24 @@ use super::{
 };
 
 impl Store for PostgresStore {
+    fn saw_boot(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        boot: &str,
+        at: OffsetDateTime,
+    ) -> Result<(), StoreError> {
+        self.in_org(organization, |transaction| {
+            transaction.execute(
+                "UPDATE heartbeat_boots
+                 SET first_seen = LEAST(first_seen, $4), last_seen = GREATEST(last_seen, $4)
+                 WHERE organization_id = $1 AND stick_id = $2 AND boot_id = $3",
+                &[&organization, &stick.as_str(), &boot, &at],
+            )
+        })
+        .map(|_| ())
+    }
+
     fn record_heartbeat(
         &self,
         organization: &str,

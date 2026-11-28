@@ -188,6 +188,26 @@ impl MemoryStore {
 }
 
 impl Store for MemoryStore {
+    fn saw_boot(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        boot: &str,
+        at: OffsetDateTime,
+    ) -> Result<(), StoreError> {
+        let key = (organization.to_owned(), stick.clone(), boot.to_owned());
+        if let Some((first, last)) = self
+            .boot_times
+            .lock()
+            .expect("boot times lock")
+            .get_mut(&key)
+        {
+            *first = (*first).min(at);
+            *last = (*last).max(at);
+        }
+        Ok(())
+    }
+
     fn record_heartbeat(
         &self,
         organization: &str,

@@ -238,3 +238,33 @@ async fn a_browser_signs_in_through_the_proxy() {
     );
     assert_eq!(send(&hub, login("a guess")).await.0, StatusCode::FORBIDDEN);
 }
+
+/// A body that never arrives.
+struct Stalled;
+
+impl http_body::Body for Stalled {
+    type Data = Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+        std::task::Poll::Pending
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_that_sends_nothing_does_not_keep_its_room() {
+    let seen = Shared::default();
+    let proxy = proxy("http://127.0.0.1:9", &queue(seen).await).await;
+    let request = Request::post("/api/v1/events")
+        .body(Body::new(Stalled))
+        .expect("request");
+    assert_eq!(send(&proxy, request).await.0, StatusCode::REQUEST_TIMEOUT);
+    // Room was given back: the next report is taken.
+    assert_eq!(
+        send(&proxy, report("/api/v1/events")).await.0,
+        StatusCode::ACCEPTED
+    );
+}

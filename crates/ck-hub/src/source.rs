@@ -129,7 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn the_proxys_headers_count_only_with_its_secret() {
+    fn the_headers_of_the_proxy_count_only_with_its_secret() {
         let proxied = |secret: &str| {
             let mut map = HeaderMap::new();
             for (name, value) in [

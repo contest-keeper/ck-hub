@@ -238,6 +238,16 @@ pub enum Removal {
 
 /// Every method fails with [`StoreError`] when the data cannot be read or written.
 pub trait Store: Send + Sync {
+    /// Widens when a boot was heard from, for a heartbeat that came late through the queue and is
+    /// older than one already recorded.
+    fn saw_boot(
+        &self,
+        organization: &str,
+        stick: &StickId,
+        boot: &str,
+        at: OffsetDateTime,
+    ) -> Result<(), StoreError>;
+
     /// Accepts a newer sequence for its boot, keeps it as the stick's latest heartbeat and counts
     /// it atomically. Returns the highest sequence of that boot when the heartbeat is a replay.
     fn record_heartbeat(
